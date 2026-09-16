@@ -2010,6 +2010,7 @@ export class SagittariusEngine {
       refreshGameClock: (q, options) => this.refreshGameClockForQuote(q, options),
       onHunterOpened: (entry) => {
         if (!entry?.ticker) return;
+        this.rememberCosmosBookEntry?.(entry);
         this.protectedTickers.add(entry.ticker);
         this.profitGuard?.registerInfinityBreakFastWake?.(entry,this.settings);
         this.invalidateStateSnapshot();
@@ -3062,7 +3063,17 @@ export class SagittariusEngine {
     return Number(simulationPortfolioCents||0);
   }
 
-  collectConstellationOverview() {
+  rememberCosmosBookEntry(entry) {
+    const id=normalizeCosmosId(entry?.systemName);
+    if(!id || !this.isConstellationOverviewHunter(entry)) return false;
+    this.cosmosBooks=this.cosmosBooks||emptyCosmosBooks();
+    const rows=isolateBook(this.cosmosBooks[id]||[],id);
+    this.cosmosBooks[id]=[...rows.filter((row)=>String(row?.id||'')!==String(entry.id||'')), entry];
+    return true;
+  }
+
+  collectConstellationOverview(liveRows=[]) {
+    for(const row of liveRows||[]) this.rememberCosmosBookEntry(row);
     const rooms=[];
     for(const id of COSMOS_IDS){
       const entries=isolateBook(this.cosmosBooks?.[id]||[],id).filter((row)=>this.isConstellationOverviewHunter(row));
@@ -4762,7 +4773,7 @@ export class SagittariusEngine {
         feederUnrealizedCents: p.feederUnrealizedCents,
         simulationCashCents: p.simulationCashCents,
       },
-      conceptStats, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-R1-CRYSTAL-WALL-LEADING-EVENT-CLOCK',anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.()||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
+      conceptStats, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-R1-CRYSTAL-WALL-LEADING-EVENT-CLOCK',anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.([...(p.open||[]),...(p.closed||[])])||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
       trackedMarkets: trackers, trackerSummary, patterns, recoveryTracking, sports,
       crashLearning, crashEpisodes, profitLearning, stopGuardRecoveryLearning, athena, atomicThunderBolt, infinityBreak, legacyAtomicThunder:{ version:ATOMIC_THUNDER.version, policyRevision:ATOMIC_THUNDER.policyRevision, legacyCompatibilityOnly:true, ...atomicThunder }, goldenEye:this.goldenEye?.summary?.() || {version:GOLDEN_EYE.version,ready:false,enabled:false},
       liveMarkets: scanned,

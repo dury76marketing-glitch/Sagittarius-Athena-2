@@ -515,3 +515,27 @@ test('TC1 saint subset patch writes only the chosen attack onto selected rooms',
   assert.equal(rows.LEO.athenaExclamationMinUpwardTicks, 4);
   assert.equal(rows.ARIES, undefined);
 });
+
+
+test('TC1 overview counts a live SAGITTARIUS hunter immediately', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = originalSettings();
+  engine.cosmosBooks = Object.fromEntries(['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES'].map((id)=>[id,[]]));
+  engine.cosmosWindowById = Object.fromEntries(['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES'].map((id)=>[id,{minGameMinutes:1,maxGameMinutes:240}]));
+  engine.constellation = { displayName(id){return id[0]+id.slice(1).toLowerCase();} };
+  const hunter = { id:'ae-1', systemName:'SAGITTARIUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXKBOGAME-26SEP160530SSGLOT-LOT', pnlCents:0 };
+  const rooms = engine.collectConstellationOverview([hunter]);
+  const sag = rooms.find((row)=>row.id==='SAGITTARIUS');
+  const aries = rooms.find((row)=>row.id==='ARIES');
+  assert.equal(sag.open, 1);
+  assert.equal(aries.open, 0);
+});
+
+test('TC1 open and closed tables name the cosmos', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="openHunterBody"'));
+  assert.ok(html.includes('id="closedBody"'));
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes('function cosmosName'));
+  assert.ok(app.includes('cosmosName(e)'));
+});
