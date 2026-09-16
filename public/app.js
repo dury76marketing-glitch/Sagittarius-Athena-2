@@ -122,8 +122,13 @@ function renderTwelveCosmos(s){
   if(st){st.textContent=`${(s.constellationOverview||[]).length||12} rooms`;st.className='pill green';}
   const hostOn=s.settings?.andromedaThunderWaveEnabled===true;
   const hostLevel=String(s.settings?.andromedaThunderWaveLevel||'HIGH').toUpperCase();
+  const level=hostOn?(hostLevel==='MID'||hostLevel==='MEDIUM'?'MID':hostLevel==='LOW'?'LOW':'HIGH'):'HIGH';
   if($('subsetAndromedaEnabled')) $('subsetAndromedaEnabled').value=hostOn?'on':'off';
-  if($('subsetAndromedaLevel')) $('subsetAndromedaLevel').value=hostLevel==='MID'||hostLevel==='MEDIUM'?'MID':hostLevel==='LOW'?'LOW':'HIGH';
+  if($('subsetAndromedaLevel')) $('subsetAndromedaLevel').value=level;
+  if($('andromedaStatus')){
+    $('andromedaStatus').textContent=hostOn?`ON ${level}`:'OFF';
+    $('andromedaStatus').className=`pill ${hostOn?'amber':'red'}`;
+  }
   const editor=$('cosmosEditor');
   const active=currentCosmosId();
   ACTIVE_COSMOS=active;

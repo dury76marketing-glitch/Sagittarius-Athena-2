@@ -155,3 +155,14 @@ test('Crystal Wall subset still requires ticks and Andromeda apply ignores those
   assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
   assert.equal(cw.includes('andromedaThunderWaveEnabled'), false);
 });
+
+test('syncCosmosWindowsFromSettings keeps Andromeda on the room cache after a host save', async () => {
+  const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
+  assert.ok(engine.includes('andromedaSnapshotFromSettings'));
+  assert.ok(engine.includes('...andromeda'));
+  assert.ok(app.includes('andromedaStatus'));
+  assert.ok(html.includes('id="andromedaStatus"'));
+  assert.ok(app.includes("hostOn?'on':'off'"));
+});

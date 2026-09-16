@@ -2979,10 +2979,24 @@ export class SagittariusEngine {
   }
 
 
+  andromedaSnapshotFromSettings(settings){
+    const enabled=settings?.andromedaThunderWaveEnabled===true;
+    const raw=String(settings?.andromedaThunderWaveLevel||'HIGH').trim().toUpperCase();
+    return {
+      andromedaThunderWaveEnabled:enabled,
+      andromedaThunderWaveLevel:enabled?(raw==='MID'||raw==='MEDIUM'?'MID':raw==='LOW'?'LOW':'HIGH'):'HIGH',
+    };
+  }
+
   syncCosmosWindowsFromSettings(settings) {
     const minGameMinutes=Math.max(0,Number(settings?.minGameMinutes||0));
     const maxGameMinutes=Math.max(0,Number(settings?.maxGameMinutes||0));
-    this.cosmosWindowById=Object.fromEntries(COSMOS_IDS.map((id)=>[id,{minGameMinutes,maxGameMinutes}]));
+    const andromeda=this.andromedaSnapshotFromSettings(settings);
+    this.cosmosWindowById=Object.fromEntries(COSMOS_IDS.map((id)=>[id,{
+      minGameMinutes,
+      maxGameMinutes,
+      ...andromeda,
+    }]));
   }
 
   setCosmosWindow(id, settings) {
@@ -3130,8 +3144,10 @@ export class SagittariusEngine {
         pnlCents:closed.reduce((sum,row)=>sum+Number(row.pnlCents||0),0),
         minGameMinutes:Number(window.minGameMinutes||0),
         maxGameMinutes:Number(window.maxGameMinutes||0),
-        andromedaThunderWaveEnabled:window.andromedaThunderWaveEnabled===true,
-        andromedaThunderWaveLevel:window.andromedaThunderWaveEnabled===true?String(window.andromedaThunderWaveLevel||'HIGH'):'HIGH',
+        ...this.andromedaSnapshotFromSettings({
+          andromedaThunderWaveEnabled:window.andromedaThunderWaveEnabled===true||this.settings?.andromedaThunderWaveEnabled===true,
+          andromedaThunderWaveLevel:window.andromedaThunderWaveLevel||this.settings?.andromedaThunderWaveLevel,
+        }),
       });
     }
     return rooms;
