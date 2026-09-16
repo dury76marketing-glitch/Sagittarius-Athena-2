@@ -634,7 +634,7 @@ export class Database {
         snapshot=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.snapshot else sag_athena_exclamation_votes_v1.snapshot end`,[
       v.systemName,v.ticker,v.eventTicker,v.conceptName,v.firstQualifiedAtMs,v.lastQualifiedAtMs,v.refreshCount||0,
       Math.round(Number(v.priceCents||0)),Math.round(Number(v.bidCents||0)),v.sourceFeeder||null,v.sourceTradeId||null,
-      v.gameMinutes==null?null:Number(v.gameMinutes),v.snapshot||{}
+      v.gameMinutes==null?null:Number(v.gameMinutes),JSON.stringify(v.snapshot||{})
     ]);
   }
   async recentAthenaExclamationVotes(systemName,sinceMs=0){
@@ -648,12 +648,13 @@ export class Database {
   async insertAthenaExclamationEvent(e){
     const r=await this.pool.query(`insert into sag_athena_exclamation_events_v1(id,system_name,ticker,event_ticker,status,created_at_ms,first_vote_at_ms,third_vote_at_ms,expires_at_ms,convergence_span_ms,saint_count,saints,combination,review,entry_id,decided_at_ms)
       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) on conflict(id) do nothing`,[
-      e.id,e.systemName,e.ticker,e.eventTicker,e.status,e.createdAtMs,e.firstVoteAtMs,e.thirdVoteAtMs,e.expiresAtMs,e.convergenceSpanMs,e.saintCount,e.saints||[],e.combination||[],e.review||null,e.entryId||null,e.decidedAtMs||null
+      e.id,e.systemName,e.ticker,e.eventTicker,e.status,e.createdAtMs,e.firstVoteAtMs,e.thirdVoteAtMs,e.expiresAtMs,e.convergenceSpanMs,e.saintCount,
+      JSON.stringify(e.saints||[]),JSON.stringify(e.combination||[]),e.review==null?null:JSON.stringify(e.review),e.entryId||null,e.decidedAtMs||null
     ]);
     return (r.rowCount||0)>0;
   }
   async updateAthenaExclamationEvent(id,e){
-    await this.pool.query(`update sag_athena_exclamation_events_v1 set status=$2,review=$3,entry_id=$4,decided_at_ms=$5,saint_count=$6,saints=$7,combination=$8 where id=$1`,[id,e.status,e.review||null,e.entryId||null,e.decidedAtMs||null,e.saintCount||0,e.saints||[],e.combination||[]]);
+    await this.pool.query(`update sag_athena_exclamation_events_v1 set status=$2,review=$3,entry_id=$4,decided_at_ms=$5,saint_count=$6,saints=$7,combination=$8 where id=$1`,[id,e.status,e.review==null?null:JSON.stringify(e.review),e.entryId||null,e.decidedAtMs||null,e.saintCount||0,JSON.stringify(e.saints||[]),JSON.stringify(e.combination||[])]);
   }
   async recentAthenaExclamationEvents(systemName,sinceMs=0){
     const r=await this.pool.query(`select * from sag_athena_exclamation_events_v1 where system_name=$1 and created_at_ms >= $2 order by created_at_ms asc`,[systemName,sinceMs]);

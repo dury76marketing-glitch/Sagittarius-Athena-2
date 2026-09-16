@@ -121,39 +121,32 @@ test('Andromeda homepage card sits under Athena/Saint subset and writes the subs
   assert.ok(saintAt>0&&andromedaAt>saintAt&&atomicAt>andromedaAt,'Andromeda fold must sit under saints and above Atomic Thunder');
   assert.ok(app.includes('andromedaThunderWaveEnabled'));
   assert.ok(app.includes('andromedaThunderWaveLevel'));
-  assert.ok(app.includes('subsetAndromedaApplyBtn'));
+  assert.ok(app.includes('andromedaThunderWaveToggle'));
 });
 
 
-test('Andromeda apply with no ticks targets all rooms and mirrors the host dump line', async () => {
+
+test('Andromeda ON/OFF toggle saves the fleet without Crystal Wall ticks', async () => {
   const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
   const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
   const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
-  const applyAt=app.indexOf("subsetAndromedaApplyBtn");
-  const nextHandler=app.indexOf("addEventListener", applyAt+40);
-  const slice=app.slice(applyAt, nextHandler>applyAt?nextHandler:applyAt+900);
-  assert.ok(applyAt>0);
-  assert.equal(slice.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"), false);
-  assert.ok(html.includes('One Apply writes all 12 rooms and the host')||html.includes('Apply saves ON/OFF'));
-  assert.ok(html.includes('<th>Andromeda</th>'));
-  assert.ok(app.includes('andromedaThunderWaveEnabled===true'));
-  assert.ok(engine.includes('broadcastHost'));
-  assert.ok(engine.includes('andromedaPatch'));
+  assert.ok(html.includes('id="andromedaThunderWaveToggle"'));
+  assert.equal(html.includes('subsetAndromedaEnabled'), false);
+  assert.equal(html.includes('subsetAndromedaApplyBtn'), false);
+  assert.ok(app.includes('saveAndromedaFleet'));
+  assert.ok(app.includes("post('/api/cosmos/subset',{ids:[],patch})"));
   assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
+  assert.ok(engine.includes('broadcastHost'));
 });
 
-
-test('Crystal Wall subset still requires ticks and Andromeda apply ignores those ticks', async () => {
+test('Crystal Wall subset still requires ticks and Andromeda toggle ignores those ticks', async () => {
   const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
   const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
   const cw=app.slice(app.indexOf('subsetApplyBtn'), app.indexOf('subsetSaintApplyBtn'));
-  const saint=app.slice(app.indexOf('subsetSaintApplyBtn'), app.indexOf('subsetAndromedaApplyBtn'));
-  const andro=app.slice(app.indexOf('subsetAndromedaApplyBtn'), app.indexOf('subsetAndromedaApplyBtn')+900);
   assert.ok(cw.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"));
-  assert.ok(saint.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"));
-  assert.ok(andro.includes("{ids:[],patch}"));
-  assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
   assert.equal(cw.includes('andromedaThunderWaveEnabled'), false);
+  assert.ok(app.includes('andromedaThunderWaveToggle'));
+  assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
 });
 
 test('syncCosmosWindowsFromSettings keeps Andromeda on the room cache after a host save', async () => {
@@ -164,5 +157,11 @@ test('syncCosmosWindowsFromSettings keeps Andromeda on the room cache after a ho
   assert.ok(engine.includes('...andromeda'));
   assert.ok(app.includes('andromedaStatus'));
   assert.ok(html.includes('id="andromedaStatus"'));
-  assert.ok(app.includes("hostOn?'on':'off'"));
+  assert.ok(app.includes("hostOn?'ON':'OFF'"));
+});
+
+test('Athena Exclamation event insert stringifies JSON columns', async () => {
+  const db=await readFile(new URL('../src/db.mjs',import.meta.url),'utf8');
+  assert.ok(db.includes('JSON.stringify(e.saints||[])'));
+  assert.ok(db.includes('JSON.stringify(e.combination||[])'));
 });

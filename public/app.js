@@ -121,10 +121,11 @@ function renderTwelveCosmos(s){
   const st=$('twelveCosmosStatus');
   if(st){st.textContent=`${(s.constellationOverview||[]).length||12} rooms`;st.className='pill green';}
   const hostOn=s.settings?.andromedaThunderWaveEnabled===true;
-  const hostLevel=String(s.settings?.andromedaThunderWaveLevel||'HIGH').toUpperCase();
-  const level=hostOn?(hostLevel==='MID'||hostLevel==='MEDIUM'?'MID':hostLevel==='LOW'?'LOW':'HIGH'):'HIGH';
-  if($('subsetAndromedaEnabled')) $('subsetAndromedaEnabled').value=hostOn?'on':'off';
-  if($('subsetAndromedaLevel')) $('subsetAndromedaLevel').value=level;
+  const hostLevel=String(s.settings?.andromedaThunderWaveLevel||'MID').toUpperCase();
+  const level=hostLevel==='LOW'?'LOW':hostLevel==='HIGH'?'HIGH':'MID';
+  if($('subsetAndromedaLevel') && document.activeElement!==$('subsetAndromedaLevel')) $('subsetAndromedaLevel').value=level;
+  const btn=$('andromedaThunderWaveToggle');
+  if(btn){btn.textContent=hostOn?'ON':'OFF';btn.dataset.enabled=String(hostOn);btn.className=`galactic-toggle ${hostOn?'enabled':'disabled'}`;}
   if($('andromedaStatus')){
     $('andromedaStatus').textContent=hostOn?`ON ${level}`:'OFF';
     $('andromedaStatus').className=`pill ${hostOn?'amber':'red'}`;
@@ -256,20 +257,41 @@ $('subsetSaintApplyBtn')?.addEventListener('click',async()=>{
 });
 
 
-$('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
-  const on=String($('subsetAndromedaEnabled')?.value||'off')==='on';
-  const level=String($('subsetAndromedaLevel')?.value||'HIGH').toUpperCase();
+async function saveAndromedaFleet(on, level){
+  const normalized=String(level||'MID').toUpperCase();
+  const intensity=on?(normalized==='LOW'?'LOW':normalized==='HIGH'?'HIGH':'MID'):'HIGH';
+  const patch={andromedaThunderWaveEnabled:on===true,andromedaThunderWaveLevel:intensity};
+  const r=await post('/api/cosmos/subset',{ids:[],patch});
+  if(!r?.ok && !r?.count) throw new Error(r?.error||'andromeda_save_failed');
+  const written=Array.isArray(r.results)?r.results:[];
+  for(const row of written){
+    if(row?.cosmos===COSMOS_VIEW_ID&&row.settings)COSMOS_VIEW_SETTINGS=row.settings;
+  }
+  CONTROL_FINGERPRINT='';
+  await load();
+  return patch;
+}
+$('andromedaThunderWaveToggle')?.addEventListener('click',async()=>{
+  const btn=$('andromedaThunderWaveToggle');
+  const on=btn?.dataset.enabled==='true';
+  const next=!on;
+  const level=String($('subsetAndromedaLevel')?.value||'MID').toUpperCase();
+  if(next&&!confirm(`Turn Andromeda ON at ${level==='HIGH'?'HIGH (same ban as OFF)':level}? This saves all 12 rooms and the host.`))return;
+  if(!next&&!confirm('Turn Andromeda OFF? Full family ban returns on all 12 rooms.'))return;
+  btn.disabled=true;
   try{
-    const patch={andromedaThunderWaveEnabled:on,andromedaThunderWaveLevel:on?level:'HIGH'};
-    const r=await post('/api/cosmos/subset',{ids:[],patch});
-    if(!r?.ok && !r?.count) throw new Error(r?.error||'subset_save_failed');
-    const written=Array.isArray(r.results)?r.results:[];
-    for(const row of written){
-      if(row?.cosmos===COSMOS_VIEW_ID&&row.settings)COSMOS_VIEW_SETTINGS=row.settings;
-    }
-    CONTROL_FINGERPRINT='';
-    await load();
-    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on all 12 rooms + host.`);
+    const saved=await saveAndromedaFleet(next, level);
+    msg(`Andromeda ${saved.andromedaThunderWaveEnabled?'ON '+saved.andromedaThunderWaveLevel:'OFF'} saved on all 12 rooms + host.`);
+  }catch(e){msg(e.message,true);}
+  finally{if(btn)btn.disabled=false;}
+});
+$('subsetAndromedaLevel')?.addEventListener('change',async()=>{
+  const on=$('andromedaThunderWaveToggle')?.dataset.enabled==='true';
+  if(!on)return;
+  const level=String($('subsetAndromedaLevel')?.value||'MID').toUpperCase();
+  try{
+    const saved=await saveAndromedaFleet(true, level);
+    msg(`Andromeda intensity saved: ${saved.andromedaThunderWaveLevel}.`);
   }catch(e){msg(e.message,true);}
 });
 

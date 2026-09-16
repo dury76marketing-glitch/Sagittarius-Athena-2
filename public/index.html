@@ -107,28 +107,23 @@
     </details>
 
     <details id="andromedaSubsetFold" class="card">
-      <summary><strong>Andromeda Thunder Wave</strong> <span id="andromedaStatus" class="pill">Loading</span> <span class="muted">Homepage only. Apply writes all 12 rooms and the host. Refresh keeps the last save.</span></summary>
+      <summary><strong>Andromeda Thunder Wave</strong> <span id="andromedaStatus" class="pill red">OFF</span> <span class="muted">Homepage only. Same ON/OFF save as Execution Attacks. Writes all 12 rooms and the host.</span></summary>
       <div id="andromedaSubset">
-        <p class="muted">Apply saves ON/OFF and HIGH/MID/LOW onto every cosmos and the host dump line. You do not tick rooms. Crystal Wall and Saint subset still use the checkboxes and keep their own crash/rebound/ticks. HIGH = current hard ban. MID / LOW unlock ITF men, CS2, Dimayor and Bundesliga 2. WTA/ATP Challenger, ITF women, T20, UAE PL, NPB and -TIE stay banned at every level.</p>
-        <div class="atomic-thunder-settings">
-          <label>Andromeda
-            <span>
-              <select id="subsetAndromedaEnabled">
-                <option value="off">OFF (full MFE1)</option>
-                <option value="on">ON</option>
-              </select>
-            </span>
-          </label>
-          <label>Intensity
-            <span>
-              <select id="subsetAndromedaLevel">
-                <option value="HIGH">HIGH · no-go</option>
-                <option value="MID">MID · throttle</option>
-                <option value="LOW">LOW · max legal volume</option>
-              </select>
-            </span>
-          </label>
-          <button id="subsetAndromedaApplyBtn" class="btn primary" type="button">Apply Andromeda to selected rooms</button>
+        <p class="muted">Toggle saves immediately. Refresh keeps the last save. OFF = full family ban. ON + MID/LOW unlocks ITF men, CS2, Dimayor and Bundesliga 2. Challenger, ITF women, T20, UAE PL, NPB and -TIE stay banned. Crystal Wall ticks stay on their own card.</p>
+        <div class="galactic-control">
+          <div>
+            <h3>ANDROMEDA THUNDER WAVE <span id="andromedaToggleLabel" class="muted"></span></h3>
+            <label>Intensity
+              <span>
+                <select id="subsetAndromedaLevel">
+                  <option value="MID">MID · throttle</option>
+                  <option value="LOW">LOW · max legal volume</option>
+                  <option value="HIGH">HIGH · no-go (same as OFF)</option>
+                </select>
+              </span>
+            </label>
+          </div>
+          <button id="andromedaThunderWaveToggle" class="galactic-toggle disabled" type="button">OFF</button>
         </div>
       </div>
     </details>
