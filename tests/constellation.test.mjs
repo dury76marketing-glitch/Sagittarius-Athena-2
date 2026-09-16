@@ -293,11 +293,11 @@ test('TC1-P6 createHunter consults fleet occupancy and fleet lock', async () => 
 
 test('TC1-P7 homepage keeps original architecture and adds twelve-cosmos overview', async () => {
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
-  assert.ok(html.includes('ATOMIC THUNDER BOLT'));
+  assert.ok(html.includes('id="atomicThunderBoltSection"'));
   assert.ok(html.includes('ATHENA'));
-  assert.ok(html.includes('INFINITY BREAK'));
-  assert.ok(html.includes('AURORA EXECUTION'));
-  assert.ok(html.includes('COSMO UNIVERSE'));
+  assert.ok(html.includes('id="infinityBreakSection"'));
+  assert.ok(html.includes('id="auroraExecutionSection"'));
+  assert.ok(html.includes('id="cosmoUniverseSection"'));
   assert.ok(html.includes('TWELVE GOLDEN SAINT COSMOS'));
   assert.ok(html.includes('twelveCosmosBody'));
   assert.ok(html.includes('Download Diagnostics'));
@@ -445,4 +445,31 @@ test('TC1-P7 subset patch writes crash rebound and ticks onto selected rooms onl
   assert.equal(rows.ARIES.crystalWallMinUpwardTicks, 3);
   assert.equal(rows.PISCES.crystalWallMinCrashCents, 18);
   assert.equal(rows.TAURUS, undefined);
+});
+
+
+test('TC1 homepage order is title, controls, performance, open, closed, twelve cosmos, operator fold, Athena', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const order = [
+    'Download Diagnostics',
+    'id="modeBtn"',
+    'id="portfolioPerformanceSection"',
+    'id="openHunterBody"',
+    'id="closedPositionsFold"',
+    'TWELVE GOLDEN SAINT COSMOS',
+    'id="operatorSettingsFold"',
+    'id="twelveCosmosSubset"',
+    'id="atomicThunderBoltSection"',
+    'id="infinityBreakSection"',
+    'id="auroraExecutionSection"',
+    'id="executionAttacksSection"',
+    'id="cosmoUniverseSection"',
+    'id="athenaSection"',
+  ];
+  let last = -1;
+  for (const token of order) {
+    const at = html.indexOf(token);
+    assert.ok(at > last, token);
+    last = at;
+  }
 });

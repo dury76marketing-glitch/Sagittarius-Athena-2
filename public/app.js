@@ -125,6 +125,8 @@ function renderTwelveCosmos(s){
   if(homeOnly) homeOnly.classList.toggle('hidden', Boolean(active));
   const subset=$('twelveCosmosSubset');
   if(subset) subset.classList.toggle('hidden', Boolean(active));
+  const subsetFold=$('twelveCosmosSubsetFold');
+  if(subsetFold) subsetFold.classList.toggle('hidden', Boolean(active));
   if(editor){
     editor.classList.toggle('hidden',!active);
     if(active){
