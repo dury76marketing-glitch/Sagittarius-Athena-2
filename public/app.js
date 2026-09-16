@@ -169,3 +169,9 @@ $('subsetApplyBtn')?.addEventListener('click',async()=>{
     msg(`Subset saved on ${r.count||ids.length} rooms.`);
   }catch(e){msg(e.message,true);}
 });
+
+$('homeBtn')?.addEventListener('click', (event) => {
+  event.preventDefault();
+  location.hash = 'home';
+  if (STATE) renderTwelveCosmos(STATE);
+});

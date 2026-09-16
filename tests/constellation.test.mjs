@@ -349,3 +349,34 @@ test('TC1-P8 scheduled evaluation uses room settings and fleet protection source
   const guard = await readFile(new URL('../src/profitGuard.mjs', import.meta.url), 'utf8');
   assert.ok(guard.includes('openFleetHunterEntries'));
 });
+
+
+test('TC1 overview counts only real SIM/LIVE hunters and excludes shadow cosmos', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.constellation = new ConstellationHost();
+  engine.settings = { minGameMinutes: 30, maxGameMinutes: 55 };
+  engine.cosmosWindowById = {};
+  engine.cosmosBooks = {
+    ARIES: [
+      { systemName: 'ARIES', conceptName: 'Athena Exclamation', status: 'closed', pnlCents: 80 },
+      { systemName: 'ARIES', conceptName: 'Pegasus', status: 'closed', pnlCents: 999 },
+      { systemName: 'ARIES', conceptName: 'Dragon', status: 'open' },
+      { systemName: 'ARIES', conceptName: 'Phoenix', status: 'closed', pnlCents: 12 },
+      { systemName: 'ARIES', conceptName: 'Crystal Wall Shadow', status: 'closed', pnlCents: -1666 },
+      { systemName: 'ARIES', conceptName: 'Recovery Hunter', status: 'closed', pnlCents: -50 },
+      { systemName: 'ARIES', conceptName: 'Another Dimension', status: 'closed', pnlCents: 7 },
+    ],
+  };
+  const rows = engine.collectConstellationOverview();
+  const aries = rows.find((row) => row.id === 'ARIES');
+  assert.equal(aries.open, 0);
+  assert.equal(aries.closed, 1);
+  assert.equal(aries.pnlCents, 80);
+});
+
+test('TC1 homepage keeps a top Home control and hides shadow from overview copy', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="homeBtn"'));
+  assert.ok(html.includes('>Home</a>'));
+  assert.ok(html.includes('Real SIM and LIVE Execution Attacks only'));
+});

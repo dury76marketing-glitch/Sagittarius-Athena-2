@@ -3032,10 +3032,18 @@ export class SagittariusEngine {
     return this.constellationScan;
   }
 
+  isConstellationOverviewHunter(row) {
+    const concept=String(row?.conceptName||'');
+    if(!concept) return false;
+    if(FEEDER_CONCEPTS.has(concept) || SHADOW_ATTACK_CONCEPTS.has(concept)) return false;
+    if(concept===CRYSTAL_WALL.shadowConceptName || concept===CRYSTAL_WALL.conceptName || concept==='Recovery Hunter') return false;
+    return PORTFOLIO_CONCEPTS.has(concept);
+  }
+
   collectConstellationOverview() {
     const rooms=[];
     for(const id of COSMOS_IDS){
-      const entries=isolateBook(this.cosmosBooks?.[id]||[],id);
+      const entries=isolateBook(this.cosmosBooks?.[id]||[],id).filter((row)=>this.isConstellationOverviewHunter(row));
       const open=entries.filter((row)=>['open','entry_pending','exit_pending','pending_recovery'].includes(row.status));
       const closed=entries.filter((row)=>row.status==='closed');
       const window=this.cosmosWindowById?.[id]||{minGameMinutes:Number(this.settings?.minGameMinutes||0),maxGameMinutes:Number(this.settings?.maxGameMinutes||0)};
