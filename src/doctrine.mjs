@@ -56,11 +56,59 @@ export const MARKET_FAMILY_EXECUTION_EXCLUSION = Object.freeze({
   tieSuffix:'-TIE',
 });
 
-export function executionMarketFamilyExclusion(ticker) {
+export const ANDROMEDA_THUNDER_WAVE = Object.freeze({
+  version:'ANDROMEDA-THUNDER-WAVE-A1',
+  policyRevision:'A1-R1-THREE-LEVEL-FAMILY-INTENSITY',
+  role:'operator_family_ban_intensity_over_mfe1_without_disabling_crystal_wall_shadow_research',
+  levels:Object.freeze(['HIGH','MID','LOW']),
+  defaultEnabled:false,
+  defaultLevel:'HIGH',
+  highPrefixes:Object.freeze([
+    'KXATPCHALLENGERMATCH',
+    'KXWTACHALLENGERMATCH',
+    'KXT20MATCH',
+    'KXUAEPLGAME',
+    'KXITFWMATCH',
+    'KXNPBGAME',
+  ]),
+  midUnlockPrefixes:Object.freeze([
+    'KXITFMATCH',
+    'KXCS2GAME',
+    'KXDIMAYORGAME',
+    'KXBUNDESLIGA2GAME',
+  ]),
+});
+
+export function normalizeAndromedaThunderWaveLevel(value){
+  const raw=String(value||'').trim().toUpperCase();
+  if(raw==='MID'||raw==='MEDIUM')return 'MID';
+  if(raw==='LOW')return 'LOW';
+  return 'HIGH';
+}
+
+export function resolveAndromedaThunderWave(settings){
+  const enabled=settings?.andromedaThunderWaveEnabled===true;
+  const level=enabled?normalizeAndromedaThunderWaveLevel(settings?.andromedaThunderWaveLevel):'HIGH';
+  return Object.freeze({
+    enabled,
+    level,
+    version:ANDROMEDA_THUNDER_WAVE.version,
+    policyRevision:ANDROMEDA_THUNDER_WAVE.policyRevision,
+  });
+}
+
+export function activeMarketFamilyExclusionPrefixes(settings){
+  const wave=resolveAndromedaThunderWave(settings);
+  if(wave.level==='MID'||wave.level==='LOW')return ANDROMEDA_THUNDER_WAVE.highPrefixes;
+  return MARKET_FAMILY_EXECUTION_EXCLUSION.seriesPrefixes;
+}
+
+export function executionMarketFamilyExclusion(ticker, settings) {
   const normalizedTicker=String(ticker||'').trim().toUpperCase();
   const matchedRules=[];
+  const prefixes=activeMarketFamilyExclusionPrefixes(settings);
   if(normalizedTicker){
-    for(const prefix of MARKET_FAMILY_EXECUTION_EXCLUSION.seriesPrefixes){
+    for(const prefix of prefixes){
       if(normalizedTicker===prefix||normalizedTicker.startsWith(`${prefix}-`))matchedRules.push(`${prefix}-*`);
     }
     if(normalizedTicker.endsWith(MARKET_FAMILY_EXECUTION_EXCLUSION.tieSuffix))matchedRules.push('*-TIE');
@@ -74,6 +122,7 @@ export function executionMarketFamilyExclusion(ticker) {
     version:MARKET_FAMILY_EXECUTION_EXCLUSION.version,
     policyRevision:MARKET_FAMILY_EXECUTION_EXCLUSION.policyRevision,
     shadowResearchAllowed:MARKET_FAMILY_EXECUTION_EXCLUSION.shadowResearchAllowed,
+    andromeda:resolveAndromedaThunderWave(settings),
   });
 }
 

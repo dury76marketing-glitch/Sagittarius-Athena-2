@@ -533,7 +533,7 @@ export class SagittariusEngine {
   async handleMegaWaveAthenaClose(entry){
     const stats=this.megaWaveRuntime(),s=this.settings||{},id=String(entry?.id||''),ticker=String(entry?.ticker||'');
     if(!id||!ticker||String(entry?.conceptName||'')!=='Athena Exclamation'||entry?.status!=='closed'||Number(entry?.remainingCount||0)>1e-9)return{status:'IGNORED'};
-    const marketFamilyExclusion=executionMarketFamilyExclusion(ticker);
+    const marketFamilyExclusion=executionMarketFamilyExclusion(ticker,this.settings);
     if(marketFamilyExclusion.blocked){
       stats.lastEvent={status:'MARKET_FAMILY_EXCLUSION',atMs:Date.now(),entryId:id,ticker,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
       await this.db?.audit?.('info','mega_wave_athena_market_family_grant_blocked',{entryId:id,ticker,marketFamilyExclusion}).catch(()=>{});
@@ -568,7 +568,7 @@ export class SagittariusEngine {
 
   installMegaWaveGrant(grant,parentEntry=null){
     this.megaWaveRuntime();if(!grant?.grantId||grant.status!=='ACTIVE')return false;
-    if(executionMarketFamilyExclusion(grant.ticker).blocked)return false;
+    if(executionMarketFamilyExclusion(grant.ticker,this.settings).blocked)return false;
     this.megaWaveGrants.set(String(grant.grantId),structuredClone(grant));
     const seedEntry=Number(parentEntry?.entryPriceCents||0),seedExit=Number(parentEntry?.exitPriceCents||0),seedPeak=Math.max(seedEntry,seedExit,Number(parentEntry?.peakPriceCents||0));
     for(const concept of [...(grant.eligibleSaints||[])].sort()){
@@ -587,7 +587,7 @@ export class SagittariusEngine {
       rows.push(...(await this.db.opportunityEpisodes(key,{limit:5000,trackingComplete:false}).catch(()=>[])));
     }
     let n=0;
-    for(const row of rows){if(!String(row?.id||'').startsWith('MEGA-WAVE:GRANT:'))continue;const grant=this.megaWaveGrantFromEpisode(row);if(!grant||grant.status!=='ACTIVE')continue;const marketFamilyExclusion=executionMarketFamilyExclusion(grant.ticker);if(marketFamilyExclusion.blocked){grant.status='COMPLETE';grant.completedReason=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;grant.completedAtMs=Date.now();grant.marketFamilyExclusion=structuredClone(marketFamilyExclusion);await this.persistMegaWaveGrantEpisode(row,grant,true).catch(()=>{});await this.db?.audit?.('info','mega_wave_market_family_grant_hydration_blocked',{grantId:grant.grantId,ticker:grant.ticker,marketFamilyExclusion}).catch(()=>{});continue;}const parent=typeof this.db?.entryById==='function'?await this.db.entryById(grant.parentEntryId).catch(()=>null):null;if(!parent)continue;if(this.installMegaWaveGrant(grant,parent))n+=1;}
+    for(const row of rows){if(!String(row?.id||'').startsWith('MEGA-WAVE:GRANT:'))continue;const grant=this.megaWaveGrantFromEpisode(row);if(!grant||grant.status!=='ACTIVE')continue;const marketFamilyExclusion=executionMarketFamilyExclusion(grant.ticker,this.settings);if(marketFamilyExclusion.blocked){grant.status='COMPLETE';grant.completedReason=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;grant.completedAtMs=Date.now();grant.marketFamilyExclusion=structuredClone(marketFamilyExclusion);await this.persistMegaWaveGrantEpisode(row,grant,true).catch(()=>{});await this.db?.audit?.('info','mega_wave_market_family_grant_hydration_blocked',{grantId:grant.grantId,ticker:grant.ticker,marketFamilyExclusion}).catch(()=>{});continue;}const parent=typeof this.db?.entryById==='function'?await this.db.entryById(grant.parentEntryId).catch(()=>null):null;if(!parent)continue;if(this.installMegaWaveGrant(grant,parent))n+=1;}
     return n;
   }
 
@@ -655,7 +655,7 @@ export class SagittariusEngine {
       if(typeof this.db?.acquireHunterTickerLock!=='function')return{status:'BLOCKED',reason:'durable_grant_lock_unavailable'};
       unlock=await this.db.acquireHunterTickerLock(s.systemName,`mega-wave-grant:${grantId}`);if(!unlock)return{status:'BUSY'};
       episode=await this.db.opportunityEpisode(grantId).catch(()=>null);grant=this.megaWaveGrantFromEpisode(episode);if(!grant||grant.status!=='ACTIVE'||!grant.eligibleSaints.includes(concept))return{status:'IGNORED'};
-      const marketFamilyExclusion=executionMarketFamilyExclusion(grant.ticker);if(marketFamilyExclusion.blocked){grant.status='COMPLETE';grant.completedReason=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;grant.completedAtMs=Date.now();grant.marketFamilyExclusion=structuredClone(marketFamilyExclusion);await this.persistMegaWaveGrantEpisode(episode,grant,true);this.megaWaveGrants.delete(grantId);for(const key of [...this.megaWaveSaintWatches.keys()])if(key.startsWith(`${grantId}|`))this.megaWaveSaintWatches.delete(key);stats.saintBlocked=Number(stats.saintBlocked||0)+1;await this.db?.audit?.('info','mega_wave_saint_market_family_execution_blocked',{grantId,concept,ticker:grant.ticker,marketFamilyExclusion}).catch(()=>{});return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};}
+      const marketFamilyExclusion=executionMarketFamilyExclusion(grant.ticker,this.settings);if(marketFamilyExclusion.blocked){grant.status='COMPLETE';grant.completedReason=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;grant.completedAtMs=Date.now();grant.marketFamilyExclusion=structuredClone(marketFamilyExclusion);await this.persistMegaWaveGrantEpisode(episode,grant,true);this.megaWaveGrants.delete(grantId);for(const key of [...this.megaWaveSaintWatches.keys()])if(key.startsWith(`${grantId}|`))this.megaWaveSaintWatches.delete(key);stats.saintBlocked=Number(stats.saintBlocked||0)+1;await this.db?.audit?.('info','mega_wave_saint_market_family_execution_blocked',{grantId,concept,ticker:grant.ticker,marketFamilyExclusion}).catch(()=>{});return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};}
       const reservations={...(grant.reservations||{})},current=reservations[concept];if(current?.status==='OPENED'||current?.status==='RESERVED')return{status:'DUPLICATE_SUPPRESSED'};
       const used=Object.values(reservations).filter(x=>x?.status==='OPENED'||x?.status==='RESERVED').length;if(used>=Number(grant.limit||0)){grant.status='COMPLETE';await this.persistMegaWaveGrantEpisode(episode,grant,true);this.megaWaveGrants.delete(grantId);return{status:'EXHAUSTED'};}
       const reservationId=`${grantId}:SAINT:${concept}`;reservation={status:'RESERVED',reservationId,reservedAtMs:Date.now(),saintConcept:concept};reservations[concept]=reservation;grant.reservations=reservations;await this.persistMegaWaveGrantEpisode(episode,grant,false);stats.saintReserved=Number(stats.saintReserved||0)+1;
@@ -865,7 +865,7 @@ export class SagittariusEngine {
     if(String(parentEntry?.closeReason||'')!==String(CRYSTAL_WALL.profitableCloseReason)||!(Number(parentEntry?.pnlCents||0)>0))return{status:'IGNORED',reason:'not_profitable_crystal_wall'};
     if(s.athenaExclamationEnabled!==true)return{status:'IGNORED',reason:'athena_exclamation_disabled'};
     if(String(parentEntry?.ownerId||'')!==String(s.ownerId)||String(parentEntry?.mode||'')!==String(s.mode||''))return{status:'BLOCKED',reason:'parent_identity_or_mode_mismatch'};
-    const marketFamilyExclusion=executionMarketFamilyExclusion(ticker);
+    const marketFamilyExclusion=executionMarketFamilyExclusion(ticker,this.settings);
     if(marketFamilyExclusion.blocked){
       stats.lastEvent={status:'BLOCKED',atMs:Date.now(),parentEntryId:parentId,ticker,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
       await this.db?.audit?.('info','mega_wave_athena_continuation_market_family_blocked',{parentEntryId:parentId,ticker,marketFamilyExclusion}).catch(()=>{});
@@ -932,7 +932,7 @@ export class SagittariusEngine {
     const stats=this.megaWaveRuntime(),s=this.settings||{},id=String(authorizationId||'');
     const watch=this.athenaExclamationConfirmationWatches?.get(id);if(!watch)return{status:'IGNORED'};
     const ticker=String(watch.ticker||'');
-    if(executionMarketFamilyExclusion(ticker).blocked){
+    if(executionMarketFamilyExclusion(ticker,this.settings).blocked){
       this.athenaExclamationConfirmationWatches.delete(id);
       return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode};
     }
@@ -3175,7 +3175,7 @@ export class SagittariusEngine {
   async applySettingsPatch(patch, {scope='master', cosmosId=null}={}) {
     const numeric = new Set(EDITABLE_NUMERIC_SETTINGS);
     const booleans = new Set(EDITABLE_BOOLEAN_SETTINGS);
-    const allowed = new Set([...numeric, ...booleans, 'systemName']);
+    const allowed = new Set([...numeric, ...booleans, 'systemName', 'andromedaThunderWaveLevel']);
     const unknown = Object.keys(patch || {}).filter((k) => !allowed.has(k));
     if (unknown.length) throw new Error(`Unknown or retired setting: ${unknown.join(', ')}`);
 
@@ -3199,6 +3199,10 @@ export class SagittariusEngine {
       const v = String(patch.systemName || '').trim();
       if (!v) throw new Error('systemName cannot be empty');
       next.systemName = v;
+    }
+    if (Object.hasOwn(patch, 'andromedaThunderWaveLevel')) {
+      const raw=String(patch.andromedaThunderWaveLevel||'').trim().toUpperCase();
+      next.andromedaThunderWaveLevel = raw==='MID'||raw==='MEDIUM'?'MID':raw==='LOW'?'LOW':'HIGH';
     }
 
     const price=(k)=>{if(next[k]<1||next[k]>99)throw new Error(`${k} must be between 1 and 99 cents`);};

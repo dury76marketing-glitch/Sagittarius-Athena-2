@@ -163,6 +163,7 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'lightningPlasmaEnabled',
   'galacticExplosionEnabled',
   'rozanHyakuRyuHaEnabled',
+  'andromedaThunderWaveEnabled',
   'athenaSoulEnabled',
 
   'athenaExclamationPri1R2Enabled',
@@ -213,6 +214,8 @@ export function originalSettings() {
     lightningPlasmaEnabled: true,
     galacticExplosionEnabled: false,
     rozanHyakuRyuHaEnabled: false,
+    andromedaThunderWaveEnabled: false,
+    andromedaThunderWaveLevel: 'HIGH',
     athenaSoulEnabled: false,
 
     maxPositions: 8,
@@ -368,6 +371,8 @@ export function freshInstallSettings() {
     lightningPlasmaEnabled:true,
     galacticExplosionEnabled:false,
     rozanHyakuRyuHaEnabled:false,
+    andromedaThunderWaveEnabled:false,
+    andromedaThunderWaveLevel:'HIGH',
     athenaSoulEnabled:false,
 
     maxPositions:20,
@@ -577,6 +582,7 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   if (Object.hasOwn(src, 'systemName') && String(src.systemName).trim()) out.systemName = String(src.systemName).trim();
   if (Object.hasOwn(src, 'ownerId') && String(src.ownerId).trim()) out.ownerId = String(src.ownerId).trim();
   if (Object.hasOwn(src, 'mode')) out.mode = String(src.mode).toUpperCase() === 'LIVE' ? 'LIVE' : 'SIMULATION';
+  if (Object.hasOwn(src, 'andromedaThunderWaveLevel')) out.andromedaThunderWaveLevel = src.andromedaThunderWaveLevel;
   // R51 compatibility bridge: old Atomic Thunder profit settings become
   // Infinity Break settings for NEW positions. Historical rows keep their
   // creation-time Atomic Thunder snapshots and close reasons unchanged.
@@ -635,6 +641,11 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   // R63 simulation/live parity: persisted legacy probabilities are neutralized.
   // SIM still requires fresh executable depth and may fill partially, but never
   // rejects a proven executable IOC through an unrelated random coin flip.
+  out.andromedaThunderWaveEnabled = out.andromedaThunderWaveEnabled===true;
+  const andromedaLevel=String(src.andromedaThunderWaveLevel||out.andromedaThunderWaveLevel||'HIGH').trim().toUpperCase();
+  out.andromedaThunderWaveLevel = andromedaLevel==='MID'||andromedaLevel==='MEDIUM'?'MID':andromedaLevel==='LOW'?'LOW':'HIGH';
+  if(out.andromedaThunderWaveEnabled!==true) out.andromedaThunderWaveLevel='HIGH';
+
   out.simFillProbability = 1;
   out.liveArmed = false;
   return out;

@@ -130,6 +130,8 @@ function renderTwelveCosmos(s){
   if(subsetFold) subsetFold.classList.toggle('hidden', Boolean(active));
   const saintFold=$('saintSubsetFold');
   if(saintFold) saintFold.classList.toggle('hidden', Boolean(active));
+  const andromedaFold=$('andromedaSubsetFold');
+  if(andromedaFold) andromedaFold.classList.toggle('hidden', Boolean(active));
   if(editor){
     editor.classList.toggle('hidden',!active);
     if(active){
@@ -240,6 +242,26 @@ $('subsetSaintApplyBtn')?.addEventListener('click',async()=>{
     CONTROL_FINGERPRINT='';
     await load();
     msg(`${fields[3]} crash/rebound/ticks saved on ${r.count||ids.length} rooms.`);
+  }catch(e){msg(e.message,true);}
+});
+
+
+$('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
+  const ids=selectedSubsetCosmosIds();
+  const on=String($('subsetAndromedaEnabled')?.value||'off')==='on';
+  const level=String($('subsetAndromedaLevel')?.value||'HIGH').toUpperCase();
+  if(!ids.length)return msg('Select at least one cosmos.',true);
+  try{
+    const patch={andromedaThunderWaveEnabled:on,andromedaThunderWaveLevel:on?level:'HIGH'};
+    const r=await post('/api/cosmos/subset',{ids,patch});
+    if(!r?.ok && !r?.count) throw new Error(r?.error||'subset_save_failed');
+    const written=Array.isArray(r.results)?r.results:[];
+    for(const row of written){
+      if(row?.cosmos===COSMOS_VIEW_ID&&row.settings)COSMOS_VIEW_SETTINGS=row.settings;
+    }
+    CONTROL_FINGERPRINT='';
+    await load();
+    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on ${r.count||ids.length} rooms.`);
   }catch(e){msg(e.message,true);}
 });
 

@@ -169,7 +169,7 @@ export function validateAthenaFireCommand(command,{concept,q,settings,now=Date.n
   if(String(command.systemName||'')!==String(settings?.systemName||''))return{ok:false,reason:'athena_fire_system_mismatch'};
   if(String(command.selectedAttack||'')!==String(concept||''))return{ok:false,reason:'athena_fire_attack_mismatch'};
   if(String(command.ticker||'')!==String(q?.ticker||''))return{ok:false,reason:'athena_fire_ticker_mismatch'};
-  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker);
+  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker,settings);
   if(marketFamilyExclusion.blocked)return{ok:false,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
   // R60: Athena's sealed FIRE is the sole strategic entry decision. Execution
   // validates command integrity plus hard market/operator constraints only; no
@@ -213,7 +213,7 @@ export function validateMegaWaveSaintFireCommand(command,{concept,q,settings,aut
   if(!verifyAthenaFireCommandHash(command))return{ok:false,reason:'mega_wave_fire_hash_invalid'};
   if(String(command.version)!==String(ATHENA_COMMANDER.version)||String(command.systemName||'')!==String(settings?.systemName||''))return{ok:false,reason:'mega_wave_fire_identity_invalid'};
   if(String(command.selectedAttack||'')!==String(concept||'')||String(command.ticker||'')!==String(q?.ticker||''))return{ok:false,reason:'mega_wave_fire_attack_or_ticker_mismatch'};
-  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker);
+  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker,settings);
   if(marketFamilyExclusion.blocked)return{ok:false,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
   if(String(authorization.version||'')!==String(MEGA_WAVE.version)||String(authorization.policyRevision||'')!==String(MEGA_WAVE.policyRevision)||String(authorization.parentConcept||'')!=='Athena Exclamation')return{ok:false,reason:'mega_wave_lineage_invalid'};
   if(String(authorization.ticker||'')!==String(q?.ticker||'')||String(authorization.saintConcept||'')!==String(concept||'')||!authorization.grantId||!authorization.reservationId||!authorization.parentEntryId)return{ok:false,reason:'mega_wave_reservation_invalid'};
@@ -892,7 +892,7 @@ export function validateJusticeArrowFireCommand(command,{q,settings,now=Date.now
   if(String(command.systemName||'')!==String(settings?.systemName||''))return{ok:false,reason:'justice_arrow_v3_fire_system_mismatch'};
   if(String(command.selectedAttack||'')!=='Sagittarius Justice Arrow')return{ok:false,reason:'justice_arrow_v3_fire_attack_mismatch'};
   if(String(command.ticker||'')!==String(q?.ticker||''))return{ok:false,reason:'justice_arrow_v3_fire_ticker_mismatch'};
-  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker);
+  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker,settings);
   if(marketFamilyExclusion.blocked)return{ok:false,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
   const expectedEvent=String(q?.eventTicker||q?.ticker||'');
   if(String(command.eventTicker||command.ticker||'')!==expectedEvent)return{ok:false,reason:'justice_arrow_v3_fire_event_mismatch'};
@@ -1752,7 +1752,7 @@ export class StrategyEngine {
     }
     trace('MODE_AUTHORIZATION','PASS',s.mode === 'LIVE' ? 'live_ready' : 'simulation');
     // R13/MFE1 universal execution backstop. Shadow/research paths do not use createHunter().
-    const marketFamilyExclusion=executionMarketFamilyExclusion(exactTicker);
+    const marketFamilyExclusion=executionMarketFamilyExclusion(exactTicker,s);
     if(marketFamilyExclusion.blocked){
       trace('MARKET_FAMILY_EXCLUSION','BLOCKED',MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,{marketFamilyExclusion});
       await this.audit('market_family_execution_exclusion_blocked',{concept,ticker:exactTicker,eventTicker:q?.eventTicker||exactTicker,mode:s.mode,marketFamilyExclusion});
@@ -1975,7 +1975,7 @@ export class StrategyEngine {
         gameClockState:q.gameClockState,
         liveStatus:q.liveStatus,
       };
-      const freshMarketFamilyExclusion=executionMarketFamilyExclusion(executionQuote.ticker);
+      const freshMarketFamilyExclusion=executionMarketFamilyExclusion(executionQuote.ticker,s);
       if(freshMarketFamilyExclusion.blocked){
         trace('MARKET_FAMILY_EXCLUSION_FRESH','BLOCKED',MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,{marketFamilyExclusion:freshMarketFamilyExclusion});
         await this.audit('market_family_fresh_execution_exclusion_blocked',{concept,ticker:executionQuote.ticker,eventTicker:expectedEventTicker,mode:s.mode,marketFamilyExclusion:freshMarketFamilyExclusion});
