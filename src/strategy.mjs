@@ -1730,8 +1730,8 @@ export class StrategyEngine {
     const scarletContinuationEntry=legacyCompatibility!==true&&concept==='Scarlet Needle'&&String(athenaFireCommand?.authorityMode||'')===SCARLET_NEEDLE.strategicEntryAuthority;
     const megaWaveAthenaEntry=legacyCompatibility!==true&&concept==='Athena Exclamation'&&String(athenaFireCommand?.authorityMode||'')===String(ATHENA_EXCLAMATION_DOCTRINE.strategicEntryAuthority);
     const megaWaveSaintEntry=legacyCompatibility!==true&&megaWaveAuthorization?.version===MEGA_WAVE.version&&String(megaWaveAuthorization?.parentConcept||'')==='Athena Exclamation';
-    const megaWaveClockBypass=false;
-    const strategicClockBypass=independentCrashRecoveryEntry;
+    const megaWaveClockBypass=megaWaveSaintEntry===true;
+    const strategicClockBypass=independentCrashRecoveryEntry||megaWaveClockBypass;
     const fullConfiguredSizeRequired=independentCrashRecoveryEntry||scarletContinuationEntry||megaWaveAthenaEntry||megaWaveSaintEntry;
     const executionAuthorityCommand=crystalWallIndependentEntry?crystalWallFireCommand:justiceArrowIndependentEntry?justiceArrowFireCommand:athenaFireCommand;
     const candidateId=String(executionAuthorityCommand?.decisionEvidence?.preBoltClearance?.preBoltId||entryQualificationSnapshot?.preBoltClearance?.preBoltId||executionAuthorityCommand?.authorizationId||executionAuthorityCommand?.boltId||entryQualificationSnapshot?.boltId||'');

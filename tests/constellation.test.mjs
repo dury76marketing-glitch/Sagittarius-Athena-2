@@ -600,3 +600,14 @@ test('TC1 FleetTickerLock allows shared ticker owners only when unison is on', (
   assert.equal(lock.tryAcquire('T1','ARIES').ok, false);
   assert.equal(lock.tryAcquire('T1','ARIES',{unison:true}).ok, true);
 });
+
+
+test('TC1 compact dashboard keeps systemName so closed trades name the cosmos', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.decorateEntry = (e)=>e;
+  const row = engine.compactDashboardEntry({
+    id:'h1', systemName:'SAGITTARIUS', ticker:'KXKBO-LOT', conceptName:'Athena Exclamation',
+    executionAttackName:'Athena Exclamation', status:'closed', pnlCents:5,
+  });
+  assert.equal(row.systemName, 'SAGITTARIUS');
+});
