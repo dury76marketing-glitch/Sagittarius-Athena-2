@@ -395,3 +395,16 @@ test('TC1 homepage subset picker lists twelve rooms and Crystal Wall crash rebou
   assert.ok(app.includes('crystalWallMinReboundCents'));
   assert.ok(app.includes('crystalWallMinUpwardTicks'));
 });
+
+
+test('TC1 LIVE portfolio uses Kalshi account balance and not simulation capital', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { mode: 'LIVE', startingCapitalCents: 1_000_000 };
+  engine.balance = { balance: 43210, balance_breakdown: [{ exchange_index: 0, balance: 43210 }] };
+  assert.equal(engine.liveKalshiBalanceCents(), 43210);
+  assert.equal(engine.portfolioValueCentsForMode(1_001_250), 43210);
+  engine.settings = { mode: 'SIMULATION', startingCapitalCents: 1_000_000 };
+  assert.equal(engine.portfolioValueCentsForMode(1_001_250), 1_001_250);
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="portfolioValueLabel"'));
+});

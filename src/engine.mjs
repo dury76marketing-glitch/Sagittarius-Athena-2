@@ -3040,6 +3040,28 @@ export class SagittariusEngine {
     return PORTFOLIO_CONCEPTS.has(concept);
   }
 
+  liveKalshiBalanceCents() {
+    const raw=this.balance;
+    if(!raw||typeof raw!=='object') return null;
+    if(Number.isFinite(Number(raw.balance))) return Number(raw.balance);
+    const breakdown=Array.isArray(raw.balance_breakdown)?raw.balance_breakdown:[];
+    let sum=0,any=false;
+    for(const row of breakdown){
+      if(!Number.isFinite(Number(row?.balance))) continue;
+      sum+=Number(row.balance)*100;
+      any=true;
+    }
+    return any?sum:null;
+  }
+
+  portfolioValueCentsForMode(simulationPortfolioCents) {
+    if(String(this.settings?.mode||'')==='LIVE'){
+      const live=this.liveKalshiBalanceCents();
+      return Number.isFinite(Number(live))?Number(live):null;
+    }
+    return Number(simulationPortfolioCents||0);
+  }
+
   collectConstellationOverview() {
     const rooms=[];
     for(const id of COSMOS_IDS){
@@ -3288,6 +3310,9 @@ export class SagittariusEngine {
       return this.health.reconciliationOk;
     }
     try {
+      if(typeof this.kalshi.getBalance==='function'){
+        this.balance=await this.kalshi.getBalance().catch(()=>this.balance);
+      }
       let positions = await this.kalshi.getPositions();
       this.brokerPositions = positions;
       let owned = await this.db.liveOpenHunterEntries(this.settings.ownerId);
@@ -3868,7 +3893,7 @@ export class SagittariusEngine {
       // Legacy/in-memory fallback: preserve deterministic period fields even
       // when the optimized PostgreSQL aggregate is unavailable. Production
       // uses the database's Europe/Madrid calendar boundaries below.
-      return {entries,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closed.length?wins/closed.length:0,openHunters:open.length,closedHunters:closed.length,portfolioValueCents:this.settings.startingCapitalCents+realized+unrealized,simulationCashCents,conceptAggregate:null,operationalHistory:false};
+      return {entries,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closed.length?wins/closed.length:0,openHunters:open.length,closedHunters:closed.length,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate:null,operationalHistory:false};
     }
 
     const reset = Number(this.settings.resetTimestampMs || 0);
@@ -3896,7 +3921,7 @@ export class SagittariusEngine {
     const closedRealized=Number(aggregate?.closed_realized_cents||0),partialRealized=Number(aggregate?.partial_realized_cents||0),realized=closedRealized+partialRealized;
     const simulationCashCents=Number(this.settings.startingCapitalCents||0)+Number(aggregate?.simulation_ledger_pnl_cents||0)-reserved;
     const wins=Number(aggregate?.wins||0),losses=Number(aggregate?.losses||0),scratches=Number(aggregate?.scratches||0),closedHunters=Number(aggregate?.closed_hunters||0),openHunters=Number(aggregate?.open_hunters||open.length);
-    return {entries:active,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:Number(aggregate?.day_realized_cents||0),weekRealizedCents:Number(aggregate?.week_realized_cents||0),monthRealizedCents:Number(aggregate?.month_realized_cents||0),yearRealizedCents:Number(aggregate?.year_realized_cents||0),hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closedHunters?wins/closedHunters:0,openHunters,closedHunters,portfolioValueCents:this.settings.startingCapitalCents+realized+unrealized,simulationCashCents,conceptAggregate,operationalHistory:true};
+    return {entries:active,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:Number(aggregate?.day_realized_cents||0),weekRealizedCents:Number(aggregate?.week_realized_cents||0),monthRealizedCents:Number(aggregate?.month_realized_cents||0),yearRealizedCents:Number(aggregate?.year_realized_cents||0),hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closedHunters?wins/closedHunters:0,openHunters,closedHunters,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate,operationalHistory:true};
   }
 
   buildAuroraSummary(entries = []) {
