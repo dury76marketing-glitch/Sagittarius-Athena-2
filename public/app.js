@@ -158,15 +158,20 @@ function clock(){setText('madridClock',new Intl.DateTimeFormat('en-GB',{timeZone
 setInterval(clock,1000);clock();load();const es=new EventSource('/api/events');es.onmessage=e=>{try{scheduleRender(JSON.parse(e.data));}catch{}};es.onerror=()=>{};
 
 window.addEventListener('hashchange',()=>{if(STATE)renderTwelveCosmos(STATE);});
+function selectedSubsetCosmosIds(){return [...document.querySelectorAll('[data-subset-cosmos]:checked')].map((el)=>String(el.dataset.subsetCosmos||'').toUpperCase()).filter(Boolean);}
+$('subsetSelectAllBtn')?.addEventListener('click',()=>{for(const el of document.querySelectorAll('[data-subset-cosmos]'))el.checked=true;});
+$('subsetClearBtn')?.addEventListener('click',()=>{for(const el of document.querySelectorAll('[data-subset-cosmos]'))el.checked=false;});
 $('subsetApplyBtn')?.addEventListener('click',async()=>{
-  const ids=String($('subsetIdsInput')?.value||'').split(',').map((x)=>x.trim()).filter(Boolean);
+  const ids=selectedSubsetCosmosIds();
   const crash=Number($('subsetCrystalCrash')?.value);
-  if(!ids.length)return msg('Enter at least one cosmos id.',true);
-  if(!Number.isFinite(crash))return msg('Enter a Crystal Wall min crash value.',true);
+  const rebound=Number($('subsetCrystalRebound')?.value);
+  const ticks=Number($('subsetCrystalTicks')?.value);
+  if(!ids.length)return msg('Select at least one cosmos.',true);
+  if(!Number.isFinite(crash)||!Number.isFinite(rebound)||!Number.isFinite(ticks))return msg('Enter Crystal Wall crash, rebound and upward ticks.',true);
   try{
-    const r=await post('/api/cosmos/subset',{ids,patch:{crystalWallMinCrashCents:crash}});
+    const r=await post('/api/cosmos/subset',{ids,patch:{crystalWallMinCrashCents:crash,crystalWallMinReboundCents:rebound,crystalWallMinUpwardTicks:ticks}});
     await load();
-    msg(`Subset saved on ${r.count||ids.length} rooms.`);
+    msg(`Crystal Wall crash/rebound/ticks saved on ${r.count||ids.length} rooms.`);
   }catch(e){msg(e.message,true);}
 });
 

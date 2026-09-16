@@ -380,3 +380,18 @@ test('TC1 homepage keeps a top Home control and hides shadow from overview copy'
   assert.ok(html.includes('>Home</a>'));
   assert.ok(html.includes('Real SIM and LIVE Execution Attacks only'));
 });
+
+
+test('TC1 homepage subset picker lists twelve rooms and Crystal Wall crash rebound ticks', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  for (const id of ['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES']) {
+    assert.ok(html.includes(`data-subset-cosmos="${id}"`), id);
+  }
+  assert.ok(html.includes('id="subsetCrystalCrash"'));
+  assert.ok(html.includes('id="subsetCrystalRebound"'));
+  assert.ok(html.includes('id="subsetCrystalTicks"'));
+  assert.ok(html.includes('id="subsetSelectAllBtn"'));
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes('crystalWallMinReboundCents'));
+  assert.ok(app.includes('crystalWallMinUpwardTicks'));
+});

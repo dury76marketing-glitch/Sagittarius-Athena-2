@@ -23,10 +23,32 @@
   <section id="twelveCosmosSection" class="card">
     <div class="section-title"><div><h2>TWELVE GOLDEN SAINT COSMOS <span id="twelveCosmosStatus" class="pill">Loading</span></h2><p class="muted">One process, one Kalshi account, one scanner, one clock. Real SIM and LIVE Execution Attacks only. Shadow Pegasus, Dragon, Phoenix, Gemini and Crystal Wall are excluded. Homepage Save writes all twelve.</p></div></div>
     <div class="table-wrap"><table><thead><tr><th>Cosmos</th><th>Window</th><th>Open</th><th>Closed</th><th>P/L</th><th></th></tr></thead><tbody id="twelveCosmosBody"></tbody></table></div>
-    <div class="atomic-thunder-settings" id="twelveCosmosSubset">
-      <label>Subset rooms <span><input id="subsetIdsInput" placeholder="ARIES,LEO,PISCES"></span></label>
-      <label>Crystal Wall min crash <span><input id="subsetCrystalCrash" type="number" min="1" max="99" step="1"><em>c</em></span></label>
-      <button id="subsetApplyBtn" class="btn light" type="button">Apply to selected rooms</button>
+    <div id="twelveCosmosSubset">
+      <p class="muted">Select cosmosses below. Crystal Wall crash, rebound and upticks apply only to the checked rooms. Select all to write every room from the homepage.</p>
+      <div class="settings-grid" id="subsetRoomPick">
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="ARIES"> Aries</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="TAURUS"> Taurus</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="GEMINI"> Gemini</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="CANCER"> Cancer</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="LEO"> Leo</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="VIRGO"> Virgo</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="LIBRA"> Libra</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="SCORPIO"> Scorpio</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="SAGITTARIUS"> Sagittarius</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="CAPRICORN"> Capricorn</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="AQUARIUS"> Aquarius</label>
+      <label class="subset-room"><input type="checkbox" data-subset-cosmos="PISCES"> Pisces</label>
+      </div>
+      <div class="form-actions" style="margin:8px 0;gap:8px">
+        <button id="subsetSelectAllBtn" class="btn light" type="button">Select all</button>
+        <button id="subsetClearBtn" class="btn light" type="button">Clear selection</button>
+      </div>
+      <div class="atomic-thunder-settings">
+        <label>Crystal Wall min crash <span><input id="subsetCrystalCrash" type="number" min="1" max="99" step="1"><em>c</em></span></label>
+        <label>Crystal Wall min rebound <span><input id="subsetCrystalRebound" type="number" min="1" max="99" step="1"><em>c</em></span></label>
+        <label>Crystal Wall upward ticks <span><input id="subsetCrystalTicks" type="number" min="1" max="20" step="1"></span></label>
+        <button id="subsetApplyBtn" class="btn primary" type="button">Apply to selected rooms</button>
+      </div>
     </div>
     <section id="cosmosEditor" class="card hidden"><div class="section-title"><div><h2 id="cosmosEditorTitle">COSMOS SETTINGS</h2><p class="muted" id="cosmosEditorNote">Edits this room only. Homepage Save still broadcasts to all twelve.</p></div><a class="btn light" href="#home">Back to homepage</a></div></section>
   </section>
