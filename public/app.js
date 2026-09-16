@@ -114,11 +114,16 @@ function renderTwelveCosmos(s){
     b.innerHTML=list.map((row)=>{
       const id=row.id||row.displayName;
       const window=`${row.minGameMinutes??s.settings?.minGameMinutes??0}-${row.maxGameMinutes??s.settings?.maxGameMinutes??0}`;
-      return `<tr><td>${esc(row.displayName||id)}</td><td>${esc(window)}</td><td>${Number(row.open||0)}</td><td>${Number(row.closed||0)}</td><td class="${pnlClass(row.pnlCents)}">${money(row.pnlCents)}</td><td><a class="btn light" href="#cosmos/${esc(id)}">Settings</a></td></tr>`;
+      const andromeda=row.andromedaThunderWaveEnabled===true?`ON ${esc(row.andromedaThunderWaveLevel||'HIGH')}`:'OFF';
+      return `<tr><td>${esc(row.displayName||id)}</td><td>${esc(window)}</td><td>${esc(andromeda)}</td><td>${Number(row.open||0)}</td><td>${Number(row.closed||0)}</td><td class="${pnlClass(row.pnlCents)}">${money(row.pnlCents)}</td><td><a class="btn light" href="#cosmos/${esc(id)}">Settings</a></td></tr>`;
     }).join('');
   }
   const st=$('twelveCosmosStatus');
   if(st){st.textContent=`${(s.constellationOverview||[]).length||12} rooms`;st.className='pill green';}
+  const hostOn=s.settings?.andromedaThunderWaveEnabled===true;
+  const hostLevel=String(s.settings?.andromedaThunderWaveLevel||'HIGH').toUpperCase();
+  if($('subsetAndromedaEnabled')) $('subsetAndromedaEnabled').value=hostOn?'on':'off';
+  if($('subsetAndromedaLevel')) $('subsetAndromedaLevel').value=hostLevel==='MID'||hostLevel==='MEDIUM'?'MID':hostLevel==='LOW'?'LOW':'HIGH';
   const editor=$('cosmosEditor');
   const active=currentCosmosId();
   ACTIVE_COSMOS=active;
@@ -250,7 +255,6 @@ $('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
   const ids=selectedSubsetCosmosIds();
   const on=String($('subsetAndromedaEnabled')?.value||'off')==='on';
   const level=String($('subsetAndromedaLevel')?.value||'HIGH').toUpperCase();
-  if(!ids.length)return msg('Select at least one cosmos.',true);
   try{
     const patch={andromedaThunderWaveEnabled:on,andromedaThunderWaveLevel:on?level:'HIGH'};
     const r=await post('/api/cosmos/subset',{ids,patch});
@@ -261,7 +265,9 @@ $('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
     }
     CONTROL_FINGERPRINT='';
     await load();
-    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on ${r.count||ids.length} rooms.`);
+    const n=r.count||ids.length||12;
+    const host=r.broadcastHost===true?' + host dump':'';
+    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on ${n} rooms${host}.`);
   }catch(e){msg(e.message,true);}
 });
 

@@ -2989,9 +2989,13 @@ export class SagittariusEngine {
     const cosmosId=normalizeCosmosId(id);
     if(!cosmosId) return;
     this.cosmosWindowById=this.cosmosWindowById||{};
+    const enabled=settings?.andromedaThunderWaveEnabled===true;
+    const level=String(settings?.andromedaThunderWaveLevel||'HIGH').trim().toUpperCase();
     this.cosmosWindowById[cosmosId]={
       minGameMinutes:Math.max(0,Number(settings?.minGameMinutes||0)),
       maxGameMinutes:Math.max(0,Number(settings?.maxGameMinutes||0)),
+      andromedaThunderWaveEnabled:enabled,
+      andromedaThunderWaveLevel:enabled?(level==='MID'||level==='MEDIUM'?'MID':level==='LOW'?'LOW':'HIGH'):'HIGH',
     };
   }
 
@@ -3126,6 +3130,8 @@ export class SagittariusEngine {
         pnlCents:closed.reduce((sum,row)=>sum+Number(row.pnlCents||0),0),
         minGameMinutes:Number(window.minGameMinutes||0),
         maxGameMinutes:Number(window.maxGameMinutes||0),
+        andromedaThunderWaveEnabled:window.andromedaThunderWaveEnabled===true,
+        andromedaThunderWaveLevel:window.andromedaThunderWaveEnabled===true?String(window.andromedaThunderWaveLevel||'HIGH'):'HIGH',
       });
     }
     return rooms;
@@ -3166,10 +3172,22 @@ export class SagittariusEngine {
 
   async patchCosmosSubset(ids, patch) {
     const selected=[...new Set((ids||[]).map((id)=>normalizeCosmosId(id)).filter(Boolean))];
-    if(!selected.length) throw new Error('cosmos_subset_empty');
+    const keys=Object.keys(patch||{});
+    const andromedaPatch=keys.includes('andromedaThunderWaveEnabled')||keys.includes('andromedaThunderWaveLevel');
+    const rooms=selected.length?selected:(andromedaPatch?[...COSMOS_IDS]:[]);
+    if(!rooms.length) throw new Error('cosmos_subset_empty');
     const results=[];
-    for(const id of selected) results.push({cosmos:id, settings:await this.applySettingsPatch(patch,{scope:'cosmos',cosmosId:id})});
-    return {ok:true, count:results.length, results};
+    for(const id of rooms) results.push({cosmos:id, settings:await this.applySettingsPatch(patch,{scope:'cosmos',cosmosId:id})});
+    const writesAndromeda=andromedaPatch;
+    const writesHost=writesAndromeda && rooms.length===COSMOS_IDS.length;
+    let host=null;
+    if(writesHost){
+      host=await this.applySettingsPatch({
+        andromedaThunderWaveEnabled:patch.andromedaThunderWaveEnabled===true,
+        andromedaThunderWaveLevel:patch.andromedaThunderWaveEnabled===true?patch.andromedaThunderWaveLevel:'HIGH',
+      },{scope:'master'});
+    }
+    return {ok:true, count:results.length, results, host, broadcastHost:writesHost===true};
   }
 
   async applySettingsPatch(patch, {scope='master', cosmosId=null}={}) {

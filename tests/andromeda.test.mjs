@@ -123,3 +123,21 @@ test('Andromeda homepage card sits under Athena/Saint subset and writes the subs
   assert.ok(app.includes('andromedaThunderWaveLevel'));
   assert.ok(app.includes('subsetAndromedaApplyBtn'));
 });
+
+
+test('Andromeda apply with no ticks targets all rooms and mirrors the host dump line', async () => {
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
+  const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  const applyAt=app.indexOf("subsetAndromedaApplyBtn");
+  const nextHandler=app.indexOf("addEventListener", applyAt+40);
+  const slice=app.slice(applyAt, nextHandler>applyAt?nextHandler:applyAt+900);
+  assert.ok(applyAt>0);
+  assert.equal(slice.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"), false);
+  assert.ok(html.includes('No rooms ticked = all twelve'));
+  assert.ok(html.includes('<th>Andromeda</th>'));
+  assert.ok(app.includes('andromedaThunderWaveEnabled===true'));
+  assert.ok(engine.includes('broadcastHost'));
+  assert.ok(engine.includes('andromedaPatch'));
+  assert.ok(engine.includes('rooms.length===COSMOS_IDS.length'));
+});
