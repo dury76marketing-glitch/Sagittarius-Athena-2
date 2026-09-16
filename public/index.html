@@ -78,6 +78,32 @@
     </div>
     </details>
 
+    <details id="saintSubsetFold" class="card">
+      <summary><strong>Athena and Saint subset</strong> <span class="muted">Homepage only. Same selected rooms. Choose one attack, then apply crash / rebound / ticks</span></summary>
+      <div id="saintSubset">
+        <p class="muted">Uses the cosmosses ticked in Crystal Wall subset above. Writes only the chosen attack onto those rooms.</p>
+        <div class="atomic-thunder-settings">
+          <label>Attack
+            <span>
+              <select id="subsetSaintAttack">
+                <option value="athena">Athena Exclamation</option>
+                <option value="scarlet">Scarlet Needle</option>
+                <option value="justice">Justice Arrow</option>
+                <option value="wave">Wave Surfer</option>
+                <option value="horn">Great Horn</option>
+                <option value="starlight">Starlight Extinction</option>
+                <option value="plasma">Lightning Plasma</option>
+              </select>
+            </span>
+          </label>
+          <label>Min crash <span><input id="subsetSaintCrash" type="number" min="1" max="99" step="1"><em>c</em></span></label>
+          <label>Min rebound <span><input id="subsetSaintRebound" type="number" min="1" max="99" step="1"><em>c</em></span></label>
+          <label>Upward ticks <span><input id="subsetSaintTicks" type="number" min="1" max="20" step="1"></span></label>
+          <button id="subsetSaintApplyBtn" class="btn primary" type="button">Apply attack to selected rooms</button>
+        </div>
+      </div>
+    </details>
+
     <section id="atomicThunderBoltSection" class="card bolt-section">
       <div class="architecture-label">1 / COSMO GREEN → IMMEDIATE SIGNAL</div>
       <div class="section-title"><div><h2>ATOMIC THUNDER BOLT <span id="boltStatus" class="pill">Loading</span></h2><p class="muted">Signal authority only. Atomic Thunder watches persisted Pegasus, Dragon and Phoenix shadow trades. The first fresh executable green crossing emits one immediate Bolt; there is no mandatory 30/120 second pattern wait.</p></div></div>

@@ -473,3 +473,45 @@ test('TC1 homepage order is title, controls, performance, open, closed, twelve c
     last = at;
   }
 });
+
+
+test('TC1 saint subset sits under Crystal Wall and posts attack confirmation keys', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="saintSubsetFold"'));
+  assert.ok(html.includes('id="subsetSaintAttack"'));
+  assert.ok(html.includes('id="subsetSaintApplyBtn"'));
+  assert.ok(html.indexOf('id="twelveCosmosSubsetFold"') < html.indexOf('id="saintSubsetFold"'));
+  assert.ok(html.indexOf('id="saintSubsetFold"') < html.indexOf('id="atomicThunderBoltSection"'));
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes('athenaExclamationMinCrashCents'));
+  assert.ok(app.includes('scarletNeedleMinReboundCents'));
+  assert.ok(app.includes('justiceArrowMinUpwardTicks'));
+  assert.ok(app.includes('waveMinCrashCents'));
+  assert.ok(app.includes('momentumMinReboundCents'));
+  assert.ok(app.includes('crashRecoveryMinUpwardTicks'));
+  assert.ok(app.includes('lightningPlasmaMinCrashCents'));
+});
+
+test('TC1 saint subset patch writes only the chosen attack onto selected rooms', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = originalSettings();
+  engine.settingsMutationTail = Promise.resolve();
+  engine.invalidateStateSnapshot = () => {};
+  engine.setCosmosWindow = () => {};
+  const rows = {};
+  engine.db = {
+    async loadCosmosSettings(id, defaults) { return { ...defaults, ...(rows[id] || engine.settings) }; },
+    async saveCosmosSettings(id, settings) { rows[id] = settings; },
+    async audit() {},
+  };
+  const out = await engine.patchCosmosSubset(['LEO'], {
+    athenaExclamationMinCrashCents: 21,
+    athenaExclamationMinReboundCents: 8,
+    athenaExclamationMinUpwardTicks: 4,
+  });
+  assert.equal(out.count, 1);
+  assert.equal(rows.LEO.athenaExclamationMinCrashCents, 21);
+  assert.equal(rows.LEO.athenaExclamationMinReboundCents, 8);
+  assert.equal(rows.LEO.athenaExclamationMinUpwardTicks, 4);
+  assert.equal(rows.ARIES, undefined);
+});
