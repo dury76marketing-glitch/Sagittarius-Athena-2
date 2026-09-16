@@ -1,5 +1,7 @@
 let STATE=null;
 let ACTIVE_COSMOS=null;
+let COSMOS_VIEW_ID=null;
+let COSMOS_VIEW_SETTINGS=null;
 let COSMO_FILTER='ALL';
 let CONTROL_FINGERPRINT='';
 let pendingRenderState=null,renderFrame=0;
@@ -119,18 +121,38 @@ function renderTwelveCosmos(s){
   const editor=$('cosmosEditor');
   const active=currentCosmosId();
   ACTIVE_COSMOS=active;
+  const homeOnly=$('twelveCosmosHomeOnly');
+  if(homeOnly) homeOnly.classList.toggle('hidden', Boolean(active));
+  const subset=$('twelveCosmosSubset');
+  if(subset) subset.classList.toggle('hidden', Boolean(active));
   if(editor){
     editor.classList.toggle('hidden',!active);
     if(active){
       setText('cosmosEditorTitle',`${active} SETTINGS`);
-      setText('cosmosEditorNote',`Editing ${active} only. Stakes stay full size. Homepage Save still writes all twelve.`);
+      setText('cosmosEditorNote',`Editing ${active} only. These boards show this room's saved settings.`);
+      if(COSMOS_VIEW_ID!==active){
+        COSMOS_VIEW_ID=active;
+        COSMOS_VIEW_SETTINGS=null;
+        fetch(`/api/cosmos/${active}/settings`,{cache:'no-store'}).then(async(r)=>{
+          const j=await r.json();
+          if(!r.ok)throw new Error(j.error||'cosmos_settings_unavailable');
+          if(currentCosmosId()!==active)return;
+          COSMOS_VIEW_SETTINGS=j.settings||j;
+          CONTROL_FINGERPRINT='';
+          if(STATE) render(STATE);
+        }).catch((e)=>msg(e.message,true));
+      }
+    } else {
+      COSMOS_VIEW_ID=null;
+      COSMOS_VIEW_SETTINGS=null;
     }
   }
 }
 function renderSystem(s){const p=s.performance||{},h=s.health||{},r=s.resourceUsage||{};setText('portfolioValueLabel',s.settings?.mode==='LIVE'?'Kalshi Portfolio':'Portfolio Value');if(s.settings?.mode==='LIVE'&&p.portfolioValueCents==null){setText('portfolioValue','Kalshi —');const el=$('portfolioValue');if(el)el.className='';}else setPnl('portfolioValue',p.portfolioValueCents,true);setPnl('simFreeCash',p.simulationCashCents,true);setText('winRate',pct01(p.winRate));setPnl('unrealized',p.unrealizedCents);setPnl('realized',p.realizedCents);setPnl('profitToday',p.dayRealizedCents);setPnl('profitWeek',p.weekRealizedCents);setPnl('profitMonth',p.monthRealizedCents);setPnl('profitYear',p.yearRealizedCents);setText('openCount',p.open||0);setText('closedPerfCount',p.closed||0);setText('releaseLabel',s.settings?.release||s.release||'R60-COSMO-GREEN');setText('modeBtn',s.settings?.mode||'SIMULATION');$('modeBtn').className=`btn ${s.settings?.mode==='LIVE'?'danger':'light'}`;setText('modeNote',s.settings?.mode==='LIVE'?(s.settings?.liveArmed?'LIVE armed':'LIVE selected, disarmed'):'Paper trading - no real orders.');setText('engineBtn',s.settings?.engineActive?'Stop Engine':'Start Engine');setText('engineStatus',s.settings?.engineActive?'Engine running':'Engine stopped');$('engineStatus').className=`pill ${s.settings?.engineActive?'green':'red'}`;setText('systemStatus',h.degraded?'DEGRADED':'HEALTHY');$('systemStatus').className=`pill ${h.degraded?'red':'green'}`;setText('uptime',duration(Date.now()-Number(h.startedAtMs||Date.now())));const errors=(s.audit||[]).filter(x=>x.level==='error');$('errorWatchdog').classList.toggle('hidden',!errors.length);if(errors.length)$('errorWatchdog').textContent=`Error Watchdog — ${errors.length} recent errors · ${errors[0].event}: ${errors[0].data?.message||''}`;const scan=s.scanner||{};const scanFresh=Number(scan.lastScanMs||0)>0&&Date.now()-Number(scan.lastScanMs)<10*60*1000;setText('entryRunning',scanFresh?'Running':'Waiting');$('entryRunning').className=`pill ${scanFresh?'green':'amber'}`;setText('scannerActive',scanFresh?'ACTIVE':'WAITING');$('scannerActive').className=`pill ${scanFresh?'green':'amber'}`;setText('scannerDetail',`Tracked ${scan.tracked||0} · active markets ${scan.activeMarkets||0} · last scan ${scan.lastScanMs?duration(Date.now()-scan.lastScanMs)+' ago':'never'}`);const resourceState=r.pressureState||r.status||'UNKNOWN';setText('resourceStatus',resourceState);$('resourceStatus').className=`pill ${['NORMAL','GREEN'].includes(resourceState)?'green':['WATCH','COMPACT','PRESSURE'].includes(resourceState)?'amber':'red'}`;setText('resourceRss',mib(r.memory?.rssBytes??r.rssBytes));setText('resourceHeapUsed',mib(r.memory?.heapUsedBytes??r.heapUsedBytes));setText('resourceCpu',Number.isFinite(Number(r.cpuPercent))?`${Number(r.cpuPercent).toFixed(1)}%`:'-');setText('resourceUptime',duration((r.uptimeSeconds??r.processUptimeSeconds??0)*1000));setText('connectionPill',h.restOk&&h.websocketFresh?'Connected':'Connection check');$('connectionPill').className=`pill ${h.restOk&&h.websocketFresh?'green':'amber'}`;$('systemNameInput').value=s.settings?.systemName||'SAGITTARIUS';}
 function renderGalactic(s){const on=s.settings?.galacticExplosionEnabled===true;setText('galacticStatus',on?'ON':'OFF');$('galacticStatus').className=`pill ${on?'amber':'red'}`;const b=$('galacticExplosionToggle');b.textContent=on?'ON':'OFF';b.dataset.enabled=String(on);b.className=`galactic-toggle ${on?'enabled':'disabled'}`;}
 function controlFingerprint(s){try{return JSON.stringify({settings:s.settings||{},conceptStats:s.conceptStats||[],gemini:s.gemini||{},crystalWallShadow:s.crystalWallShadow||{}});}catch{return String(Date.now());}}
-function render(s){STATE=s;renderTwelveCosmos(s);renderSystem(s);renderBolt(s);renderAthena(s);renderInfinity(s);renderAurora(s);renderTrades(s);const fp=controlFingerprint(s);if(fp!==CONTROL_FINGERPRINT){CONTROL_FINGERPRINT=fp;renderSettings(s);renderAttacks(s);renderCosmos(s);renderGalactic(s);}}
+function boardState(s){const id=currentCosmosId();if(id&&COSMOS_VIEW_ID===id&&COSMOS_VIEW_SETTINGS)return {...s,settings:{...(s.settings||{}),...COSMOS_VIEW_SETTINGS,systemName:id}};return s;}
+function render(s){STATE=s;renderTwelveCosmos(s);renderSystem(s);renderBolt(s);renderAthena(s);renderInfinity(s);renderAurora(s);renderTrades(s);const view=boardState(s);const fp=controlFingerprint(view);if(fp!==CONTROL_FINGERPRINT){CONTROL_FINGERPRINT=fp;renderSettings(view);renderAttacks(view);renderCosmos(view);renderGalactic(view);}}
 function scheduleRender(s){pendingRenderState=s;if(renderFrame)return;const flush=()=>{renderFrame=0;const latest=pendingRenderState;pendingRenderState=null;if(latest)render(latest);};renderFrame=(window.requestAnimationFrame||((fn)=>setTimeout(fn,0)))(flush);}
 async function load(){try{const r=await fetch('/api/state',{cache:'no-store'});const j=await r.json();if(!r.ok)throw new Error(j.error||'State unavailable');render(j);}catch(e){console.error(e);msg(e.message,true);}}
 async function patchSettingsVerified(data){const cosmos=currentCosmosId();const url=cosmos?`/api/cosmos/${cosmos}/settings`:'/api/settings';const j=await patch(url,data);const state=j.state||j;const settings=state.settings||state;for(const [k,v] of Object.entries(data)){if(k==='systemName')continue;if(Number.isFinite(Number(v))&&Number(settings?.[k])!==Number(v))throw new Error(`Setting ${k} did not persist exactly`);if(typeof v==='boolean'&&settings?.[k]!==v)throw new Error(`Setting ${k} did not persist exactly`);}return STATE?{...STATE,settings:{...(STATE.settings||{}),...settings}}:state;}
@@ -163,13 +185,19 @@ $('subsetSelectAllBtn')?.addEventListener('click',()=>{for(const el of document.
 $('subsetClearBtn')?.addEventListener('click',()=>{for(const el of document.querySelectorAll('[data-subset-cosmos]'))el.checked=false;});
 $('subsetApplyBtn')?.addEventListener('click',async()=>{
   const ids=selectedSubsetCosmosIds();
-  const crash=Number($('subsetCrystalCrash')?.value);
-  const rebound=Number($('subsetCrystalRebound')?.value);
-  const ticks=Number($('subsetCrystalTicks')?.value);
+  const crash=Math.floor(Number($('subsetCrystalCrash')?.value));
+  const rebound=Math.floor(Number($('subsetCrystalRebound')?.value));
+  const ticks=Math.floor(Number($('subsetCrystalTicks')?.value));
   if(!ids.length)return msg('Select at least one cosmos.',true);
-  if(!Number.isFinite(crash)||!Number.isFinite(rebound)||!Number.isFinite(ticks))return msg('Enter Crystal Wall crash, rebound and upward ticks.',true);
+  if(!Number.isInteger(crash)||!Number.isInteger(rebound)||!Number.isInteger(ticks))return msg('Enter Crystal Wall crash, rebound and upward ticks.',true);
   try{
     const r=await post('/api/cosmos/subset',{ids,patch:{crystalWallMinCrashCents:crash,crystalWallMinReboundCents:rebound,crystalWallMinUpwardTicks:ticks}});
+    if(!r?.ok && !r?.count) throw new Error(r?.error||'subset_save_failed');
+    const written=Array.isArray(r.results)?r.results:[];
+    for(const row of written){
+      if(row?.cosmos===COSMOS_VIEW_ID&&row.settings)COSMOS_VIEW_SETTINGS=row.settings;
+    }
+    CONTROL_FINGERPRINT='';
     await load();
     msg(`Crystal Wall crash/rebound/ticks saved on ${r.count||ids.length} rooms.`);
   }catch(e){msg(e.message,true);}

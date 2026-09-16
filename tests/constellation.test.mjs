@@ -408,3 +408,41 @@ test('TC1 LIVE portfolio uses Kalshi account balance and not simulation capital'
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
   assert.ok(html.includes('id="portfolioValueLabel"'));
 });
+
+
+test('TC1 subset tool is homepage-only and the overview table is foldable', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('id="twelveCosmosHomeOnly"'));
+  assert.ok(html.includes('id="twelveCosmosTableFold"'));
+  assert.ok(html.includes('id="twelveCosmosSubsetFold"'));
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes("homeOnly.classList.toggle('hidden'"));
+  assert.ok(app.includes('/api/cosmos/${active}/settings'));
+  assert.ok(app.includes('boardState'));
+});
+
+test('TC1-P7 subset patch writes crash rebound and ticks onto selected rooms only', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = originalSettings();
+  engine.settingsMutationTail = Promise.resolve();
+  engine.invalidateStateSnapshot = () => {};
+  engine.setCosmosWindow = () => {};
+  const rows = {};
+  engine.db = {
+    async loadCosmosSettings(id, defaults) { return { ...defaults, ...(rows[id] || engine.settings) }; },
+    async saveCosmosSettings(id, settings) { rows[id] = settings; },
+    async audit() {},
+  };
+  const out = await engine.patchCosmosSubset(['ARIES','PISCES'], {
+    crystalWallMinCrashCents: 18,
+    crystalWallMinReboundCents: 7,
+    crystalWallMinUpwardTicks: 3,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.count, 2);
+  assert.equal(rows.ARIES.crystalWallMinCrashCents, 18);
+  assert.equal(rows.ARIES.crystalWallMinReboundCents, 7);
+  assert.equal(rows.ARIES.crystalWallMinUpwardTicks, 3);
+  assert.equal(rows.PISCES.crystalWallMinCrashCents, 18);
+  assert.equal(rows.TAURUS, undefined);
+});
