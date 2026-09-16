@@ -272,10 +272,17 @@ export class FleetTickerLock {
     return key ? (this.held.get(key) || null) : null;
   }
 
-  tryAcquire(ticker, cosmosId) {
+  tryAcquire(ticker, cosmosId, { unison=false }={}) {
     const key = String(ticker || '').trim();
     const owner = String(cosmosId || '').trim();
     if (!key || !owner) return { ok: false, reason: 'fleet_lock_invalid' };
+    if (unison===true) {
+      this.shared = this.shared instanceof Map ? this.shared : new Map();
+      const set = this.shared.get(key) || new Set();
+      set.add(owner);
+      this.shared.set(key, set);
+      return { ok: true, occupier: owner, unison:true };
+    }
     const current = this.held.get(key);
     if (current && current !== owner) return { ok: false, reason: 'fleet_ticker_occupied', occupier: current };
     this.held.set(key, owner);

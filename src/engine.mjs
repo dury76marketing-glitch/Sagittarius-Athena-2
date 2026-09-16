@@ -3066,16 +3066,19 @@ export class SagittariusEngine {
 
   pickCosmosForRealHunter(ticker) {
     const exact=String(ticker||'');
+    const unison=this.settings?.rozanHyakuRyuHaEnabled===true;
     const openLike=(status)=>['open','entry_pending','exit_pending','pending_recovery'].includes(String(status||''));
     const rowsFor=(id)=>isolateBook(this.cosmosBooks?.[id]||[],id);
     const holding=[];
     for(const id of COSMOS_IDS){
       if(rowsFor(id).some((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)&&String(row.ticker||'')===exact)) holding.push(id);
     }
-    if(holding.length) return holding[0];
-    let best=COSMOS_IDS[0], bestOpen=Number.POSITIVE_INFINITY, bestIdx=0;
-    for(let i=0;i<COSMOS_IDS.length;i+=1){
-      const id=COSMOS_IDS[i];
+    if(holding.length && unison!==true) return holding[0];
+    const candidates=COSMOS_IDS.filter((id)=>unison!==true || !holding.includes(id));
+    const pool=candidates.length?candidates:COSMOS_IDS;
+    let best=pool[0], bestOpen=Number.POSITIVE_INFINITY, bestIdx=0;
+    for(let i=0;i<pool.length;i+=1){
+      const id=pool[i];
       const open=rowsFor(id).filter((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)).length;
       if(open<bestOpen || (open===bestOpen && i<bestIdx)){ best=id; bestOpen=open; bestIdx=i; }
     }

@@ -284,6 +284,18 @@ export const GALACTIC_EXPLOSION = Object.freeze({
   sameAttackDuplicatesAllowed:false,
 });
 
+export const ROZAN_HYAKU_RYU_HA = Object.freeze({
+  version:'ROZAN-HYAKU-RYU-HA-V1',
+  policyRevision:'RHRH-R1-ZODIAC-UNISON',
+  saint:'LIBRA',
+  displayName:'Rozan Hyaku Ryu Ha',
+  role:'fleet_ticker_correlation_override',
+  defaultEnabled:false,
+  offRule:'one_exact_ticker_one_cosmos',
+  onRule:'all_cosmos_may_enter_same_exact_ticker',
+});
+
+
 // HF2/R55 shared Cosmo routing doctrine. Pegasus, Dragon and Phoenix are
 // reference-only opportunity sources. Any present/future normal initial-entry
 // Attack may consume an active Cosmo, but the Cosmo never grants entry authority: the

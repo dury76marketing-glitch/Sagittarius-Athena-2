@@ -569,3 +569,34 @@ test('TC1 Mega Wave Athena continuation accepts a Crystal Wall parent from anoth
   const out = await SagittariusEngine.prototype.handleMegaWaveAthenaContinuation.call(engine, parent);
   assert.notEqual(out.reason, 'parent_identity_or_mode_mismatch');
 });
+
+
+test('TC1 Rozan Hyaku Ryu Ha sits under Galactic Explosion and defaults off', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const geo = html.indexOf('galacticExplosionToggle');
+  const rozan = html.indexOf('rozanHyakuRyuHaToggle');
+  assert.ok(geo > 0 && rozan > geo);
+  const cfg = await readFile(new URL('../src/config.mjs', import.meta.url), 'utf8');
+  assert.ok(cfg.includes('rozanHyakuRyuHaEnabled'));
+  const factory = originalSettings();
+  assert.equal(factory.rozanHyakuRyuHaEnabled, false);
+});
+
+test('TC1 Rozan ON assigns a second cosmos to an occupied ticker', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { rozanHyakuRyuHaEnabled: true };
+  engine.cosmosBooks = Object.fromEntries(['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES'].map((id)=>[id,[]]));
+  engine.cosmosBooks.SAGITTARIUS = [
+    { id:'a', systemName:'SAGITTARIUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXKBOGAME-LOT' },
+  ];
+  assert.equal(engine.pickCosmosForRealHunter('KXKBOGAME-LOT'), 'ARIES');
+  engine.settings = { rozanHyakuRyuHaEnabled: false };
+  assert.equal(engine.pickCosmosForRealHunter('KXKBOGAME-LOT'), 'SAGITTARIUS');
+});
+
+test('TC1 FleetTickerLock allows shared ticker owners only when unison is on', () => {
+  const lock = new FleetTickerLock();
+  assert.equal(lock.tryAcquire('T1','SAGITTARIUS').ok, true);
+  assert.equal(lock.tryAcquire('T1','ARIES').ok, false);
+  assert.equal(lock.tryAcquire('T1','ARIES',{unison:true}).ok, true);
+});

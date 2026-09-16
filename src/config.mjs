@@ -162,6 +162,7 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'athenaExclamationEnabled',
   'lightningPlasmaEnabled',
   'galacticExplosionEnabled',
+  'rozanHyakuRyuHaEnabled',
   'athenaSoulEnabled',
 
   'athenaExclamationPri1R2Enabled',
@@ -211,6 +212,7 @@ export function originalSettings() {
     athenaExclamationEnabled: false,
     lightningPlasmaEnabled: true,
     galacticExplosionEnabled: false,
+    rozanHyakuRyuHaEnabled: false,
     athenaSoulEnabled: false,
 
     maxPositions: 8,
@@ -365,6 +367,7 @@ export function freshInstallSettings() {
     athenaExclamationEnabled:true,
     lightningPlasmaEnabled:true,
     galacticExplosionEnabled:false,
+    rozanHyakuRyuHaEnabled:false,
     athenaSoulEnabled:false,
 
     maxPositions:20,

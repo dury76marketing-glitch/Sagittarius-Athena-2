@@ -1457,11 +1457,15 @@ export class StrategyEngine {
   async exactTickerExposureClear(concept, q, stage = 'policy', { crystalWallOverlay = false } = {}) {
     const s=this.getSettings();
     const active = await this.activeHunterTickerExposure(q.ticker);
+    const room=String(s.systemName||'');
+    const fleet=s.rozanHyakuRyuHaEnabled===true
+      ? active.filter((e)=>String(e.systemName||'')===room)
+      : active;
     const conflicts=crystalWallOverlay===true
-      ? active.filter((e)=>e.conceptName===concept)
+      ? fleet.filter((e)=>e.conceptName===concept)
       : s.galacticExplosionEnabled===true
-        ? active.filter((e)=>e.conceptName===concept)
-        : active;
+        ? fleet.filter((e)=>e.conceptName===concept)
+        : fleet;
     if (!conflicts.length) return true;
     const existing = conflicts
       .slice()
@@ -2118,10 +2122,11 @@ export class StrategyEngine {
         }
       }
       if (typeof this.db.acquireFleetTickerLock === 'function') {
-        fleetTickerUnlock = await this.db.acquireFleetTickerLock(exactTicker);
+        const fleetLockKey=s.rozanHyakuRyuHaEnabled===true?`${exactTicker}|cosmos:${s.systemName}`:exactTicker;
+        fleetTickerUnlock = await this.db.acquireFleetTickerLock(fleetLockKey);
         if (!fleetTickerUnlock) {
           trace('FLEET_TICKER_LOCK','BLOCKED','fleet_ticker_lock_busy');
-          await this.audit('fleet_ticker_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker,cosmos:s.systemName});
+          await this.audit('fleet_ticker_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker,cosmos:s.systemName,rozanHyakuRyuHaEnabled:s.rozanHyakuRyuHaEnabled===true});
           return null;
         }
       }
