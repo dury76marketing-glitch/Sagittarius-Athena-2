@@ -3984,11 +3984,12 @@ export class SagittariusEngine {
     }
 
     const reset = Number(this.settings.resetTimestampMs || 0);
+    const fleet={ownerId:this.settings.ownerId,mode:this.settings.mode,resetTimestampMs:reset};
     const jobs = [
-      () => this.db.performanceAggregate(this.settings.systemName,{resetTimestampMs:reset}),
-      () => dashboard && typeof this.db.dashboardOpenEntries==='function' ? this.db.dashboardOpenEntries(this.settings.systemName) : this.db.openEntries(this.settings.systemName),
-      () => dashboard && typeof this.db.dashboardRecentClosedHunters==='function' ? this.db.dashboardRecentClosedHunters(this.settings.systemName,{limit:OPERATOR_PLANE_ISOLATION.maximumClosedRows,resetTimestampMs:reset}) : this.db.recentClosedHunters(this.settings.systemName,{limit:150,resetTimestampMs:reset}),
-      () => this.db.conceptStatsAggregate(this.settings.systemName,{resetTimestampMs:Number(this.settings.resetTimestampMs||0)}),
+      () => typeof this.db.performanceAggregateFleet==='function' ? this.db.performanceAggregateFleet(fleet) : this.db.performanceAggregate(this.settings.systemName,{resetTimestampMs:reset}),
+      () => dashboard && typeof this.db.dashboardOpenEntriesFleet==='function' ? this.db.dashboardOpenEntriesFleet(fleet) : typeof this.db.openEntriesFleet==='function' ? this.db.openEntriesFleet(fleet) : this.db.openEntries(this.settings.systemName),
+      () => dashboard && typeof this.db.dashboardRecentClosedHuntersFleet==='function' ? this.db.dashboardRecentClosedHuntersFleet({...fleet,limit:OPERATOR_PLANE_ISOLATION.maximumClosedRows}) : typeof this.db.recentClosedHuntersFleet==='function' ? this.db.recentClosedHuntersFleet({...fleet,limit:150}) : this.db.recentClosedHunters(this.settings.systemName,{limit:150,resetTimestampMs:reset}),
+      () => typeof this.db.conceptStatsAggregateFleet==='function' ? this.db.conceptStatsAggregateFleet(fleet) : this.db.conceptStatsAggregate(this.settings.systemName,{resetTimestampMs:reset}),
     ];
     const [aggregate,openEntries,recentClosed,conceptAggregate] = await mapLimit(jobs,2,(job)=>job());
     const open = (openEntries||[]).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));

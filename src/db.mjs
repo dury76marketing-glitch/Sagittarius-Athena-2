@@ -809,7 +809,93 @@ export class Database {
       'lossAvoidedNetCents',post_exit_state->'lossAvoidedNetCents',
       'researchComplete',post_exit_state->'researchComplete'
     ) as post_exit_state`; }
-  async dashboardOpenEntries(systemName){
+  fleetBookFilter({ownerId,mode}={}){
+    const owner=String(ownerId||'');
+    const currentMode=String(mode||'SIMULATION');
+    return {owner,mode:currentMode,ids:[...COSMOS_IDS]};
+  }
+  async openEntriesFleet({ownerId,mode}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const r=await this.pool.query("select * from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc",[f.owner,f.mode,f.ids]);
+    return r.rows.map(rowEntry);
+  }
+  async dashboardOpenEntriesFleet({ownerId,mode}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc`,[f.owner,f.mode,f.ids]);
+    return r.rows.map(rowEntry);
+  }
+  async dashboardRecentClosedHuntersFleet({ownerId,mode,limit=100,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const lim=Math.max(1,Math.min(200,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+    return r.rows.map(rowEntry);
+  }
+  async recentClosedHuntersFleet({ownerId,mode,limit=150,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const lim=Math.max(1,Math.min(500,Math.floor(Number(limit)||150))),reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`select id,system_name,owner_id,concept_name,source_feeder,source_trade_id,ticker,event_ticker,market_title,watchdog_model,mode,status,
+      entry_price_cents,exit_price_cents,current_price_cents,peak_price_cents,stop_price_cents,stop_loss_cents,count,remaining_count,volume_24h,spread_at_entry_cents,pnl_cents,
+      entry_fee_cents,profit_harvest_peak_pnl_cents,exit_fee_cents,exit_filled_count,exit_notional_cents,exit_attempt_book_ms,close_reason,game_start_time_ms,opened_at_ms,updated_at_ms,closed_at_ms,archived,
+      lowest_price_after_entry_cents,mae_cents,mae_at_ms,recovery_to_entry_at_ms,recovery_to_green_at_ms,recovery_green_price_cents,research_tracking_complete,
+      jsonb_build_object('aurora',coalesce(entry_config->'aurora','{}'::jsonb),'infinityBreak',coalesce(entry_config->'infinityBreak','{}'::jsonb)) as entry_config
+      from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+    return r.rows.map(rowEntry);
+  }
+  async performanceAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`with bounds as (
+      select
+        (date_trunc('day', timezone('Europe/Madrid', now())) at time zone 'Europe/Madrid') as day_ts,
+        (date_trunc('week', timezone('Europe/Madrid', now())) at time zone 'Europe/Madrid') as week_ts,
+        (date_trunc('month', timezone('Europe/Madrid', now())) at time zone 'Europe/Madrid') as month_ts,
+        (date_trunc('year', timezone('Europe/Madrid', now())) at time zone 'Europe/Madrid') as year_ts
+    ), ms as (
+      select (extract(epoch from day_ts)*1000)::bigint as day_ms,
+             (extract(epoch from week_ts)*1000)::bigint as week_ms,
+             (extract(epoch from month_ts)*1000)::bigint as month_ms,
+             (extract(epoch from year_ts)*1000)::bigint as year_ms
+      from bounds
+    )
+    select
+      count(*) filter(where concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3))::int as closed_hunters,
+      count(*) filter(where concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery'))::int as open_hunters,
+      count(*) filter(where concept_name = any($2::text[]) and status='closed' and pnl_cents>0 and ($3::bigint=0 or closed_at_ms >= $3))::int as wins,
+      count(*) filter(where concept_name = any($2::text[]) and status='closed' and pnl_cents<0 and ($3::bigint=0 or closed_at_ms >= $3))::int as losses,
+      count(*) filter(where concept_name = any($2::text[]) and status='closed' and pnl_cents=0 and ($3::bigint=0 or closed_at_ms >= $3))::int as scratches,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3)),0)::double precision as closed_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and closed_at_ms >= greatest($3::bigint,ms.day_ms)),0)::double precision as day_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and closed_at_ms >= greatest($3::bigint,ms.week_ms)),0)::double precision as week_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and closed_at_ms >= greatest($3::bigint,ms.month_ms)),0)::double precision as month_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and closed_at_ms >= greatest($3::bigint,ms.year_ms)),0)::double precision as year_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') and ($3::bigint=0 or updated_at_ms >= $3)),0)::double precision as partial_realized_cents,
+      coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and mode='SIMULATION'),0)::double precision as simulation_ledger_pnl_cents
+      from sag_entries cross join ms
+      where archived=false and owner_id=$1 and mode=$4 and system_name = any($5::text[])`,[f.owner,PORTFOLIO_CONCEPT_NAMES,reset,f.mode,f.ids]);
+    const x=r.rows[0]||{};return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,Number(v)||0]));
+  }
+  async conceptStatsAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`with portfolio as (
+      select concept_name,
+        count(*)::int as total,
+        count(*) filter(where status in ('open','entry_pending','exit_pending','pending_recovery'))::int as open,
+        count(*) filter(where status='closed')::int as closed,
+        count(*) filter(where status='closed' and pnl_cents>0)::int as wins,
+        count(*) filter(where status='closed' and pnl_cents<0)::int as losses,
+        coalesce(sum(pnl_cents) filter(where status='closed'),0)::double precision as pnl_cents,
+        coalesce(avg(entry_price_cents),0)::double precision as avg_entry_cents,
+        coalesce(avg(current_price_cents),0)::double precision as avg_current_cents,
+        coalesce(avg(volume_24h),0)::double precision as avg_liquidity
+      from sag_entries
+      where archived=false and owner_id=$1 and mode=$3 and system_name = any($5::text[]) and concept_name = any($2::text[])
+        and ($4::bigint=0 or opened_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery'))
+      group by concept_name
+    ) select * from portfolio`,[f.owner,PORTFOLIO_CONCEPT_NAMES,f.mode,reset,f.ids]);
+    return r.rows;
+  }
+    async dashboardOpenEntries(systemName){
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc`,[systemName]);
     return r.rows.map(rowEntry);
   }

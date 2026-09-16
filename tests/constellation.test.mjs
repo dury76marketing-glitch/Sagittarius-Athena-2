@@ -618,3 +618,15 @@ test('TC1 Athena FIRE stamps the bound cosmos instead of the frozen host name', 
   assert.ok(athena.includes('systemName:String(settings.systemName||this.systemName)'));
   assert.equal(athena.includes('systemName:this.systemName,sourceRelease:this.sourceRelease,decidedAtMs:now'), false);
 });
+
+
+test('TC1 homepage performance and open/closed tables read all twelve cosmos books', async () => {
+  const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  const db=await readFile(new URL('../src/db.mjs',import.meta.url),'utf8');
+  assert.ok(engine.includes('performanceAggregateFleet'));
+  assert.ok(engine.includes('dashboardOpenEntriesFleet'));
+  assert.ok(engine.includes('openEntriesFleet'));
+  assert.ok(db.includes('async openEntriesFleet'));
+  assert.ok(db.includes('system_name = any($3::text[])'));
+  assert.ok(engine.includes('ownerId:this.settings.ownerId'));
+});
