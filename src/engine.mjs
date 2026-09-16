@@ -847,7 +847,7 @@ export class SagittariusEngine {
     if(parentEntry?.status!=='closed'||Number(parentEntry?.remainingCount||0)>1e-9)return{status:'IGNORED',reason:'parent_not_fully_closed'};
     if(String(parentEntry?.closeReason||'')!==String(CRYSTAL_WALL.profitableCloseReason)||!(Number(parentEntry?.pnlCents||0)>0))return{status:'IGNORED',reason:'not_profitable_crystal_wall'};
     if(s.athenaExclamationEnabled!==true)return{status:'IGNORED',reason:'athena_exclamation_disabled'};
-    if(String(parentEntry?.systemName||'')!==String(s.systemName)||String(parentEntry?.ownerId||'')!==String(s.ownerId)||String(parentEntry?.mode||'')!==String(s.mode||''))return{status:'BLOCKED',reason:'parent_identity_or_mode_mismatch'};
+    if(String(parentEntry?.ownerId||'')!==String(s.ownerId)||String(parentEntry?.mode||'')!==String(s.mode||''))return{status:'BLOCKED',reason:'parent_identity_or_mode_mismatch'};
     const marketFamilyExclusion=executionMarketFamilyExclusion(ticker);
     if(marketFamilyExclusion.blocked){
       stats.lastEvent={status:'BLOCKED',atMs:Date.now(),parentEntryId:parentId,ticker,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
@@ -926,9 +926,10 @@ export class SagittariusEngine {
     const parentEntry=watch.parentEntry||await this.db?.entryById?.(watch.parentEntryId).catch(()=>null);
     const proof=watch.crystalProof;
     if(!parentEntry||!proof){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:'confirmation_lineage_missing'};}
-    const opened=await this.strategy.executeMegaWaveAthenaContinuation(q,parentEntry,{authorizationId:id,thirdProof:proof,authorizedAtMs:Date.now()});
+    const cosmosId=this.pickCosmosForRealHunter(ticker);
+    const opened=await this.withCosmosSettings(cosmosId,()=>this.strategy.executeMegaWaveAthenaContinuation(q,parentEntry,{authorizationId:id,thirdProof:proof,authorizedAtMs:Date.now()}));
     this.athenaExclamationConfirmationWatches.delete(id);
-    const episode={id,systemName:s.systemName,ticker,eventTicker:String(watch.eventTicker||ticker),athenaDecision:{decision:opened?'OPENED':'BLOCKED',reason:opened?'confirmed_crash_rebound_ticks_authorized_athena':fresh.reason||'athena_entry_pipeline_blocked',megaWave:{version:MEGA_WAVE.version,crystalProof:proof,thirdProof:proof}},entryId:opened?.id||null,entryAtMs:opened?Number(opened.openedAtMs||Date.now()):null,attackSelected:'Athena Exclamation',trackingComplete:!opened,updatedAtMs:Date.now()};
+    const episode={id,systemName:opened?.systemName||cosmosId||s.systemName,ticker,eventTicker:String(watch.eventTicker||ticker),athenaDecision:{decision:opened?'OPENED':'BLOCKED',reason:opened?'confirmed_crash_rebound_ticks_authorized_athena':fresh.reason||'athena_entry_pipeline_blocked',megaWave:{version:MEGA_WAVE.version,crystalProof:proof,thirdProof:proof}},entryId:opened?.id||null,entryAtMs:opened?Number(opened.openedAtMs||Date.now()):null,attackSelected:'Athena Exclamation',trackingComplete:!opened,updatedAtMs:Date.now()};
     await this.db?.upsertOpportunityEpisode?.(episode).catch(()=>{});
     if(opened){stats.athenaOpened+=1;stats.lastEvent={status:'ATHENA_OPENED',atMs:Date.now(),entryId:opened.id,ticker,authorizationId:id};return{status:'OPENED',entry:opened,authorizationId:id};}
     stats.lastEvent={status:'BLOCKED',atMs:Date.now(),ticker,authorizationId:id,reason:'athena_entry_pipeline_blocked'};
@@ -3061,6 +3062,24 @@ export class SagittariusEngine {
       return Number.isFinite(Number(live))?Number(live):null;
     }
     return Number(simulationPortfolioCents||0);
+  }
+
+  pickCosmosForRealHunter(ticker) {
+    const exact=String(ticker||'');
+    const openLike=(status)=>['open','entry_pending','exit_pending','pending_recovery'].includes(String(status||''));
+    const rowsFor=(id)=>isolateBook(this.cosmosBooks?.[id]||[],id);
+    const holding=[];
+    for(const id of COSMOS_IDS){
+      if(rowsFor(id).some((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)&&String(row.ticker||'')===exact)) holding.push(id);
+    }
+    if(holding.length) return holding[0];
+    let best=COSMOS_IDS[0], bestOpen=Number.POSITIVE_INFINITY, bestIdx=0;
+    for(let i=0;i<COSMOS_IDS.length;i+=1){
+      const id=COSMOS_IDS[i];
+      const open=rowsFor(id).filter((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)).length;
+      if(open<bestOpen || (open===bestOpen && i<bestIdx)){ best=id; bestOpen=open; bestIdx=i; }
+    }
+    return best;
   }
 
   rememberCosmosBookEntry(entry) {

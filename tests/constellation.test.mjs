@@ -539,3 +539,33 @@ test('TC1 open and closed tables name the cosmos', async () => {
   assert.ok(app.includes('function cosmosName'));
   assert.ok(app.includes('cosmosName(e)'));
 });
+
+
+test('TC1 new Athena hunter is assigned to the least-loaded cosmos', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.cosmosBooks = Object.fromEntries(['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES'].map((id)=>[id,[]]));
+  engine.cosmosBooks.SAGITTARIUS = [
+    { id:'a', systemName:'SAGITTARIUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXKBOGAME-AAA' },
+    { id:'b', systemName:'SAGITTARIUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXKBOGAME-BBB' },
+  ];
+  const picked = engine.pickCosmosForRealHunter('KXVALORANTGAME-HAV');
+  assert.equal(picked, 'ARIES');
+  const same = engine.pickCosmosForRealHunter('KXKBOGAME-AAA');
+  assert.equal(same, 'SAGITTARIUS');
+});
+
+test('TC1 Mega Wave Athena continuation accepts a Crystal Wall parent from another cosmos room', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...originalSettings(), systemName:'SAGITTARIUS', ownerId:'sagittarius-main', mode:'SIMULATION', athenaExclamationEnabled:true };
+  engine.megaWaveStats = null;
+  engine.db = { async audit(){}, async opportunityEpisode(){ return null; }, async upsertOpportunityEpisode(){}, };
+  engine.market = { getQuote(){ return null; } };
+  const parent = {
+    id:'cw-1', conceptName:'Crystal Wall', status:'closed', remainingCount:0,
+    closeReason:'crystal_wall_shadow_profit', pnlCents:40,
+    systemName:'ARIES', ownerId:'sagittarius-main', mode:'SIMULATION',
+    ticker:'KXKBOGAME-X', eventTicker:'KXKBOGAME-X', entryPriceCents:50, exitPriceCents:60,
+  };
+  const out = await SagittariusEngine.prototype.handleMegaWaveAthenaContinuation.call(engine, parent);
+  assert.notEqual(out.reason, 'parent_identity_or_mode_mismatch');
+});
