@@ -1,0 +1,351 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { RELEASE, originalSettings } from '../src/config.mjs';
+import {
+  CONSTELLATION,
+  COSMOS_IDS,
+  COSMOS_DISPLAY,
+  ConstellationHost,
+  SettingsTenancyLedger,
+  isCosmosId,
+  normalizeCosmosId,
+  cosmosDisplayName,
+  cosmosSettingsKey,
+  fleetSettingsKey,
+  sagittariusRoomIsNotHost,
+  constellationSettingsKeys,
+  isolateBook,
+  partitionBooks,
+  emptyCosmosBooks,
+  FairScanScheduler,
+  inCosmosClockWindow,
+  watchdogDiscoveryTokens,
+  watchdogMayDiscover,
+  FleetTickerLock,
+} from '../src/constellation.mjs';
+import { MEGA_WAVE } from '../src/doctrine.mjs';
+import { SagittariusEngine } from '../src/engine.mjs';
+
+test('TC1 registry freezes twelve constellation rooms', () => {
+  assert.equal(CONSTELLATION.version, 'TC1');
+  assert.equal(CONSTELLATION.phase, 8);
+  assert.equal(CONSTELLATION.policyRevision, 'TC1-P8-TRADING-SPLIT');
+  assert.equal(CONSTELLATION.tradingSplitEnabled, true);
+  assert.equal(CONSTELLATION.tenantCountExecuting, 12);
+  assert.equal(COSMOS_IDS.length, 12);
+  assert.deepEqual([...COSMOS_IDS], [
+    'ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO',
+    'LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES',
+  ]);
+  for (const id of COSMOS_IDS) {
+    assert.equal(typeof COSMOS_DISPLAY[id], 'string');
+    assert.equal(normalizeCosmosId(id.toLowerCase()), id);
+    assert.equal(cosmosSettingsKey(id), `runtime:${id}`);
+  }
+  assert.equal(isCosmosId('orion'), false);
+  assert.equal(normalizeCosmosId('ORION'), null);
+  assert.equal(fleetSettingsKey(), 'fleet');
+  assert.equal(constellationSettingsKeys().length, 14);
+});
+
+test('TC1 Sagittarius room is not the host process', () => {
+  assert.equal(CONSTELLATION.hostProcessName, 'SAGITTARIUS');
+  assert.equal(CONSTELLATION.hostOwnerId, 'sagittarius-main');
+  assert.equal(COSMOS_IDS.includes('SAGITTARIUS'), true);
+  assert.equal(cosmosDisplayName('SAGITTARIUS'), 'Sagittarius');
+  assert.equal(sagittariusRoomIsNotHost(), true);
+});
+
+test('TC1-P8 host wrapper schedules twelve executing rooms in one process', () => {
+  const host = new ConstellationHost();
+  const snap = host.snapshot({ systemName: 'SAGITTARIUS', ownerId: 'sagittarius-main' });
+  assert.equal(snap.phase, 8);
+  assert.equal(snap.tradingSplitEnabled, true);
+  assert.equal(snap.settingsTenancy, true);
+  assert.equal(snap.bookTenancy, true);
+  assert.equal(snap.scanFanout, true);
+  assert.equal(snap.watchdog, true);
+  assert.equal(snap.fleetLock, true);
+  assert.equal(snap.operatorSurface, true);
+  assert.equal(snap.tradingSplit, true);
+  assert.equal(snap.rooms.length, 12);
+  assert.equal(snap.rooms.every((r) => r.executing === true), true);
+  assert.equal(snap.execution.tenantCountExecuting, 12);
+  assert.equal(snap.execution.singleBookEquivalent, false);
+  assert.equal(snap.execution.activeTenant, null);
+});
+
+test('TC1 does not change Mega Wave doctrine or release identity', () => {
+  assert.equal(RELEASE, 'SAGITTARIUS-MEGA-WAVE-MW1-MW2-MW3-RWY-HF6-CHAIN-REPAIR-2026-09-09');
+  assert.equal(MEGA_WAVE.version, 'MEGA-WAVE-MW1-MW2-MW3');
+  assert.equal(MEGA_WAVE.maximumFollowUpAttacks, 12);
+});
+
+test('TC1-P2 master Save writes twelve identical full-stake clones', () => {
+  const master = originalSettings();
+  master.athenaExclamationStakeCents = 700;
+  master.crystalWallMinCrashCents = 18;
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  assert.equal(ledger.store.size, 14);
+  assert.equal(ledger.read('runtime').athenaExclamationStakeCents, 700);
+  assert.equal(ledger.read('fleet').athenaExclamationStakeCents, 700);
+  for (const id of COSMOS_IDS) {
+    const row = ledger.readCosmos(id);
+    assert.equal(row.athenaExclamationStakeCents, 700);
+    assert.equal(row.crystalWallMinCrashCents, 18);
+    assert.equal(row.athenaExclamationStakeCents, master.athenaExclamationStakeCents);
+  }
+});
+
+test('TC1-P2 one-room patch writes one row only', () => {
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  ledger.writeOne('ARIES', { ...master, crystalWallMinCrashCents: 20, crystalWallWinsToTriggerAthena: 3 });
+  assert.equal(ledger.readCosmos('ARIES').crystalWallMinCrashCents, 20);
+  assert.equal(ledger.readCosmos('TAURUS').crystalWallMinCrashCents, master.crystalWallMinCrashCents);
+  assert.equal(ledger.readCosmos('LEO').crystalWallWinsToTriggerAthena, master.crystalWallWinsToTriggerAthena);
+  assert.equal(ledger.read('runtime').crystalWallMinCrashCents, master.crystalWallMinCrashCents);
+});
+
+test('TC1-P2 engine master Save broadcasts; one-room patch does not move the live book', async () => {
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...master, systemName: 'SAGITTARIUS', ownerId: 'mw-test', mode: 'SIMULATION' };
+  engine.settingsMutationTail = Promise.resolve();
+  engine.constellation = new ConstellationHost();
+  engine.settingsPersistence = null;
+  engine.invalidateStateSnapshot = () => {};
+  engine.requestScan = () => {};
+  engine.db = {
+    async saveSettings(settings) { ledger.writeMaster(settings); },
+    async loadSettings(defaults) { return { ...defaults, ...ledger.read('runtime') }; },
+    async loadCosmosSettings(id, defaults) { return { ...defaults, ...ledger.readCosmos(id) }; },
+    async saveCosmosSettings(id, settings) { ledger.writeOne(id, settings); },
+    async audit() {},
+  };
+
+  await engine.applySettingsPatch({ athenaExclamationStakeCents: 800 });
+  assert.equal(engine.settings.athenaExclamationStakeCents, 800);
+  for (const id of COSMOS_IDS) assert.equal(ledger.readCosmos(id).athenaExclamationStakeCents, 800);
+
+  await engine.patchCosmosSettings('ARIES', { crystalWallMinCrashCents: 21 });
+  assert.equal(ledger.readCosmos('ARIES').crystalWallMinCrashCents, 21);
+  assert.equal(ledger.readCosmos('TAURUS').crystalWallMinCrashCents, master.crystalWallMinCrashCents);
+  assert.equal(engine.settings.crystalWallMinCrashCents, master.crystalWallMinCrashCents);
+});
+
+test('TC1-P8 createHunter stays settings-bound and is not hardcoded to one room', async () => {
+  const engine = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  assert.ok(engine.includes("from './constellation.mjs'"));
+  assert.ok(engine.includes('new ConstellationHost()'));
+  assert.ok(engine.includes('patchCosmosSettings'));
+  assert.ok(engine.includes('ensureCosmosSettingsRows'));
+  const createHunter = engine.slice(engine.indexOf('async createHunter'), engine.indexOf('async createHunter') + 2500);
+  assert.equal(createHunter.includes('runtime:ARIES'), false);
+});
+
+test('TC1-P3 Aries cannot see Taurus rows', () => {
+  const rows = [
+    { id: 'a1', systemName: 'ARIES', ticker: 'YES-A', status: 'open' },
+    { id: 't1', systemName: 'TAURUS', ticker: 'YES-T', status: 'closed' },
+    { id: 's1', systemName: 'SAGITTARIUS', ticker: 'YES-S', status: 'open' },
+    { id: 'x1', systemName: 'ORION', ticker: 'YES-X', status: 'open' },
+  ];
+  assert.deepEqual(isolateBook(rows, 'ARIES').map((r) => r.id), ['a1']);
+  assert.deepEqual(isolateBook(rows, 'TAURUS').map((r) => r.id), ['t1']);
+  assert.equal(isolateBook(rows, 'ARIES').some((r) => r.systemName === 'TAURUS'), false);
+  const { books, stray } = partitionBooks(rows);
+  assert.equal(books.ARIES.length, 1);
+  assert.equal(books.TAURUS.length, 1);
+  assert.equal(books.GEMINI.length, 0);
+  assert.equal(stray.length, 1);
+  assert.equal(Object.keys(emptyCosmosBooks()).length, 12);
+});
+
+test('TC1-P3 restart hydrates twelve isolated books', async () => {
+  const rows = [
+    { id: 'a1', systemName: 'ARIES', ticker: 'YES-A', status: 'open' },
+    { id: 'a2', systemName: 'ARIES', ticker: 'YES-A2', status: 'closed' },
+    { id: 't1', systemName: 'TAURUS', ticker: 'YES-T', status: 'open' },
+  ];
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.constellation = new ConstellationHost();
+  engine.cosmosBooks = emptyCosmosBooks();
+  engine.db = {
+    async entries(systemName) { return rows.filter((r) => r.systemName === systemName); },
+    async hydrateAllCosmosEntries() {
+      const books = emptyCosmosBooks();
+      for (const id of COSMOS_IDS) books[id] = rows.filter((r) => r.systemName === id);
+      return books;
+    },
+  };
+  const hydrated = await engine.hydrateCosmosBooks();
+  assert.equal(hydrated.ARIES.length, 2);
+  assert.equal(hydrated.TAURUS.length, 1);
+  assert.equal(hydrated.GEMINI.length, 0);
+  const aries = await engine.getCosmosBook('ARIES');
+  assert.equal(aries.open, 1);
+  assert.equal(aries.closed, 1);
+  assert.equal(aries.entries.some((r) => r.systemName === 'TAURUS'), false);
+  const taurus = await engine.getCosmosBook('TAURUS');
+  assert.equal(taurus.entries.every((r) => r.systemName === 'TAURUS'), true);
+});
+
+
+test('TC1-P4 one shared elapsed minutes supports three room windows', () => {
+  const elapsed = 48;
+  assert.equal(inCosmosClockWindow(elapsed, 10, 45), false);
+  assert.equal(inCosmosClockWindow(elapsed, 10, 50), true);
+  assert.equal(inCosmosClockWindow(elapsed, 10, 55), true);
+  assert.equal(inCosmosClockWindow(22, 10, 45), true);
+  assert.equal(inCosmosClockWindow(null, 10, 45), false);
+});
+
+test('TC1-P4 fair scheduler rotates rooms and does not invent twelve scanners', () => {
+  const sched = new FairScanScheduler({ ids: COSMOS_IDS, budget: 4 });
+  const a = sched.nextTick();
+  const b = sched.nextTick();
+  assert.equal(a.length, 4);
+  assert.equal(b.length, 4);
+  assert.notDeepEqual(a, b);
+  assert.equal(new Set([...a, ...b]).size, 8);
+});
+
+test('TC1-P4 engine scan observer uses one discover and host probe', async () => {
+  const engineSrc = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  assert.ok(engineSrc.includes('observeConstellationScan(markets)'));
+  assert.equal((engineSrc.match(/market\.discover\(/g) || []).length, 1);
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { minGameMinutes: 10, maxGameMinutes: 45 };
+  engine.fairScan = new FairScanScheduler({ ids: COSMOS_IDS, budget: 4 });
+  engine.fairScan.cursor = 0;
+  engine.cosmosWindowById = Object.fromEntries(COSMOS_IDS.map((id) => [id, { minGameMinutes: 10, maxGameMinutes: 45 }]));
+  engine.cosmosWindowById.ARIES = { minGameMinutes: 10, maxGameMinutes: 45 };
+  engine.cosmosWindowById.TAURUS = { minGameMinutes: 10, maxGameMinutes: 50 };
+  engine.cosmosWindowById.GEMINI = { minGameMinutes: 10, maxGameMinutes: 55 };
+  engine.sharedElapsedMinutes = () => 48;
+  const snap = SagittariusEngine.prototype.observeConstellationScan.call(engine, [{ ticker: 'KXMLBGAME-1-HOME', eventTicker: 'KXMLBGAME-1' }]);
+  assert.equal(snap.discoverOnce, true);
+  assert.equal(snap.probeOwner, 'host');
+  assert.deepEqual(snap.evaluated, ['ARIES', 'TAURUS', 'GEMINI', 'CANCER']);
+  assert.equal(snap.windows.ARIES.outWindow, 1);
+  assert.equal(snap.windows.TAURUS.inWindow, 1);
+  assert.equal(snap.windows.GEMINI.inWindow, 1);
+});
+
+
+test('TC1-P5 watchdog shrinks discovery tokens and never spends them on exits', () => {
+  assert.equal(watchdogDiscoveryTokens('GREEN'), 4);
+  assert.equal(watchdogDiscoveryTokens('COMPACT'), 3);
+  assert.equal(watchdogDiscoveryTokens('PRESSURE'), 2);
+  assert.equal(watchdogDiscoveryTokens('TRADE_PRIORITY'), 1);
+  assert.equal(watchdogDiscoveryTokens('HARD_RESEARCH_SHED'), 0);
+  assert.equal(watchdogMayDiscover('HARD_RESEARCH_SHED'), false);
+  assert.equal(watchdogMayDiscover('GREEN'), true);
+});
+
+test('TC1-P5 heat skips discovery fan-out but leaves protection outside the token gate', async () => {
+  const src = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  const scan = src.slice(src.indexOf('async fullScan()'), src.indexOf('async fullScan()') + 7000);
+  const protectAt = scan.indexOf("await this.runProtectionSweep('full_scan')");
+  const evalAt = scan.indexOf('discoveryTokens>0');
+  assert.ok(protectAt >= 0);
+  assert.ok(evalAt > protectAt, 'protection must run before the discovery token gate');
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { minGameMinutes: 10, maxGameMinutes: 45 };
+  engine.resourcePressureState = 'HARD_RESEARCH_SHED';
+  engine.fairScan = new FairScanScheduler({ ids: COSMOS_IDS, budget: 4 });
+  engine.cosmosWindowById = Object.fromEntries(COSMOS_IDS.map((id) => [id, { minGameMinutes: 10, maxGameMinutes: 45 }]));
+  engine.sharedElapsedMinutes = () => 22;
+  const snap = SagittariusEngine.prototype.observeConstellationScan.call(engine, [{ ticker: 'KXMLBGAME-1-HOME' }]);
+  assert.deepEqual(snap.evaluated, []);
+  assert.equal(snap.tokens, 0);
+  assert.equal(snap.discoveryDeferred, true);
+  assert.equal(snap.protectionExempt, true);
+});
+
+
+test('TC1-P6 second room cannot occupy an already held ticker', () => {
+  const lock = new FleetTickerLock();
+  assert.equal(lock.tryAcquire('YES-A', 'ARIES').ok, true);
+  const second = lock.tryAcquire('YES-A', 'TAURUS');
+  assert.equal(second.ok, false);
+  assert.equal(second.occupier, 'ARIES');
+  assert.equal(lock.tryAcquire('YES-B', 'TAURUS').ok, true);
+  assert.equal(lock.release('YES-A', 'ARIES'), true);
+  assert.equal(lock.tryAcquire('YES-A', 'TAURUS').ok, true);
+});
+
+test('TC1-P6 createHunter consults fleet occupancy and fleet lock', async () => {
+  const strategy = await readFile(new URL('../src/strategy.mjs', import.meta.url), 'utf8');
+  assert.ok(strategy.includes('openFleetHunterEntriesByTicker'));
+  assert.ok(strategy.includes('acquireFleetTickerLock'));
+  assert.ok(strategy.includes('fleet_ticker_lock_busy'));
+  const db = await readFile(new URL('../src/db.mjs', import.meta.url), 'utf8');
+  assert.ok(db.includes("where ticker=$1 and archived=false and concept_name = any($2::text[])"));
+});
+
+
+test('TC1-P7 homepage keeps original architecture and adds twelve-cosmos overview', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('ATOMIC THUNDER BOLT'));
+  assert.ok(html.includes('ATHENA'));
+  assert.ok(html.includes('INFINITY BREAK'));
+  assert.ok(html.includes('AURORA EXECUTION'));
+  assert.ok(html.includes('COSMO UNIVERSE'));
+  assert.ok(html.includes('TWELVE GOLDEN SAINT COSMOS'));
+  assert.ok(html.includes('twelveCosmosBody'));
+  assert.ok(html.includes('Download Diagnostics'));
+  assert.ok(html.includes('Download Trading Logs'));
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes('href="#cosmos/'));
+  assert.ok(app.includes('/api/cosmos/subset'));
+});
+
+test('TC1-P7 subset patch writes only selected rooms', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = originalSettings();
+  engine.settingsMutationTail = Promise.resolve();
+  engine.invalidateStateSnapshot = () => {};
+  const rows = {};
+  engine.db = {
+    async loadCosmosSettings(id, defaults) { return { ...defaults, ...(rows[id] || engine.settings) }; },
+    async saveCosmosSettings(id, settings) { rows[id] = settings; },
+    async audit() {},
+  };
+  const out = await engine.patchCosmosSubset(['ARIES','LEO'], { crystalWallMinCrashCents: 22 });
+  assert.equal(out.count, 2);
+  assert.equal(rows.ARIES.crystalWallMinCrashCents, 22);
+  assert.equal(rows.LEO.crystalWallMinCrashCents, 22);
+  assert.equal(rows.TAURUS, undefined);
+});
+
+
+test('TC1-P8 withCosmosSettings binds the room then restores the host book', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { systemName: 'SAGITTARIUS', ownerId: 'host', mode: 'SIMULATION', engineActive: true, liveArmed: false, minGameMinutes: 10 };
+  engine.db = {
+    async loadCosmosSettings(id, defaults) {
+      return { ...defaults, systemName: id, crystalWallMinCrashCents: id === 'ARIES' ? 22 : 15 };
+    },
+  };
+  let seen = null;
+  await engine.withCosmosSettings('ARIES', async (bound) => { seen = bound; });
+  assert.equal(seen.systemName, 'ARIES');
+  assert.equal(seen.ownerId, 'host');
+  assert.equal(seen.crystalWallMinCrashCents, 22);
+  assert.equal(engine.settings.systemName, 'SAGITTARIUS');
+});
+
+test('TC1-P8 scheduled evaluation uses room settings and fleet protection source', async () => {
+  const engineSrc = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  assert.ok(engineSrc.includes('evaluateScheduledCosmos'));
+  assert.ok(engineSrc.includes('withCosmosSettings'));
+  const guard = await readFile(new URL('../src/profitGuard.mjs', import.meta.url), 'utf8');
+  assert.ok(guard.includes('openFleetHunterEntries'));
+});
