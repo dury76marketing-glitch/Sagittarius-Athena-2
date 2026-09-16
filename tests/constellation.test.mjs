@@ -611,3 +611,10 @@ test('TC1 compact dashboard keeps systemName so closed trades name the cosmos', 
   });
   assert.equal(row.systemName, 'SAGITTARIUS');
 });
+
+
+test('TC1 Athena FIRE stamps the bound cosmos instead of the frozen host name', async () => {
+  const athena = await readFile(new URL('../src/athena.mjs', import.meta.url), 'utf8');
+  assert.ok(athena.includes('systemName:String(settings.systemName||this.systemName)'));
+  assert.equal(athena.includes('systemName:this.systemName,sourceRelease:this.sourceRelease,decidedAtMs:now'), false);
+});
