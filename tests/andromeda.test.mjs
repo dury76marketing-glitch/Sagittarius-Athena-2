@@ -134,10 +134,24 @@ test('Andromeda apply with no ticks targets all rooms and mirrors the host dump 
   const slice=app.slice(applyAt, nextHandler>applyAt?nextHandler:applyAt+900);
   assert.ok(applyAt>0);
   assert.equal(slice.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"), false);
-  assert.ok(html.includes('No rooms ticked = all twelve'));
+  assert.ok(html.includes('One Apply writes all 12 rooms and the host')||html.includes('Apply saves ON/OFF'));
   assert.ok(html.includes('<th>Andromeda</th>'));
   assert.ok(app.includes('andromedaThunderWaveEnabled===true'));
   assert.ok(engine.includes('broadcastHost'));
   assert.ok(engine.includes('andromedaPatch'));
-  assert.ok(engine.includes('rooms.length===COSMOS_IDS.length'));
+  assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
+});
+
+
+test('Crystal Wall subset still requires ticks and Andromeda apply ignores those ticks', async () => {
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  const cw=app.slice(app.indexOf('subsetApplyBtn'), app.indexOf('subsetSaintApplyBtn'));
+  const saint=app.slice(app.indexOf('subsetSaintApplyBtn'), app.indexOf('subsetAndromedaApplyBtn'));
+  const andro=app.slice(app.indexOf('subsetAndromedaApplyBtn'), app.indexOf('subsetAndromedaApplyBtn')+900);
+  assert.ok(cw.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"));
+  assert.ok(saint.includes("if(!ids.length)return msg('Select at least one cosmos.',true);"));
+  assert.ok(andro.includes("{ids:[],patch}"));
+  assert.ok(engine.includes('andromedaPatch?[...COSMOS_IDS]:selected'));
+  assert.equal(cw.includes('andromedaThunderWaveEnabled'), false);
 });

@@ -252,12 +252,11 @@ $('subsetSaintApplyBtn')?.addEventListener('click',async()=>{
 
 
 $('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
-  const ids=selectedSubsetCosmosIds();
   const on=String($('subsetAndromedaEnabled')?.value||'off')==='on';
   const level=String($('subsetAndromedaLevel')?.value||'HIGH').toUpperCase();
   try{
     const patch={andromedaThunderWaveEnabled:on,andromedaThunderWaveLevel:on?level:'HIGH'};
-    const r=await post('/api/cosmos/subset',{ids,patch});
+    const r=await post('/api/cosmos/subset',{ids:[],patch});
     if(!r?.ok && !r?.count) throw new Error(r?.error||'subset_save_failed');
     const written=Array.isArray(r.results)?r.results:[];
     for(const row of written){
@@ -265,9 +264,7 @@ $('subsetAndromedaApplyBtn')?.addEventListener('click',async()=>{
     }
     CONTROL_FINGERPRINT='';
     await load();
-    const n=r.count||ids.length||12;
-    const host=r.broadcastHost===true?' + host dump':'';
-    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on ${n} rooms${host}.`);
+    msg(`Andromeda ${on?'ON '+patch.andromedaThunderWaveLevel:'OFF'} saved on all 12 rooms + host.`);
   }catch(e){msg(e.message,true);}
 });
 

@@ -3174,20 +3174,19 @@ export class SagittariusEngine {
     const selected=[...new Set((ids||[]).map((id)=>normalizeCosmosId(id)).filter(Boolean))];
     const keys=Object.keys(patch||{});
     const andromedaPatch=keys.includes('andromedaThunderWaveEnabled')||keys.includes('andromedaThunderWaveLevel');
-    const rooms=selected.length?selected:(andromedaPatch?[...COSMOS_IDS]:[]);
+    // Andromeda is fleet-wide: ignore Crystal Wall ticks, write all 12 rooms + host.
+    const rooms=andromedaPatch?[...COSMOS_IDS]:selected;
     if(!rooms.length) throw new Error('cosmos_subset_empty');
     const results=[];
     for(const id of rooms) results.push({cosmos:id, settings:await this.applySettingsPatch(patch,{scope:'cosmos',cosmosId:id})});
-    const writesAndromeda=andromedaPatch;
-    const writesHost=writesAndromeda && rooms.length===COSMOS_IDS.length;
     let host=null;
-    if(writesHost){
+    if(andromedaPatch){
       host=await this.applySettingsPatch({
         andromedaThunderWaveEnabled:patch.andromedaThunderWaveEnabled===true,
         andromedaThunderWaveLevel:patch.andromedaThunderWaveEnabled===true?patch.andromedaThunderWaveLevel:'HIGH',
       },{scope:'master'});
     }
-    return {ok:true, count:results.length, results, host, broadcastHost:writesHost===true};
+    return {ok:true, count:results.length, results, host, broadcastHost:andromedaPatch===true};
   }
 
   async applySettingsPatch(patch, {scope='master', cosmosId=null}={}) {
