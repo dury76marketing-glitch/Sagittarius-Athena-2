@@ -163,6 +163,7 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'lightningPlasmaEnabled',
   'galacticExplosionEnabled',
   'rozanHyakuRyuHaEnabled',
+  'excaliburEnabled',
   'andromedaThunderWaveEnabled',
   'athenaSoulEnabled',
 
@@ -214,6 +215,7 @@ export function originalSettings() {
     lightningPlasmaEnabled: true,
     galacticExplosionEnabled: false,
     rozanHyakuRyuHaEnabled: false,
+    excaliburEnabled: false,
     andromedaThunderWaveEnabled: false,
     andromedaThunderWaveLevel: 'HIGH',
     athenaSoulEnabled: false,
@@ -371,6 +373,7 @@ export function freshInstallSettings() {
     lightningPlasmaEnabled:true,
     galacticExplosionEnabled:false,
     rozanHyakuRyuHaEnabled:false,
+    excaliburEnabled:false,
     andromedaThunderWaveEnabled:false,
     andromedaThunderWaveLevel:'HIGH',
     athenaSoulEnabled:false,
@@ -641,6 +644,16 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   // R63 simulation/live parity: persisted legacy probabilities are neutralized.
   // SIM still requires fresh executable depth and may fill partially, but never
   // rejects a proven executable IOC through an unrelated random coin flip.
+  out.excaliburEnabled = out.excaliburEnabled===true;
+  out.rozanHyakuRyuHaEnabled = out.rozanHyakuRyuHaEnabled===true;
+  if (out.excaliburEnabled===true && out.rozanHyakuRyuHaEnabled===true) {
+    if (Object.hasOwn(raw,'rozanHyakuRyuHaEnabled') && raw.rozanHyakuRyuHaEnabled===true && !(Object.hasOwn(raw,'excaliburEnabled') && raw.excaliburEnabled===true)) {
+      out.excaliburEnabled=false;
+    } else {
+      out.rozanHyakuRyuHaEnabled=false;
+    }
+  }
+
   out.andromedaThunderWaveEnabled = out.andromedaThunderWaveEnabled===true;
   const andromedaLevel=String(src.andromedaThunderWaveLevel||out.andromedaThunderWaveLevel||'HIGH').trim().toUpperCase();
   out.andromedaThunderWaveLevel = andromedaLevel==='MID'||andromedaLevel==='MEDIUM'?'MID':andromedaLevel==='LOW'?'LOW':'HIGH';
@@ -649,6 +662,10 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.simFillProbability = 1;
   out.liveArmed = false;
   return out;
+}
+
+export function fleetTickerUnisonEnabled(settings = {}) {
+  return settings?.excaliburEnabled===true || settings?.rozanHyakuRyuHaEnabled===true;
 }
 
 export function deploymentConfigRecord() {

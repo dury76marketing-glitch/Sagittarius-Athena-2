@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { RELEASE, originalSettings } from '../src/config.mjs';
+import { RELEASE, originalSettings, sanitizeRuntimeSettings } from '../src/config.mjs';
 import {
   CONSTELLATION,
   COSMOS_IDS,
@@ -629,4 +629,115 @@ test('TC1 homepage performance and open/closed tables read all twelve cosmos boo
   assert.ok(db.includes('async openEntriesFleet'));
   assert.ok(db.includes('system_name = any($3::text[])'));
   assert.ok(engine.includes('ownerId:this.settings.ownerId'));
+});
+
+test('TC1 Excalibur sits under Rozan, defaults off, and is exclusive with Rozan', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const rozan = html.indexOf('rozanHyakuRyuHaToggle');
+  const blade = html.indexOf('excaliburToggle');
+  assert.ok(rozan > 0 && blade > rozan);
+  const factory = originalSettings();
+  assert.equal(factory.excaliburEnabled, false);
+  const both = sanitizeRuntimeSettings({ ...factory, rozanHyakuRyuHaEnabled: true, excaliburEnabled: true });
+  assert.equal(both.excaliburEnabled, true);
+  assert.equal(both.rozanHyakuRyuHaEnabled, false);
+  const rozanOnly = sanitizeRuntimeSettings({ ...factory, rozanHyakuRyuHaEnabled: true, excaliburEnabled: false });
+  assert.equal(rozanOnly.rozanHyakuRyuHaEnabled, true);
+  assert.equal(rozanOnly.excaliburEnabled, false);
+});
+
+test('TC1 Excalibur pickCosmos treats occupied ticker as free for another room', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { excaliburEnabled: true };
+  engine.cosmosBooks = Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.cosmosBooks.SAGITTARIUS = [
+    { id:'a', systemName:'SAGITTARIUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXKBOGAME-LOT' },
+  ];
+  assert.equal(engine.pickCosmosForRealHunter('KXKBOGAME-LOT'), 'ARIES');
+});
+
+test('TC1 Excalibur grant does not copy Athena until each room prints its own Crystal Wall', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { excaliburEnabled: true, rozanHyakuRyuHaEnabled: false, athenaExclamationStakeCents: 100, systemName: 'ARIES' };
+  engine.cosmosBooks = Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.cosmosBooks.TAURUS = [
+    { id:'hold', systemName:'TAURUS', conceptName:'Athena Exclamation', status:'open', ticker:'KXITFMATCH-TOP' },
+  ];
+  engine.db = {
+    loadCosmosSettings: async (id, host) => ({
+      ...host,
+      systemName: id,
+      athenaExclamationStakeCents: id==='GEMINI' ? 500 : 100,
+      crystalWallMinCrashCents: id==='GEMINI' ? 20 : 15,
+      crystalWallMinReboundCents: 5,
+      crystalWallMinUpwardTicks: 2,
+    }),
+    audit: async () => {},
+  };
+  engine.strategy = {
+    createHunter: async (concept, q, stake) => ({
+      id: `${engine.settings.systemName}-${stake}`,
+      systemName: engine.settings.systemName,
+      conceptName: concept,
+      ticker: q.ticker,
+      status: 'open',
+      stakeCents: stake,
+    }),
+  };
+  const source = {
+    id: 'src-ae',
+    systemName: 'ARIES',
+    conceptName: 'Athena Exclamation',
+    ticker: 'KXITFMATCH-TOP',
+    entryConfig: { athenaFire: { version: 'ATHENA-A3', selectedAttack: 'Athena Exclamation', ticker: 'KXITFMATCH-TOP', stakeCents: 100, commandHash: 'x' } },
+  };
+  const grantQuote = { ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: 58, yesAsk: 60, status: 'active' };
+  const immediate = await SagittariusEngine.prototype.fanOutExcalibur.call(engine, source, grantQuote);
+  assert.equal(immediate.length, 0);
+  assert.equal(engine.excaliburGrants.get('KXITFMATCH-TOP').sourceCosmos, 'ARIES');
+
+  const shallow = {
+    ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: 50, yesAsk: 52, status: 'active',
+  };
+  const crash16 = { episodeId: 'ep-16', preCrashPeakCents: 66, troughCents: 50, crashDepthCents: 16, phase: 'REBOUND_CONFIRMED' };
+  const first = await SagittariusEngine.prototype.observeExcaliburQuote.call(engine, shallow, crash16);
+  assert.equal(first.some((row)=>row.systemName==='ARIES'), false);
+  assert.equal(first.some((row)=>row.systemName==='TAURUS'), false);
+  assert.equal(first.some((row)=>row.systemName==='GEMINI'), false);
+
+  // rebound + two upticks from the 50 trough to satisfy 15/5/2 but not 20
+  let opened = [];
+  let bid = 50;
+  for (const next of [56, 57]) {
+    bid = next;
+    opened = await SagittariusEngine.prototype.observeExcaliburQuote.call(engine, {
+      ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: bid, yesAsk: bid+2, status: 'active',
+    }, crash16);
+  }
+  assert.equal(opened.some((row)=>row.systemName==='GEMINI'), false);
+  assert.ok(opened.length >= 1);
+  const geminiStillOut = !opened.some((row)=>row.systemName==='GEMINI');
+  assert.equal(geminiStillOut, true);
+
+  const crash21 = { episodeId: 'ep-21', preCrashPeakCents: 71, troughCents: 50, crashDepthCents: 21, phase: 'REBOUND_CONFIRMED' };
+  opened = await SagittariusEngine.prototype.observeExcaliburQuote.call(engine, {
+    ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: 57, yesAsk: 59, status: 'active',
+  }, crash21);
+  const gemini = opened.find((row)=>row.systemName==='GEMINI');
+  assert.equal(gemini?.stakeCents, 500);
+});
+
+test('TC1 Excalibur does not fan out Crystal Wall or fire when Rozan is on', async () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { excaliburEnabled: true, rozanHyakuRyuHaEnabled: true };
+  engine._excaliburFanout = false;
+  const none = await SagittariusEngine.prototype.fanOutExcalibur.call(engine, {
+    id:'cw', systemName:'ARIES', conceptName:'Recovery Hunter', ticker:'T',
+  }, { ticker:'T' });
+  assert.deepEqual(none, []);
+  engine.settings = { excaliburEnabled: true, rozanHyakuRyuHaEnabled: false };
+  const still = await SagittariusEngine.prototype.fanOutExcalibur.call(engine, {
+    id:'cw', systemName:'ARIES', conceptName:'Recovery Hunter', ticker:'T',
+  }, { ticker:'T' });
+  assert.deepEqual(still, []);
 });

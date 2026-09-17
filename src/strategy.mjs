@@ -770,6 +770,13 @@ export function crystalWallSignalState(priorWatch={}, q={}, settings={}, now=Dat
   return{...base,qualified:reason==='qualified',terminal:false,reason,newLow,troughCents:trough,troughAtMs:newLow?Number(now):Number(priorWatch?.troughAtMs||now),crashDepthCents:crashDepth,reboundCents:rebound,upwardTicks,lastBidCents:bid,spreadCents:spread};
 }
 
+export function crystalWallGeometryReady(priorWatch={}, q={}, settings={}, now=Date.now()) {
+  const state=crystalWallSignalState(priorWatch,q,settings,now);
+  const wallReason=String(state.reason||'');
+  const geometryReady=state.terminal!==true && ['qualified','outside_entry_band','spread'].includes(wallReason);
+  return {...state, geometryReady};
+}
+
 function crystalWallEconomicTarget({askCents=0,stakeCents=0,settings={}}={}) {
   const ask=Math.max(1,Number(askCents)||0),stake=Math.max(1,Number(stakeCents)||0);
   const target=Math.max(0.01,Number(settings.infinityBreakMinNetPerOriginalContractCents??INFINITY_BREAK.defaultMinimumNetPerOriginalContractCents));
@@ -1458,7 +1465,7 @@ export class StrategyEngine {
     const s=this.getSettings();
     const active = await this.activeHunterTickerExposure(q.ticker);
     const room=String(s.systemName||'');
-    const fleet=s.rozanHyakuRyuHaEnabled===true
+    const fleet=(s.rozanHyakuRyuHaEnabled===true||s.excaliburEnabled===true)
       ? active.filter((e)=>String(e.systemName||'')===room)
       : active;
     const conflicts=crystalWallOverlay===true
@@ -2122,11 +2129,12 @@ export class StrategyEngine {
         }
       }
       if (typeof this.db.acquireFleetTickerLock === 'function') {
-        const fleetLockKey=s.rozanHyakuRyuHaEnabled===true?`${exactTicker}|cosmos:${s.systemName}`:exactTicker;
+        const fleetUnison=s.rozanHyakuRyuHaEnabled===true||s.excaliburEnabled===true;
+        const fleetLockKey=fleetUnison?`${exactTicker}|cosmos:${s.systemName}`:exactTicker;
         fleetTickerUnlock = await this.db.acquireFleetTickerLock(fleetLockKey);
         if (!fleetTickerUnlock) {
           trace('FLEET_TICKER_LOCK','BLOCKED','fleet_ticker_lock_busy');
-          await this.audit('fleet_ticker_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker,cosmos:s.systemName,rozanHyakuRyuHaEnabled:s.rozanHyakuRyuHaEnabled===true});
+          await this.audit('fleet_ticker_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker,cosmos:s.systemName,rozanHyakuRyuHaEnabled:s.rozanHyakuRyuHaEnabled===true,excaliburEnabled:s.excaliburEnabled===true});
           return null;
         }
       }

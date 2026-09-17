@@ -342,6 +342,23 @@ export const ROZAN_HYAKU_RYU_HA = Object.freeze({
   defaultEnabled:false,
   offRule:'one_exact_ticker_one_cosmos',
   onRule:'all_cosmos_may_enter_same_exact_ticker',
+  exclusiveWith:'EXCALIBUR',
+});
+
+export const EXCALIBUR = Object.freeze({
+  version:'EXCALIBUR-V2',
+  policyRevision:'EXC-R2-ROOM-CRYSTAL-WALL',
+  saint:'CAPRICORN',
+  displayName:'Excalibur',
+  role:'one_authorized_real_fire_unlocks_ticker_each_cosmos_must_print_own_crystal_wall',
+  defaultEnabled:false,
+  offRule:'no_grant',
+  onRule:'one_athena_fire_grants_the_ticker_then_each_free_cosmos_must_satisfy_its_own_crystal_wall',
+  copiesCrystalWall:false,
+  respectsRoomCrystalWall:true,
+  wallKeys:Object.freeze(['crystalWallMinCrashCents','crystalWallMinReboundCents','crystalWallMinUpwardTicks']),
+  exclusiveWith:'ROZAN_HYAKU_RYU_HA',
+  lockScopeWhenOn:'exact_ticker_plus_cosmos',
 });
 
 

@@ -6,12 +6,13 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
+import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
 import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
 import { PhoenixCosmoEngine } from './phoenix.mjs';
-import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, MEGA_WAVE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
+import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
+import { sealAthenaFireCommand } from './authority.mjs';
 import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
 import { ConstellationHost, CONSTELLATION, COSMOS_IDS, normalizeCosmosId, cosmosSettingsKey, isolateBook, emptyCosmosBooks, FairScanScheduler, inCosmosClockWindow, watchdogDiscoveryTokens, watchdogMayDiscover } from './constellation.mjs';
@@ -945,6 +946,10 @@ export class SagittariusEngine {
     if(!parentEntry||!proof){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:'confirmation_lineage_missing'};}
     const cosmosId=this.pickCosmosForRealHunter(ticker);
     const opened=await this.withCosmosSettings(cosmosId,()=>this.strategy.executeMegaWaveAthenaContinuation(q,parentEntry,{authorizationId:id,thirdProof:proof,authorizedAtMs:Date.now()}));
+    if(opened){
+      const unison=await this.fanOutExcalibur(opened,q);
+      if(unison.length) stats.lastEvent={status:'EXCALIBUR_FANOUT',atMs:Date.now(),parentEntryId:opened.id,copied:unison.length,ticker};
+    }
     this.athenaExclamationConfirmationWatches.delete(id);
     const episode={id,systemName:opened?.systemName||cosmosId||s.systemName,ticker,eventTicker:String(watch.eventTicker||ticker),athenaDecision:{decision:opened?'OPENED':'BLOCKED',reason:opened?'confirmed_crash_rebound_ticks_authorized_athena':fresh.reason||'athena_entry_pipeline_blocked',megaWave:{version:MEGA_WAVE.version,crystalProof:proof,thirdProof:proof}},entryId:opened?.id||null,entryAtMs:opened?Number(opened.openedAtMs||Date.now()):null,attackSelected:'Athena Exclamation',trackingComplete:!opened,updatedAtMs:Date.now()};
     await this.db?.upsertOpportunityEpisode?.(episode).catch(()=>{});
@@ -1960,6 +1965,7 @@ export class SagittariusEngine {
             // independent rebound watch; only meaningful state transitions or
             // a READY execution attempt are queued off the quote callback.
             this.observeCrystalWallQuote(q,state);
+            void this.observeExcaliburQuote(q,state).catch((error)=>{void this.db.audit('error','excalibur_quote_observer',{ticker:q?.ticker||null,message:String(error?.message||error)}).catch(()=>{});});
           } catch(e) {
             void this.db.audit('error','crash_intelligence_quote',{ticker:q.ticker,message:String(e?.message||e)}).catch(()=>{});
           }
@@ -2462,6 +2468,8 @@ export class SagittariusEngine {
       if(e){
         created.push(e);this.atomicThunderBolt.consume(bolt.id,q.ticker);
         if(plasmaReservation?.ok)await this.db.linkLightningPlasmaReservation({systemName:s.systemName,fieldId,boltId:bolt.id,entryId:e.id}).catch(()=>{});
+        const unison=await this.fanOutExcalibur(e,q);
+        if(unison.length) created.push(...unison);
       }
     }
     return created;
@@ -3099,9 +3107,164 @@ export class SagittariusEngine {
     return Number(simulationPortfolioCents||0);
   }
 
+  cosmosHoldsExactTicker(id, ticker) {
+    const exact=String(ticker||'');
+    const openLike=(status)=>['open','entry_pending','exit_pending','pending_recovery'].includes(String(status||''));
+    const rows=isolateBook(this.cosmosBooks?.[id]||[],id);
+    return rows.some((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)&&String(row.ticker||'')===exact);
+  }
+
+  excaliburRuntime() {
+    if(!(this.excaliburGrants instanceof Map)) this.excaliburGrants=new Map();
+    if(!(this.excaliburInFlight instanceof Set)) this.excaliburInFlight=new Set();
+    return this.excaliburGrants;
+  }
+
+  seedExcaliburGeometry(ticker, q={}) {
+    const bid=Number(q?.yesBid||0);
+    const fromCw=[...(this.crystalWallWatches instanceof Map?this.crystalWallWatches.values():[])].filter((w)=>String(w?.ticker||'')===String(ticker||''));
+    const watch=fromCw.sort((a,b)=>Number(b.authorizedAtMs||0)-Number(a.authorizedAtMs||0))[0]||null;
+    if(watch){
+      return {
+        preCrashPeakCents:Number(watch.preCrashPeakCents||0),
+        troughCents:Number(watch.troughCents||bid),
+        crashDepthCents:Number(watch.crashDepthCents||0),
+        lastBidCents:bid||Number(watch.lastBidCents||0),
+        upwardTicks:0,
+      };
+    }
+    return {
+      preCrashPeakCents:bid,
+      troughCents:bid,
+      crashDepthCents:0,
+      lastBidCents:bid,
+      upwardTicks:0,
+    };
+  }
+
+  async fanOutExcalibur(sourceEntry, q) {
+    const host=this.settings||{};
+    if (host.excaliburEnabled!==true) return [];
+    if (host.rozanHyakuRyuHaEnabled===true) return [];
+    const concept=String(sourceEntry?.conceptName||'');
+    if (concept!=='Athena Exclamation') return [];
+    const ticker=String(sourceEntry?.ticker||q?.ticker||'');
+    if (!ticker) return [];
+    const sourceRoom=normalizeCosmosId(sourceEntry?.systemName||host.systemName);
+    const sealed=sourceEntry?.entryConfig?.athenaFire||sourceEntry?.athenaFireCommand||sourceEntry?.entryConfig?.athena?.fireCommand||null;
+    if(!sealed||typeof sealed!=='object'){
+      await this.db?.audit?.('info','excalibur_grant_blocked',{ticker,reason:'source_fire_missing'}).catch(()=>{});
+      return [];
+    }
+    const grants=this.excaliburRuntime();
+    const geometry=this.seedExcaliburGeometry(ticker,q);
+    const prior=grants.get(ticker);
+    const grant={
+      ticker,
+      eventTicker:String(q?.eventTicker||sourceEntry?.eventTicker||ticker),
+      sourceEntryId:String(sourceEntry.id||''),
+      sourceCosmos:sourceRoom,
+      sourceFire:structuredClone(sealed),
+      grantedAtMs:Date.now(),
+      preCrashPeakCents:Math.max(Number(prior?.preCrashPeakCents||0),Number(geometry.preCrashPeakCents||0)),
+      troughCents:Number(geometry.troughCents||0),
+      crashDepthCents:Math.max(Number(prior?.crashDepthCents||0),Number(geometry.crashDepthCents||0)),
+      rooms:prior?.rooms instanceof Map?prior.rooms:new Map(),
+    };
+    grants.set(ticker,grant);
+    await this.db?.audit?.('info','excalibur_granted',{
+      ticker,
+      sourceCosmos:sourceRoom,
+      sourceEntryId:grant.sourceEntryId,
+      crashDepthCents:grant.crashDepthCents,
+    }).catch(()=>{});
+    const opened=await this.observeExcaliburQuote(q,null);
+    return opened;
+  }
+
+  async observeExcaliburQuote(q, crashState=null) {
+    const host=this.settings||{};
+    if(host.excaliburEnabled!==true) return [];
+    if(host.rozanHyakuRyuHaEnabled===true) return [];
+    const ticker=String(q?.ticker||'');
+    if(!ticker) return [];
+    const grants=this.excaliburRuntime();
+    const grant=grants.get(ticker);
+    if(!grant) return [];
+    if(crashState?.episodeId){
+      const peak=Math.max(0,Number(crashState.preCrashPeakCents||0));
+      const trough=Math.max(0,Number(crashState.troughCents||0));
+      const depth=Math.max(Number(crashState.crashDepthCents||0),peak>0&&trough>0?peak-trough:0);
+      if(peak>Number(grant.preCrashPeakCents||0)) grant.preCrashPeakCents=peak;
+      if(trough>0) grant.troughCents=grant.troughCents>0?Math.min(Number(grant.troughCents),trough):trough;
+      if(depth>Number(grant.crashDepthCents||0)) grant.crashDepthCents=depth;
+    }
+    const status=String(q?.status||'active').toLowerCase();
+    if(Boolean(q?.result)||['finalized','settled','closed'].includes(status)){
+      grants.delete(ticker);
+      return [];
+    }
+    const opened=[];
+    for(const id of COSMOS_IDS){
+      if(id===grant.sourceCosmos) continue;
+      if(this.cosmosHoldsExactTicker(id,ticker)) continue;
+      const room=grant.rooms.get(id)||{status:'WATCHING',watch:null,openedEntryId:null};
+      if(room.status==='OPENED'||room.openedEntryId) continue;
+      const flight=`${ticker}:${id}`;
+      if(this.excaliburInFlight.has(flight)) continue;
+      const replica=await this.withCosmosSettings(id, async (bound) => {
+        const seed={
+          preCrashPeakCents:Number(grant.preCrashPeakCents||room.watch?.preCrashPeakCents||0),
+          troughCents:Number(room.watch?.troughCents||grant.troughCents||0),
+          crashDepthCents:Number(grant.crashDepthCents||room.watch?.crashDepthCents||0),
+          lastBidCents:Number(room.watch?.lastBidCents||q?.yesBid||0),
+          upwardTicks:Math.max(0,Math.floor(Number(room.watch?.upwardTicks||0))),
+        };
+        const geometry=crystalWallGeometryReady(seed,q,bound,Date.now());
+        room.watch=geometry;
+        room.status=geometry.geometryReady?'READY':geometry.reason||'WATCHING';
+        grant.rooms.set(id,room);
+        if(geometry.geometryReady!==true) return null;
+        this.excaliburInFlight.add(flight);
+        try{
+          const stake=Number(bound?.athenaExclamationStakeCents||host.athenaExclamationStakeCents||100);
+          const core=structuredClone(grant.sourceFire);
+          delete core.commandHash;
+          core.systemName=id;
+          core.stakeCents=stake;
+          core.authorizationId=`EXCALIBUR:${grant.sourceEntryId||'fire'}:${id}`;
+          core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Date.now()+10_000);
+          core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
+          const command=sealAthenaFireCommand(core);
+          return this.strategy.createHunter('Athena Exclamation', q, stake, 0, {
+            athenaFireCommand:command,
+            entryQualificationSnapshot:{excalibur:true,sourceCosmos:grant.sourceCosmos,parentEntryId:grant.sourceEntryId,crystalWallGeometry:geometry},
+            legacyCompatibility:false,
+          });
+        } finally {
+          this.excaliburInFlight.delete(flight);
+        }
+      }).catch((err)=>{
+        this.db?.audit?.('info','excalibur_replica_blocked',{ticker,sourceCosmos:grant.sourceCosmos,targetCosmos:id,reason:String(err?.message||err)}).catch(()=>{});
+        return null;
+      });
+      if(replica){
+        room.status='OPENED';
+        room.openedEntryId=replica.id;
+        grant.rooms.set(id,room);
+        this.rememberCosmosBookEntry?.(replica);
+        opened.push(replica);
+      }
+    }
+    if(opened.length){
+      await this.db?.audit?.('info','excalibur_wall_open',{ticker,copied:opened.length,rooms:opened.map((row)=>row.systemName)}).catch(()=>{});
+    }
+    return opened;
+  }
+
   pickCosmosForRealHunter(ticker) {
     const exact=String(ticker||'');
-    const unison=this.settings?.rozanHyakuRyuHaEnabled===true;
+    const unison=this.settings?.rozanHyakuRyuHaEnabled===true||this.settings?.excaliburEnabled===true;
     const openLike=(status)=>['open','entry_pending','exit_pending','pending_recovery'].includes(String(status||''));
     const rowsFor=(id)=>isolateBook(this.cosmosBooks?.[id]||[],id);
     const holding=[];
@@ -3278,7 +3441,7 @@ export class SagittariusEngine {
 
     const previousCrystalProofCount=Number(current?.crystalWallWinsToTriggerAthena??MEGA_WAVE.defaultCrystalProofsRequired??3);
     const proofCountChanged=Object.hasOwn(patch||{},'crystalWallWinsToTriggerAthena')&&previousCrystalProofCount!==Number(next.crystalWallWinsToTriggerAthena);
-    const topologyKeys=['pegasusEnabled','dragonEnabled','phoenixEnabled','momentumHunterEnabled','waveSurferEnabled','recoveryHunterEnabled','crashRecoveryHunterEnabled','scarletNeedleEnabled','geminiEnabled','justiceArrowEnabled','athenaExclamationEnabled','lightningPlasmaEnabled','galacticExplosionEnabled'];
+    const topologyKeys=['pegasusEnabled','dragonEnabled','phoenixEnabled','momentumHunterEnabled','waveSurferEnabled','recoveryHunterEnabled','crashRecoveryHunterEnabled','scarletNeedleEnabled','geminiEnabled','justiceArrowEnabled','athenaExclamationEnabled','lightningPlasmaEnabled','galacticExplosionEnabled','rozanHyakuRyuHaEnabled','excaliburEnabled'];
     const topologyChanged=topologyKeys.some((k)=>Object.hasOwn(patch||{},k)&&current?.[k]!==next[k]);
     const changedKeys=Object.keys(patch||{});
     try{
@@ -4409,8 +4572,12 @@ export class SagittariusEngine {
         brokerOwnershipReconciliation:BROKER_OWNERSHIP_RECONCILIATION.version,
         brokerOwnershipReconciliationPolicyRevision:BROKER_OWNERSHIP_RECONCILIATION.policyRevision,
         brokerOwnershipReconciliationRole:BROKER_OWNERSHIP_RECONCILIATION.role,
-        singleRealHunterPerExactTicker: this.settings.galacticExplosionEnabled !== true,
-        exactTickerLockScope: this.settings.galacticExplosionEnabled === true ? GALACTIC_EXPLOSION.enabledLockScope : GALACTIC_EXPLOSION.disabledLockScope,
+        singleRealHunterPerExactTicker: this.settings.galacticExplosionEnabled !== true && this.settings.rozanHyakuRyuHaEnabled !== true && this.settings.excaliburEnabled !== true,
+        exactTickerLockScope: (this.settings.excaliburEnabled===true||this.settings.rozanHyakuRyuHaEnabled===true)
+          ? 'exact_ticker_plus_cosmos'
+          : (this.settings.galacticExplosionEnabled === true ? GALACTIC_EXPLOSION.enabledLockScope : GALACTIC_EXPLOSION.disabledLockScope),
+        rozanHyakuRyuHaEnabled: this.settings.rozanHyakuRyuHaEnabled === true,
+        excaliburEnabled: this.settings.excaliburEnabled === true,
         galacticExplosion: GALACTIC_EXPLOSION.version,
         galacticExplosionEnabled: this.settings.galacticExplosionEnabled === true,
         galacticExplosionSameAttackDuplicatesAllowed: GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,
