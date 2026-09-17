@@ -824,3 +824,61 @@ test('TC1 Stop Engine writes host and rooms and source skips the scan loop', asy
   assert.ok(src.includes('if(this.settings?.engineActive!==true)'));
   assert.ok(src.includes('archiveSimulationFleet'));
 });
+
+test('TC1 Reset Simulation clears twelve-cosmos overview memory', async () => {
+  const { emptyCosmosBooks } = await import('../src/constellation.mjs');
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...master, systemName: 'SAGITTARIUS', ownerId: 'mw-test', mode: 'SIMULATION', engineActive: true, resetTimestampMs: 0 };
+  engine.constellation = new ConstellationHost();
+  engine.cosmosWindowById = {};
+  engine.cosmosBooks = emptyCosmosBooks();
+  engine.cosmosBooks.ARIES = [{
+    id: 'old-1', systemName: 'ARIES', conceptName: 'Athena Exclamation', status: 'closed',
+    ticker: 'KXITFMATCH-OLD', pnlCents: -50, openedAtMs: 1000, closedAtMs: 2000, archived: false,
+  }];
+  engine.cosmosBooks.TAURUS = [{
+    id: 'old-2', systemName: 'TAURUS', conceptName: 'Athena Exclamation', status: 'open',
+    ticker: 'KXITFMATCH-LIVE', pnlCents: 0, openedAtMs: 1000,
+  }];
+  engine.simulationResetPromise = null;
+  engine.simulationMutationGate = { snapshot(){return {blocked:false};}, async blockAndDrain(){}, release(){} };
+  engine.invalidateStateSnapshot = () => {};
+  engine.invalidateOperatorTelemetry = () => {};
+  engine.refreshCrashPriorityTickers = () => {};
+  engine.db = {
+    async archiveSimulationFleet(){ return 2; },
+    async saveSettings(settings){ ledger.writeHost(settings); },
+    async loadCosmosSettings(id, defaults){ return { ...defaults, ...ledger.readCosmos(id) }; },
+    async saveCosmosSettings(id, settings){ ledger.writeOne(id, settings); },
+    async audit(){},
+  };
+  const before = engine.collectConstellationOverview();
+  assert.ok(before.find((r)=>r.id==='ARIES').closed >= 1);
+  await engine.resetSimulation();
+  const after = engine.collectConstellationOverview();
+  assert.equal(after.find((r)=>r.id==='ARIES').closed, 0);
+  assert.equal(after.find((r)=>r.id==='TAURUS').open, 0);
+  assert.equal(after.reduce((n,r)=>n+r.open+r.closed,0), 0);
+});
+
+test('TC1 dashboard cutoff hides old closed rows in twelve-cosmos overview', () => {
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...originalSettings(), resetTimestampMs: 5000 };
+  engine.constellation = new ConstellationHost();
+  engine.cosmosWindowById = {};
+  engine.cosmosBooks = {
+    ARIES: [
+      { id:'old', systemName:'ARIES', conceptName:'Athena Exclamation', status:'closed', ticker:'A', pnlCents:-10, openedAtMs:1000, closedAtMs:2000 },
+      { id:'new', systemName:'ARIES', conceptName:'Athena Exclamation', status:'closed', ticker:'B', pnlCents:20, openedAtMs:6000, closedAtMs:7000 },
+      { id:'live', systemName:'ARIES', conceptName:'Athena Exclamation', status:'open', ticker:'C', openedAtMs:1000 },
+    ],
+  };
+  const rows = engine.collectConstellationOverview();
+  const aries = rows.find((r)=>r.id==='ARIES');
+  assert.equal(aries.closed, 1);
+  assert.equal(aries.pnlCents, 20);
+  assert.equal(aries.open, 1);
+});

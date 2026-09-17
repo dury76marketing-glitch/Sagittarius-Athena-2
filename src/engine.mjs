@@ -3296,9 +3296,14 @@ export class SagittariusEngine {
     for(const row of liveRows||[]) this.rememberCosmosBookEntry(row);
     const rooms=[];
     for(const id of COSMOS_IDS){
-      const entries=isolateBook(this.cosmosBooks?.[id]||[],id).filter((row)=>this.isConstellationOverviewHunter(row));
+      const resetAt=Math.max(0,Number(this.settings?.resetTimestampMs||0));
+      const entries=isolateBook(this.cosmosBooks?.[id]||[],id).filter((row)=>this.isConstellationOverviewHunter(row) && row?.archived!==true);
       const open=entries.filter((row)=>['open','entry_pending','exit_pending','pending_recovery'].includes(row.status));
-      const closed=entries.filter((row)=>row.status==='closed');
+      const closed=entries.filter((row)=>{
+        if(row.status!=='closed') return false;
+        if(resetAt<=0) return true;
+        return Number(row.closedAtMs||row.openedAtMs||0)>=resetAt;
+      });
       const window=this.cosmosWindowById?.[id]||{minGameMinutes:Number(this.settings?.minGameMinutes||0),maxGameMinutes:Number(this.settings?.maxGameMinutes||0)};
       rooms.push({
         id, displayName:this.constellation.displayName(id),
@@ -3565,6 +3570,7 @@ export class SagittariusEngine {
         this.crystalWallShadowRuntime?.clear?.();
         this.activeCosmosByTicker?.clear?.();
         this.excaliburGrants?.clear?.();
+        this.cosmosBooks = emptyCosmosBooks();
         this.refreshCrashPriorityTickers();
         const resetAt=Date.now();
         this.settings = { ...this.settings, resetTimestampMs: resetAt };
