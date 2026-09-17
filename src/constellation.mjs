@@ -167,10 +167,15 @@ export class SettingsTenancyLedger {
     this.store = store;
   }
 
-  writeMaster(settings) {
+  writeHost(settings) {
     const clone = cloneSettingsUnchanged(settings);
     this.store.set(CONSTELLATION.masterSettingsKey, clone);
     this.store.set(CONSTELLATION.fleetSettingsKey, cloneSettingsUnchanged(clone));
+    return clone;
+  }
+
+  writeMaster(settings) {
+    const clone = this.writeHost(settings);
     for (const id of COSMOS_IDS) {
       this.store.set(cosmosSettingsKey(id), cloneSettingsUnchanged(clone));
     }

@@ -585,12 +585,21 @@ export class Database {
     return clean;
   }
   async loadSettings(defaults){return this.loadSettingsByKey(CONSTELLATION.masterSettingsKey,defaults);}
-  async saveSettings(settings){
+  async saveHostSettings(settings){
     const clean=sanitizeRuntimeSettings(settings);
     await this.saveSettingsByKey(CONSTELLATION.masterSettingsKey, clean);
     await this.saveSettingsByKey(CONSTELLATION.fleetSettingsKey, clean);
+    return clean;
+  }
+  async broadcastSettingsToAllCosmos(settings){
+    const clean=sanitizeRuntimeSettings(settings);
     for (const id of COSMOS_IDS) await this.saveSettingsByKey(cosmosSettingsKey(id), clean);
     return clean;
+  }
+  // Host Save (homepage) must call broadcastSettingsToAllCosmos separately.
+  // Start/Stop, boot, and reset write only the host so per-room Crystal Wall survives.
+  async saveSettings(settings){
+    return this.saveHostSettings(settings);
   }
   async loadCosmosSettings(id, defaults){
     const cosmosId=normalizeCosmosId(id);

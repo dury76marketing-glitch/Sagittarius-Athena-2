@@ -3460,6 +3460,9 @@ export class SagittariusEngine {
         return next;
       }
       await this.db.saveSettings(next);
+      if(typeof this.db.broadcastSettingsToAllCosmos==='function'){
+        await this.db.broadcastSettingsToAllCosmos(next);
+      }
       if(typeof this.db.loadSettings!=='function')throw new Error('settings_persistence_readback_unavailable');
       const persisted=await this.db.loadSettings(freshInstallSettings());
       for(const k of changedKeys){

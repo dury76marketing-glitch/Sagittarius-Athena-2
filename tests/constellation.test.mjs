@@ -122,7 +122,10 @@ test('TC1-P2 engine master Save broadcasts; one-room patch does not move the liv
   engine.invalidateStateSnapshot = () => {};
   engine.requestScan = () => {};
   engine.db = {
-    async saveSettings(settings) { ledger.writeMaster(settings); },
+    async saveSettings(settings) { ledger.writeHost(settings); },
+    async broadcastSettingsToAllCosmos(settings) {
+      for (const id of COSMOS_IDS) ledger.writeOne(id, settings);
+    },
     async loadSettings(defaults) { return { ...defaults, ...ledger.read('runtime') }; },
     async loadCosmosSettings(id, defaults) { return { ...defaults, ...ledger.readCosmos(id) }; },
     async saveCosmosSettings(id, settings) { ledger.writeOne(id, settings); },
@@ -740,4 +743,35 @@ test('TC1 Excalibur does not fan out Crystal Wall or fire when Rozan is on', asy
     id:'cw', systemName:'ARIES', conceptName:'Recovery Hunter', ticker:'T',
   }, { ticker:'T' });
   assert.deepEqual(still, []);
+});
+
+test('TC1 host Start/Stop does not overwrite a room Crystal Wall', async () => {
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  ledger.writeOne('ARIES', { ...master, crystalWallMinCrashCents: 20, crystalWallMinReboundCents: 8, crystalWallMinUpwardTicks: 7 });
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...master, systemName: 'SAGITTARIUS', ownerId: 'mw-test', mode: 'SIMULATION', engineActive: false };
+  engine.invalidateStateSnapshot = () => {};
+  engine.db = {
+    async saveSettings(settings) { ledger.writeHost(settings); },
+    async loadSettings(defaults) { return { ...defaults, ...ledger.read('runtime') }; },
+    async loadCosmosSettings(id, defaults) { return { ...defaults, ...ledger.readCosmos(id) }; },
+    async saveCosmosSettings(id, settings) { ledger.writeOne(id, settings); },
+  };
+  await engine.setEngine(true);
+  assert.equal(engine.settings.engineActive, true);
+  assert.equal(ledger.readCosmos('ARIES').crystalWallMinCrashCents, 20);
+  assert.equal(ledger.readCosmos('ARIES').crystalWallMinReboundCents, 8);
+  assert.equal(ledger.readCosmos('TAURUS').crystalWallMinCrashCents, master.crystalWallMinCrashCents);
+});
+
+test('TC1 homepage Save still broadcasts Crystal Wall; incidental host save does not', async () => {
+  const db = await readFile(new URL('../src/db.mjs', import.meta.url), 'utf8');
+  assert.ok(db.includes('async broadcastSettingsToAllCosmos'));
+  assert.ok(db.includes('return this.saveHostSettings(settings)'));
+  const save = db.split('async saveSettings(settings)')[1].split('async loadCosmosSettings')[0];
+  assert.equal(save.includes('for (const id of COSMOS_IDS)'), false);
+  const engine = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  assert.ok(engine.includes('broadcastSettingsToAllCosmos(next)'));
 });
