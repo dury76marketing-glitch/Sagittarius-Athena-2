@@ -3507,17 +3507,36 @@ export class SagittariusEngine {
   }
 
   async setEngine(active) {
-    this.settings = { ...this.settings, engineActive: Boolean(active) };
+    const on=Boolean(active);
+    this.settings = { ...this.settings, engineActive: on };
     await this.db.saveSettings(this.settings);
+    if(typeof this.db.loadCosmosSettings==='function' && typeof this.db.saveCosmosSettings==='function'){
+      for(const id of COSMOS_IDS){
+        try{
+          const room=await this.db.loadCosmosSettings(id, this.settings);
+          await this.db.saveCosmosSettings(id, {...room, engineActive:on});
+        }catch{}
+      }
+    }
     this.invalidateStateSnapshot();
+    this.invalidateOperatorTelemetry();
     return this.settings;
   }
 
   requestScan() { this.scanRequested = true; }
 
   async resetDashboard() {
-    this.settings = { ...this.settings, resetTimestampMs: Date.now() };
+    const resetAt=Date.now();
+    this.settings = { ...this.settings, resetTimestampMs: resetAt };
     await this.db.saveSettings(this.settings);
+    if(typeof this.db.loadCosmosSettings==='function' && typeof this.db.saveCosmosSettings==='function'){
+      for(const id of COSMOS_IDS){
+        try{
+          const room=await this.db.loadCosmosSettings(id, this.settings);
+          await this.db.saveCosmosSettings(id, {...room, resetTimestampMs:resetAt});
+        }catch{}
+      }
+    }
     this.invalidateStateSnapshot();
     this.invalidateOperatorTelemetry();
     return this.settings;
@@ -3530,7 +3549,9 @@ export class SagittariusEngine {
       const before=this.simulationMutationGate.snapshot();
       await this.simulationMutationGate.blockAndDrain();
       try{
-        const n = await this.db.archiveSimulation(this.settings.systemName);
+        const n = typeof this.db.archiveSimulationFleet==='function'
+          ? await this.db.archiveSimulationFleet({ownerId:this.settings.ownerId, mode:'SIMULATION'})
+          : await this.db.archiveSimulation(this.settings.systemName);
         // Performance reset archives economic SIM rows only. The following are
         // intelligence and MUST survive: tracker rows, MarketHub histories,
         // crash/learning state, Atomic Thunder observations and Athena memory.
@@ -3543,9 +3564,19 @@ export class SagittariusEngine {
         this.crystalWallShadowRecent?.clear?.();
         this.crystalWallShadowRuntime?.clear?.();
         this.activeCosmosByTicker?.clear?.();
+        this.excaliburGrants?.clear?.();
         this.refreshCrashPriorityTickers();
-        this.settings = { ...this.settings, resetTimestampMs: null };
+        const resetAt=Date.now();
+        this.settings = { ...this.settings, resetTimestampMs: resetAt };
         await this.db.saveSettings(this.settings);
+        if(typeof this.db.loadCosmosSettings==='function' && typeof this.db.saveCosmosSettings==='function'){
+          for(const id of COSMOS_IDS){
+            try{
+              const room=await this.db.loadCosmosSettings(id, this.settings);
+              await this.db.saveCosmosSettings(id, {...room, resetTimestampMs:resetAt});
+            }catch{}
+          }
+        }
         this.invalidateStateSnapshot();
         this.invalidateOperatorTelemetry();
         await this.db.audit('info','simulation_reset_completed',{release:RELEASE,archivedEntries:n,intelligencePreserved:true,trackersCleared:false,marketHistoriesCleared:false,athenaMemoryPreserved:true,atomicThunderHistoryPreserved:true,mutationGateBefore:before,mutationGateAtArchive:this.simulationMutationGate.snapshot()}).catch(()=>{});
@@ -4036,6 +4067,10 @@ export class SagittariusEngine {
 
   async cycleLoop() {
     while (this.running) {
+      if(this.settings?.engineActive!==true){
+        await sleep(500);
+        continue;
+      }
       const cycleStart = Date.now();
       let complete = false;
       try {

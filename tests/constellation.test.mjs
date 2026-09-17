@@ -775,3 +775,52 @@ test('TC1 homepage Save still broadcasts Crystal Wall; incidental host save does
   const engine = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
   assert.ok(engine.includes('broadcastSettingsToAllCosmos(next)'));
 });
+
+test('TC1 Reset Simulation archives the fleet and stamps a dashboard cutoff', async () => {
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  const archived=[];
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...master, systemName: 'SAGITTARIUS', ownerId: 'mw-test', mode: 'SIMULATION', engineActive: true };
+  engine.simulationResetPromise = null;
+  engine.simulationMutationGate = { snapshot(){return {blocked:false};}, async blockAndDrain(){}, release(){} };
+  engine.invalidateStateSnapshot = () => {};
+  engine.invalidateOperatorTelemetry = () => {};
+  engine.refreshCrashPriorityTickers = () => {};
+  engine.db = {
+    async archiveSimulation(name){ archived.push(['one', name]); return 1; },
+    async archiveSimulationFleet(f){ archived.push(['fleet', f.ownerId]); return 12; },
+    async saveSettings(settings){ ledger.writeHost(settings); },
+    async loadCosmosSettings(id, defaults){ return { ...defaults, ...ledger.readCosmos(id) }; },
+    async saveCosmosSettings(id, settings){ ledger.writeOne(id, settings); },
+    async audit(){},
+  };
+  const n = await engine.resetSimulation();
+  assert.equal(n, 12);
+  assert.equal(archived[0][0], 'fleet');
+  assert.ok(Number(engine.settings.resetTimestampMs) > 0);
+  assert.ok(Number(ledger.readCosmos('ARIES').resetTimestampMs) > 0);
+});
+
+test('TC1 Stop Engine writes host and rooms and source skips the scan loop', async () => {
+  const master = originalSettings();
+  const ledger = new SettingsTenancyLedger();
+  ledger.writeMaster(master);
+  const engine = Object.create(SagittariusEngine.prototype);
+  engine.settings = { ...master, systemName: 'SAGITTARIUS', ownerId: 'mw-test', mode: 'SIMULATION', engineActive: true };
+  engine.invalidateStateSnapshot = () => {};
+  engine.invalidateOperatorTelemetry = () => {};
+  engine.db = {
+    async saveSettings(settings){ ledger.writeHost(settings); },
+    async loadCosmosSettings(id, defaults){ return { ...defaults, ...ledger.readCosmos(id) }; },
+    async saveCosmosSettings(id, settings){ ledger.writeOne(id, settings); },
+  };
+  await engine.setEngine(false);
+  assert.equal(engine.settings.engineActive, false);
+  assert.equal(ledger.read('runtime').engineActive, false);
+  assert.equal(ledger.readCosmos('PISCES').engineActive, false);
+  const src = await readFile(new URL('../src/engine.mjs', import.meta.url), 'utf8');
+  assert.ok(src.includes('if(this.settings?.engineActive!==true)'));
+  assert.ok(src.includes('archiveSimulationFleet'));
+});
