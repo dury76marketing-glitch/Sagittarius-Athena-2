@@ -145,6 +145,7 @@ export const MEGA_WAVE = Object.freeze({
   crystalWallExcludedFromProfitAuthorityUpgrade:true,
   entryAuthority:'MEGA_WAVE_TRIPLE_CRYSTAL_AUTHORITY',
   downstreamAuthority:'MEGA_WAVE_ATHENA_PROFIT_RELEASE',
+  galacticOpenAuthority:'MEGA_WAVE_ATHENA_OPEN_RELEASE',
 });
 
 export const EXECUTION_ATTACK_DISPLAY = Object.freeze({
@@ -326,11 +327,20 @@ export const SAGITTARIUS_JUSTICE_ARROW = Object.freeze({
 });
 
 export const GALACTIC_EXPLOSION = Object.freeze({
-  version:'GALACTIC-EXPLOSION-V1',
+  version:'GALACTIC-EXPLOSION-V2',
+  policyRevision:'GE-R2-ATHENA-OPEN-SAME-TICKER-SAINTS',
   role:'multi_attack_exact_ticker_topology',
   disabledLockScope:'exact_ticker',
   enabledLockScope:'exact_ticker_plus_attack_identity',
   sameAttackDuplicatesAllowed:false,
+  defaultEnabled:false,
+  offRule:'one_exact_ticker_one_hunter_saints_only_after_profitable_athena_close',
+  onRule:'athena_open_grants_enabled_follow_up_saints_same_ticker_same_cosmos',
+  saintReleaseWhenOn:'athena_open',
+  saintReleaseWhenOff:'profitable_athena_close',
+  copiesAthenaFill:false,
+  saintsKeepOwnDoctrine:true,
+  sameCosmosOnly:true,
 });
 
 export const ROZAN_HYAKU_RYU_HA = Object.freeze({

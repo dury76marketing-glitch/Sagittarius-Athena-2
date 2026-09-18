@@ -526,9 +526,57 @@ export class SagittariusEngine {
     const grant=episode?.athenaDecision?.megaWaveGrant;return grant&&grant.version===MEGA_WAVE.version?structuredClone(grant):null;
   }
 
+  megaWaveFollowUpPlan(durable,s=this.settings||{}){
+    const mw=durable?.entryConfig?.athenaExclamation?.megaWaveAuthorization||durable?.entryConfig?.megaWave||{};
+    const followUpRaw=mw.followUpAttacksAtEntry!=null?mw.followUpAttacksAtEntry:s.athenaExclamationFollowUpAttacks;
+    const followUpNumber=Number(followUpRaw);
+    const limit=Math.max(0,Math.min(MEGA_WAVE.maximumFollowUpAttacks,Math.floor(Number.isFinite(followUpNumber)?followUpNumber:Number(MEGA_WAVE.defaultFollowUpAttacks||0))));
+    const frozenSaints=Array.isArray(mw.enabledSaintsAtEntry)?mw.enabledSaintsAtEntry:[];
+    const liveSaints=MEGA_WAVE.downstreamSaints.filter((name)=>isModelEnabled(s,name));
+    const eligible=(frozenSaints.length?frozenSaints:liveSaints).filter((x)=>MEGA_WAVE.downstreamSaints.includes(String(x)));
+    return {limit,eligible,mw};
+  }
+
+  queueMegaWaveAthenaOpen(entry){
+    const id=String(entry?.id||'');if(!id)return false;
+    if(String(entry?.conceptName||'')!=='Athena Exclamation')return false;
+    if(this.settings?.galacticExplosionEnabled!==true)return false;
+    return this.entryEvaluationQueue.enqueue(`mega-wave-athena-open:${id}`,()=>this.handleMegaWaveAthenaOpen(entry));
+  }
+
   queueMegaWaveAthenaClose(entry){
     const id=String(entry?.id||'');if(!id)return false;
     return this.entryEvaluationQueue.enqueue(`mega-wave-athena-close:${id}`,()=>this.handleMegaWaveAthenaClose(entry));
+  }
+
+  async handleMegaWaveAthenaOpen(entry){
+    const stats=this.megaWaveRuntime(),s=this.settings||{},id=String(entry?.id||''),ticker=String(entry?.ticker||'');
+    if(!id||!ticker||String(entry?.conceptName||'')!=='Athena Exclamation')return{status:'IGNORED'};
+    if(s.galacticExplosionEnabled!==true)return{status:'IGNORED',reason:'galactic_explosion_off'};
+    const openLike=['open','entry_pending'].includes(String(entry?.status||''));
+    if(!openLike)return{status:'IGNORED'};
+    const marketFamilyExclusion=executionMarketFamilyExclusion(ticker,this.settings);
+    if(marketFamilyExclusion.blocked){
+      stats.lastEvent={status:'MARKET_FAMILY_EXCLUSION',atMs:Date.now(),entryId:id,ticker,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
+      await this.db?.audit?.('info','mega_wave_athena_open_market_family_grant_blocked',{entryId:id,ticker,marketFamilyExclusion}).catch(()=>{});
+      return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
+    }
+    if(typeof this.db?.entryById!=='function')return{status:'BLOCKED',reason:'durable_parent_read_unavailable'};
+    const durable=await this.db.entryById(id).catch(()=>null);
+    const roomOk=Boolean(normalizeCosmosId(durable?.systemName)||String(durable?.systemName||'')===String(s.systemName||''));
+    const durableOk=String(durable?.id||'')===id&&roomOk&&String(durable?.ownerId||'')===String(s.ownerId)&&String(durable?.mode||'')===String(s.mode||'')&&String(durable?.conceptName||'')==='Athena Exclamation'&&String(durable?.ticker||'')===ticker&&['open','entry_pending'].includes(String(durable?.status||''));
+    if(!durableOk)return{status:'BLOCKED',reason:'athena_parent_provenance_invalid'};
+    const grantId=`MEGA-WAVE:GRANT:${id}`;
+    const existing=typeof this.db?.opportunityEpisode==='function'?await this.db.opportunityEpisode(grantId).catch(()=>null):null;
+    if(existing){const grant=this.megaWaveGrantFromEpisode(existing);if(grant){this.installMegaWaveGrant(grant,durable);return{status:grant.status||'ACTIVE',grant};}}
+    const {limit,eligible}=this.megaWaveFollowUpPlan(durable,s);
+    const createdAtMs=Date.now();
+    const grant={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,parentEntryId:id,parentConcept:'Athena Exclamation',ticker,eventTicker:String(durable.eventTicker||ticker),ownerId:String(durable.ownerId||''),systemName:String(durable.systemName||''),mode:String(durable.mode||''),createdAtMs,limit,eligibleSaints:[...eligible],allocationDoctrine:MEGA_WAVE.allocationDoctrine,reservations:{},status:limit<=0||eligible.length===0?'COMPLETE':'ACTIVE',source:'ATHENA_OPEN_GALACTIC',authority:MEGA_WAVE.galacticOpenAuthority,parentOpenedAtMs:Number(durable.openedAtMs||createdAtMs),parentEntryPriceCents:Number(durable.entryPriceCents||0)};
+    await this.db.upsertOpportunityEpisode({id:grantId,systemName:String(durable.systemName||s.systemName),sourceRelease:RELEASE,cohortId:String(s.resetTimestampMs||''),ticker,eventTicker:grant.eventTicker,side:'YES',sport:String(durable.sport||'Unknown'),boltAtMs:grant.parentOpenedAtMs,boltSnapshot:{version:MEGA_WAVE.version,parentEntryId:id,source:grant.source},athenaDecision:{decision:grant.status,reason:'galactic_athena_open_same_ticker_saints',megaWaveGrant:grant},fireCommand:{},attackSelected:null,entryId:null,entryAtMs:null,outcome:{},outcomeLabel:'MEGA_WAVE_ATHENA_OPEN_GRANT',trackingComplete:grant.status==='COMPLETE',updatedAtMs:createdAtMs});
+    stats.athenaOpenGrants=Number(stats.athenaOpenGrants||0)+1;stats.lastEvent={status:'OPEN_GRANT_CREATED',atMs:createdAtMs,grantId,parentEntryId:id,ticker,limit,eligibleSaints:eligible};
+    this.installMegaWaveGrant(grant,durable);
+    await this.db.audit('info','mega_wave_athena_open_grant_created',{grantId,entryId:id,ticker,systemName:grant.systemName,limit,eligibleSaints:eligible}).catch(()=>{});
+    return{status:grant.status,grant};
   }
 
   async handleMegaWaveAthenaClose(entry){
@@ -541,26 +589,22 @@ export class SagittariusEngine {
       return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
     }
     if(typeof this.db?.entryById!=='function')return{status:'BLOCKED',reason:'durable_parent_read_unavailable'};
-    const durable=await this.db.entryById(id).catch(()=>null),mw=durable?.entryConfig?.athenaExclamation?.megaWaveAuthorization||durable?.entryConfig?.megaWave||{};
+    const durable=await this.db.entryById(id).catch(()=>null);
     const roomOk=Boolean(normalizeCosmosId(durable?.systemName)||String(durable?.systemName||'')===String(s.systemName||''));
     const durableOk=String(durable?.id||'')===id&&roomOk&&String(durable?.ownerId||'')===String(s.ownerId)&&String(durable?.mode||'')===String(s.mode||'')&&String(durable?.conceptName||'')==='Athena Exclamation'&&String(durable?.ticker||'')===ticker&&String(durable?.status||'')==='closed';
     if(!durableOk)return{status:'BLOCKED',reason:'athena_parent_provenance_invalid'};
+    const grantId=`MEGA-WAVE:GRANT:${id}`;
+    const existing=typeof this.db?.opportunityEpisode==='function'?await this.db.opportunityEpisode(grantId).catch(()=>null):null;
     if(!(Number(durable?.pnlCents||0)>0)){
       stats.athenaLossStops=Number(stats.athenaLossStops||0)+1;stats.lastEvent={status:'ATHENA_LOSS_CHAIN_STOP',atMs:Date.now(),entryId:id,ticker,pnlCents:Number(durable?.pnlCents||0)};
       await this.db.audit('info','mega_wave_athena_loss_chain_stopped',{entryId:id,ticker,pnlCents:Number(durable?.pnlCents||0),closeReason:durable?.closeReason||null}).catch(()=>{});
+      if(this.megaWaveGrantFromEpisode(existing)?.status==='ACTIVE')await this.completeMegaWaveGrant(grantId,'athena_not_profitable').catch(()=>{});
       return{status:'CHAIN_STOPPED',reason:'athena_not_profitable'};
     }
-    const grantId=`MEGA-WAVE:GRANT:${id}`;
-    const followUpRaw=mw.followUpAttacksAtEntry!=null?mw.followUpAttacksAtEntry:s.athenaExclamationFollowUpAttacks;
-    const followUpNumber=Number(followUpRaw);
-    const limit=Math.max(0,Math.min(MEGA_WAVE.maximumFollowUpAttacks,Math.floor(Number.isFinite(followUpNumber)?followUpNumber:Number(MEGA_WAVE.defaultFollowUpAttacks||0))));
-    const frozenSaints=Array.isArray(mw.enabledSaintsAtEntry)?mw.enabledSaintsAtEntry:[];
-    const liveSaints=MEGA_WAVE.downstreamSaints.filter((name)=>isModelEnabled(s,name));
-    const eligible=(frozenSaints.length?frozenSaints:liveSaints).filter((x)=>MEGA_WAVE.downstreamSaints.includes(String(x)));
-    const existing=typeof this.db?.opportunityEpisode==='function'?await this.db.opportunityEpisode(grantId).catch(()=>null):null;
     if(existing){const grant=this.megaWaveGrantFromEpisode(existing);if(grant){this.installMegaWaveGrant(grant,durable);return{status:grant.status||'ACTIVE',grant};}}
+    const {limit,eligible}=this.megaWaveFollowUpPlan(durable,s);
     const createdAtMs=Date.now();
-    const grant={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,parentEntryId:id,parentConcept:'Athena Exclamation',ticker,eventTicker:String(durable.eventTicker||ticker),ownerId:String(durable.ownerId||''),systemName:String(durable.systemName||''),mode:String(durable.mode||''),createdAtMs,limit,eligibleSaints:[...eligible],allocationDoctrine:MEGA_WAVE.allocationDoctrine,reservations:{},status:limit<=0||eligible.length===0?'COMPLETE':'ACTIVE',parentRealizedPnlCents:Number(durable.pnlCents||0),parentCloseReason:String(durable.closeReason||''),parentClosedAtMs:Number(durable.closedAtMs||createdAtMs)};
+    const grant={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,parentEntryId:id,parentConcept:'Athena Exclamation',ticker,eventTicker:String(durable.eventTicker||ticker),ownerId:String(durable.ownerId||''),systemName:String(durable.systemName||''),mode:String(durable.mode||''),createdAtMs,limit,eligibleSaints:[...eligible],allocationDoctrine:MEGA_WAVE.allocationDoctrine,reservations:{},status:limit<=0||eligible.length===0?'COMPLETE':'ACTIVE',source:'ATHENA_PROFIT_CLOSE',authority:MEGA_WAVE.downstreamAuthority,parentRealizedPnlCents:Number(durable.pnlCents||0),parentCloseReason:String(durable.closeReason||''),parentClosedAtMs:Number(durable.closedAtMs||createdAtMs)};
     await this.db.upsertOpportunityEpisode({id:grantId,systemName:String(durable.systemName||s.systemName),sourceRelease:RELEASE,cohortId:String(s.resetTimestampMs||''),ticker,eventTicker:grant.eventTicker,side:'YES',sport:String(durable.sport||'Unknown'),boltAtMs:grant.parentClosedAtMs,boltSnapshot:{version:MEGA_WAVE.version,parentEntryId:id},athenaDecision:{decision:grant.status,reason:'profitable_athena_exclamation_close',megaWaveGrant:grant},fireCommand:{},attackSelected:null,entryId:null,entryAtMs:null,outcome:{parentRealizedPnlCents:Number(durable.pnlCents||0)},outcomeLabel:'MEGA_WAVE_ATHENA_PROFIT_GRANT',trackingComplete:grant.status==='COMPLETE',updatedAtMs:createdAtMs});
     stats.athenaProfitGrants=Number(stats.athenaProfitGrants||0)+1;stats.lastEvent={status:'GRANT_CREATED',atMs:createdAtMs,grantId,parentEntryId:id,ticker,limit,eligibleSaints:eligible};
     this.installMegaWaveGrant(grant,durable);
@@ -621,6 +665,36 @@ export class SagittariusEngine {
     return recovered;
   }
 
+  async recoverMegaWaveAthenaOpenHandoffs(){
+    const stats=this.megaWaveRuntime(),s=this.settings||{};
+    if(s.galacticExplosionEnabled!==true)return 0;
+    if(typeof this.db?.entriesByConcept!=='function'||typeof this.db?.opportunityEpisode!=='function')return 0;
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    const seenBooks=new Set();const rows=[];
+    for(const id of [s.systemName,...COSMOS_IDS]){
+      const key=String(id||'');if(!key||seenBooks.has(key))continue;seenBooks.add(key);
+      rows.push(...(await this.db.entriesByConcept(key,MEGA_WAVE.athenaConcept,{limit:2000,includeArchived:false}).catch(()=>[])));
+    }
+    const candidates=(rows||[]).filter((row)=>{
+      const openedAt=Math.max(0,Number(row?.openedAtMs||0));
+      if(String(row?.ownerId||'')!==String(s.ownerId)||String(row?.mode||'')!==String(s.mode||''))return false;
+      if(!(normalizeCosmosId(row?.systemName)||String(row?.systemName||'')===String(s.systemName)))return false;
+      if(String(row?.conceptName||'')!==String(MEGA_WAVE.athenaConcept)||!['open','entry_pending'].includes(String(row?.status||'')))return false;
+      if(!(openedAt>0))return false;
+      if(resetAt>0)return openedAt>=resetAt;
+      return true;
+    }).sort((a,b)=>Number(a.openedAtMs||0)-Number(b.openedAtMs||0)||String(a.id||'').localeCompare(String(b.id||'')));
+    let recovered=0;
+    for(const row of candidates){
+      const grantId=`MEGA-WAVE:GRANT:${String(row.id)}`;
+      const existing=await this.db.opportunityEpisode(grantId).catch(()=>null);
+      if(existing){const grant=this.megaWaveGrantFromEpisode(existing);if(grant?.status==='ACTIVE')this.installMegaWaveGrant(grant,row);continue;}
+      const out=await this.handleMegaWaveAthenaOpen(row).catch(()=>null);
+      if(out?.grant){recovered+=1;stats.recoveredAthenaOpenHandoffs=Number(stats.recoveredAthenaOpenHandoffs||0)+1;await this.db.audit('warning','mega_wave_athena_open_handoff_recovered',{entryId:row.id,ticker:row.ticker,grantId,status:out.status}).catch(()=>{});}
+    }
+    return recovered;
+  }
+
   observeMegaWaveQuote(q){
     if(!q?.ticker||!(this.megaWaveSaintWatches instanceof Map)||!this.megaWaveSaintWatches.size)return false;
     const ticker=String(q.ticker),matches=[...this.megaWaveSaintWatches.entries()].filter(([,w])=>String(w?.ticker||'')===ticker).sort((a,b)=>String(a[1]?.saintConcept||'').localeCompare(String(b[1]?.saintConcept||'')));
@@ -662,7 +736,7 @@ export class SagittariusEngine {
       const reservationId=`${grantId}:SAINT:${concept}`;reservation={status:'RESERVED',reservationId,reservedAtMs:Date.now(),saintConcept:concept};reservations[concept]=reservation;grant.reservations=reservations;await this.persistMegaWaveGrantEpisode(episode,grant,false);stats.saintReserved=Number(stats.saintReserved||0)+1;
     }finally{if(unlock){try{await unlock();}catch{}unlock=null;}}
     const parent=await this.db.entryById(grant.parentEntryId).catch(()=>null),q=this.market?.getQuote?.(grant.ticker),watch=this.megaWaveSaintWatches.get(`${grantId}|${concept}`)||{};
-    const authorization={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,reservationId:reservation.reservationId,parentEntryId:grant.parentEntryId,parentConcept:'Athena Exclamation',saintConcept:concept,ticker:grant.ticker,eventTicker:grant.eventTicker,allocationDoctrine:grant.allocationDoctrine,reservedAtMs:reservation.reservedAtMs,limit:Number(grant.limit||0)};
+    const authorization={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,reservationId:reservation.reservationId,parentEntryId:grant.parentEntryId,parentConcept:'Athena Exclamation',saintConcept:concept,ticker:grant.ticker,eventTicker:grant.eventTicker,allocationDoctrine:grant.allocationDoctrine,reservedAtMs:reservation.reservedAtMs,limit:Number(grant.limit||0),source:grant.source||null,authority:grant.authority||null};
     let opened=null;if(parent&&q){
       const cosmosId=normalizeCosmosId(grant.systemName)||normalizeCosmosId(parent.systemName)||normalizeCosmosId(s.systemName);
       opened=cosmosId
@@ -685,7 +759,7 @@ export class SagittariusEngine {
     if(!(this.megaWaveGrants instanceof Map))this.megaWaveGrants=new Map();
     if(!(this.megaWaveSaintWatches instanceof Map))this.megaWaveSaintWatches=new Map();
     if(!(this.athenaExclamationConfirmationWatches instanceof Map))this.athenaExclamationConfirmationWatches=new Map();
-    if(!this.megaWaveStats||typeof this.megaWaveStats!=='object')this.megaWaveStats={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,firstProofArmed:0,secondProofArmed:0,tripleCertified:0,crystalProofCertified:0,proofStageArmed:{},athenaOpened:0,athenaProfitGrants:0,recoveredAthenaProfitHandoffs:0,athenaLossStops:0,saintReserved:0,saintOpened:0,saintBlocked:0,lastEvent:null};
+    if(!this.megaWaveStats||typeof this.megaWaveStats!=='object')this.megaWaveStats={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,firstProofArmed:0,secondProofArmed:0,tripleCertified:0,crystalProofCertified:0,proofStageArmed:{},athenaOpened:0,athenaProfitGrants:0,athenaOpenGrants:0,recoveredAthenaProfitHandoffs:0,recoveredAthenaOpenHandoffs:0,athenaLossStops:0,saintReserved:0,saintOpened:0,saintBlocked:0,lastEvent:null};
     if(!this.megaWaveStats.proofStageArmed||typeof this.megaWaveStats.proofStageArmed!=='object')this.megaWaveStats.proofStageArmed={};
     if(!Number.isFinite(Number(this.megaWaveStats.crystalProofCertified)))this.megaWaveStats.crystalProofCertified=0;
     return this.megaWaveStats;
@@ -2042,6 +2116,7 @@ export class SagittariusEngine {
         wanted.add(entry.ticker);
         this.market?.setWanted?.([...wanted]);
         this.queueGoldenEyeEvaluation(entry.ticker);
+        if(String(entry?.conceptName||'')==='Athena Exclamation')this.queueMegaWaveAthenaOpen(entry);
       },
       onFeederOpened: (entry) => {
         this.invalidateStateSnapshot();
@@ -2102,6 +2177,7 @@ export class SagittariusEngine {
     // process dies in the tiny window before its asynchronous strategic handoff,
     // rebuild the missing idempotent grant from the current cohort on restart.
     await this.recoverMegaWaveAthenaCloseHandoffs();
+    await this.recoverMegaWaveAthenaOpenHandoffs();
     await this.hydrateAnotherDimension();
     await this.hydrateCrystalWallShadow();
     await this.strategy.hydrateEventClockAnchors().catch(()=>({restored:0}));
@@ -4488,7 +4564,8 @@ export class SagittariusEngine {
     if (this.settings.athenaExclamationEnabled===true && this.settings.recoveryHunterEnabled!==true) entryPathWarnings.push('Athena Exclamation is enabled but Crystal Wall proof generation is disabled');
     if (this.settings.athenaExclamationEnabled===true && followUpLimit===0 && enabledMegaWaveSaints.length>0) entryPathWarnings.push('Athena follow-up count is 0; downstream Saints cannot be released by a profitable Athena close');
     if (followUpLimit>0 && enabledMegaWaveSaints.length===0) entryPathWarnings.push('Athena follow-up count is positive but no downstream Saints are enabled');
-    if (this.settings.galacticExplosionEnabled!==true && followUpLimit>1) entryPathWarnings.push('Galactic Explosion is OFF; exact-ticker topology may limit simultaneous downstream Saints');
+    if (this.settings.galacticExplosionEnabled!==true && followUpLimit>1) entryPathWarnings.push('Galactic Explosion is OFF; Saints wait for a profitable Athena close and cannot sit on the same ticker while Athena is open');
+    if (this.settings.galacticExplosionEnabled===true && followUpLimit>0) entryPathWarnings.push('Galactic Explosion is ON; enabled follow-up Saints may qualify on the same ticker as soon as Athena opens');
     if (!initialExposureEnabled.length) entryPathWarnings.push('Athena Exclamation is disabled; the configured Crystal Wall proof chain cannot create the first real Mega Wave exposure');
     if (referenceGate.allowed && !executionGate.allowed) entryPathWarnings.push(`Real Hunter execution blocked by ${executionGate.reason}; reference feeders remain active`);
     const entryPathConfiguration = {
