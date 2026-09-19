@@ -6,7 +6,7 @@ import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot
 import { SagittariusEngine } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { stampEventClockRecord, projectEventClock } from '../src/eventClockAnchor.mjs';
-import { GameClockAuthority } from '../src/gameClock.mjs';
+import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
 
 const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma'];
 const q=(ticker='MW-T',bid=55,ask=56)=>({ticker,eventTicker:ticker,title:ticker,sport:'Tennis',yesBid:bid,yesAsk:ask,volume24h:10000,status:'active',result:'',updatedAtMs:Date.now(),closeTimeMs:Date.now()+60*60_000});
@@ -700,6 +700,100 @@ test('hydrateEventClockAnchors skips previous-epoch executable clocks',async()=>
   assert.equal(restored.restored,0);
   assert.equal(st.eventClockRecord('EV-HYD'),null);
 });
+
+function liveKalshi({event, elapsedMinutes=35, milestoneStartOffsetMin=35, liveDetails, stats=null, includeMilestoneStart=true}){
+  const now=1_800_000_000_000;
+  return {
+    now,
+    event,
+    kalshi:{
+      async getMilestonesForEvent(){
+        const row={id:'m-live',category:'Sports',type:'basketball_game',primary_event_tickers:[event],related_event_tickers:[event],end_date:new Date(now+90*60000).toISOString()};
+        if(includeMilestoneStart)row.start_date=new Date(now-milestoneStartOffsetMin*60000).toISOString();
+        return [row];
+      },
+      async getMilestonesForSeries(){return [];},
+      async getLiveData(){
+        return {type:'basketball',milestone_id:'m-live',details:liveDetails || {status:'in_progress',game:{elapsed_minutes:elapsedMinutes}}};
+      },
+      async getGameStats(){return stats;},
+    },
+  };
+}
+
+test('official elapsed reconstruction does not treat inprogress as minute zero',()=>{
+  const now=1_800_000_000_000;
+  const official=extractOfficialElapsedMs({details:{status:'in_progress',elapsed_minutes:35}},null,now);
+  assert.equal(official.ok,true);
+  assert.equal(official.elapsedMs,35*60000);
+  const rebuilt=reconstructCurrentEpochStart({observedNow:now,liveData:{details:{status:'in_progress',elapsed_minutes:57}}});
+  assert.equal(rebuilt.ok,true);
+  assert.equal(rebuilt.startTimeMs,now-57*60000);
+  const statusOnly=reconstructCurrentEpochStart({observedNow:now,liveData:{details:{status:'in_progress'}}});
+  assert.equal(statusOnly.ok,false);
+  assert.equal(statusOnly.reason,'current_game_time_unresolved');
+  const mile=reconstructCurrentEpochStart({observedNow:now,liveData:{details:{status:'in_progress'}},milestoneStartMs:now-22*60000,occurrenceTimeMs:now-30*60000});
+  assert.equal(mile.ok,true);
+  assert.equal(mile.reason,'milestone_start_reconstructed');
+  assert.ok(Math.abs(mile.elapsedMs-22*60000)<1);
+});
+
+test('post-reset official live clock reconstructs ~35 and ~57 minutes, not observation time',async()=>{
+  for(const minutes of [35,57]){
+    const {now,event,kalshi}=liveKalshi({event:`NCSU-UVA-${minutes}`,elapsedMinutes:minutes});
+    const clock=new GameClockAuthority({kalshi,now:()=>now});
+    clock.invalidateSimulationEpoch(now);
+    const quote={ticker:event,eventTicker:event,seriesTicker:'KXNCAAMB',yesBid:55,yesAsk:56,liveStatus:'live',recentTrades:20,recentTradesObservedAtMs:now,occurrenceTimeMs:now-40*60000,status:'active'};
+    const state=await clock.resolveEvent({eventTicker:event,quotes:[quote],now,allowGameStats:true,forceFresh:true});
+    assert.equal(state.phase,'CONFIRMED',state.reason);
+    assert.equal(state.discarded,undefined);
+    const elapsed=(now-state.startTimeMs)/60000;
+    assert.ok(Math.abs(elapsed-minutes)<0.05,`expected ~${minutes} got ${elapsed}`);
+    assert.notEqual(state.startTimeMs,now);
+    assert.equal(state.clockReconstructionReason,'official_elapsed_reconstructed');
+  }
+});
+
+test('inprogress without elapsed stays unresolved instead of start=now',async()=>{
+  const {now,event,kalshi}=liveKalshi({event:'NCSU-BARE',liveDetails:{status:'in_progress'},includeMilestoneStart:false});
+  const clock=new GameClockAuthority({kalshi,now:()=>now});
+  clock.invalidateSimulationEpoch(now);
+  const quote={ticker:event,eventTicker:event,yesBid:55,yesAsk:56,liveStatus:'live',recentTrades:20,recentTradesObservedAtMs:now,occurrenceTimeMs:now+2*3600_000,status:'active'};
+  const state=await clock.resolveEvent({eventTicker:event,quotes:[quote],now,allowGameStats:true});
+  assert.equal(state.phase,'UNKNOWN');
+  assert.equal(state.reason,'current_game_time_unresolved');
+  assert.equal(state.confirmed,false);
+  assert.equal(state.startTimeMs,null);
+});
+
+test('a 4-minute official clock still fails the 10-minute gate; 95 fails max; 35 passes',async()=>{
+  const s=settings({minGameMinutes:10,maxGameMinutes:90,hunterCooldownMinutes:0,resetTimestampMs:Date.now()});
+  for(const [minutes,expectOk,reason] of [[4,false,'minimum_game_time'],[35,true,null],[95,false,'maximum_game_time']]){
+    const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+    const t=Date.now();
+    await st.stampCrystalWallEventClock({id:`cw-${minutes}`,ticker:`EV-${minutes}`,eventTicker:`EV-${minutes}`},{...q(`EV-${minutes}`),gameMinutes:minutes},t);
+    const decision=await st.hunterEntryPolicyDecision('Athena Exclamation',q(`EV-${minutes}`),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+    assert.equal(decision.ok,expectOk,`${minutes}:${decision.reason}`);
+    if(!expectOk)assert.equal(decision.reason,reason);
+  }
+});
+
+test('stale pre-reset live reconstruction cannot authorize the new epoch',async()=>{
+  const {now,event,kalshi}=liveKalshi({event:'STALE-RECON',elapsedMinutes:64});
+  const clock=new GameClockAuthority({kalshi,now:()=>now});
+  const quote={ticker:event,eventTicker:event,yesBid:55,yesAsk:56,liveStatus:'live',recentTrades:20,recentTradesObservedAtMs:now,occurrenceTimeMs:now-64*60000,status:'active'};
+  const old=await clock.resolveEvent({eventTicker:event,quotes:[quote],now});
+  assert.equal(old.phase,'CONFIRMED');
+  clock.invalidateSimulationEpoch(now+1000);
+  const sealed=clock.sealClockState(old,0);
+  assert.equal(sealed.reason,'stale_pre_reset_game_clock_authority');
+  assert.equal(sealed.entryAuthorized,false);
+  const fresh=await clock.resolveEvent({eventTicker:event,quotes:[quote],now:now+1000,priorState:old});
+  assert.equal(fresh.phase,'CONFIRMED');
+  assert.equal(fresh.resetTimestampMs,now+1000);
+  assert.notEqual(fresh.startTimeMs,now+1000);
+});
+
 
 
 

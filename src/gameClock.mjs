@@ -201,6 +201,139 @@ function collectLiveSignals(value, out, path = 'details', depth = 0) {
   }
 }
 
+const TIMING_ELAPSED_KEYS = new Set([
+  'elapsed', 'elapsedms', 'elapsedmillis', 'elapsedmilliseconds',
+  'elapsedsec', 'elapsedsecs', 'elapsedsecond', 'elapsedseconds',
+  'elapsedmin', 'elapsedmins', 'elapsedminute', 'elapsedminutes',
+  'gameminutes', 'minuteselapsed', 'secondselapsed', 'timeelapsed',
+  'officialelapsed', 'officialelapsedseconds', 'officialelapsedminutes',
+  'currentelapsed', 'currentelapsedminutes', 'playedminutes',
+]);
+const TIMING_START_KEYS = new Set([
+  'starttime', 'startedat', 'gamestart', 'actualstart', 'kickoff', 'tipoff',
+]);
+const PBP_TIME_KEYS = new Set([
+  'timestamp', 'time', 'wallclock', 'wallclocktime', 'occurredat', 'createdat',
+  'eventtime', 'observedat', 'at',
+]);
+const MAX_RECONSTRUCTED_ELAPSED_MS = 8 * 60 * 60 * 1000;
+
+function numericTimingValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+function elapsedMsFromLabeledValue(keyToken, value, nowMs) {
+  const n = numericTimingValue(value);
+  if (n == null) {
+    const parsed = ms(value);
+    if (parsed > 0 && parsed <= nowMs) return { elapsedMs: nowMs - parsed, source: `absolute_${keyToken}` };
+    return null;
+  }
+  if (n > 1e11) return n <= nowMs ? { elapsedMs: nowMs - n, source: `epoch_${keyToken}` } : null;
+  if (keyToken.includes('ms') || keyToken.includes('millis')) return { elapsedMs: n, source: keyToken };
+  if (keyToken.includes('sec')) return { elapsedMs: n * 1000, source: keyToken };
+  if (keyToken.includes('min')) return { elapsedMs: n * 60000, source: keyToken };
+  if (n >= 0 && n <= 200) return { elapsedMs: n * 60000, source: `${keyToken}_as_minutes` };
+  if (n > 200 && n <= 8 * 3600) return { elapsedMs: n * 1000, source: `${keyToken}_as_seconds` };
+  return null;
+}
+
+function walkOfficialTiming(value, nowMs, out, depth = 0) {
+  if (value == null || depth > 5 || out.length >= 16) return;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 32)) walkOfficialTiming(item, nowMs, out, depth + 1);
+    return;
+  }
+  if (typeof value !== 'object') return;
+  for (const [rawKey, child] of Object.entries(value)) {
+    if (out.length >= 16) break;
+    const key = token(rawKey);
+    if (TIMING_ELAPSED_KEYS.has(key) || TIMING_START_KEYS.has(key)) {
+      const extracted = elapsedMsFromLabeledValue(key, child, nowMs);
+      if (extracted && extracted.elapsedMs >= 0 && extracted.elapsedMs <= MAX_RECONSTRUCTED_ELAPSED_MS) out.push(extracted);
+      continue;
+    }
+    if (child && typeof child === 'object') walkOfficialTiming(child, nowMs, out, depth + 1);
+  }
+}
+
+function earliestPbpTimestampMs(gameStats) {
+  const periods = gameStats?.pbp?.periods || gameStats?.game_stats?.pbp?.periods;
+  if (!Array.isArray(periods)) return 0;
+  let earliest = 0;
+  for (const period of periods.slice(0, 64)) {
+    const events = Array.isArray(period?.events) ? period.events : [];
+    for (const ev of events.slice(0, 80)) {
+      if (!ev || typeof ev !== 'object') continue;
+      for (const [rawKey, child] of Object.entries(ev)) {
+        if (!PBP_TIME_KEYS.has(token(rawKey))) continue;
+        const t = ms(child);
+        if (t > 0 && (!earliest || t < earliest)) earliest = t;
+      }
+    }
+  }
+  return earliest;
+}
+
+export function extractOfficialElapsedMs(liveData, gameStats, nowMs = Date.now()) {
+  const now = Number(nowMs) || Date.now();
+  const hits = [];
+  walkOfficialTiming(liveData, now, hits);
+  walkOfficialTiming(gameStats, now, hits);
+  const pbpAt = earliestPbpTimestampMs(gameStats);
+  if (pbpAt > 0 && pbpAt <= now && now - pbpAt <= MAX_RECONSTRUCTED_ELAPSED_MS) {
+    hits.push({ elapsedMs: now - pbpAt, source: 'pbp_earliest_event_timestamp' });
+  }
+  if (!hits.length) return { ok: false, reason: 'no_official_elapsed' };
+  hits.sort((a, b) => a.elapsedMs - b.elapsedMs);
+  const best = hits[hits.length - 1];
+  return { ok: true, elapsedMs: best.elapsedMs, source: best.source, candidates: hits.length };
+}
+
+export function reconstructCurrentEpochStart({
+  observedNow,
+  liveData = null,
+  gameStats = null,
+  milestoneStartMs = 0,
+  occurrenceTimeMs = 0,
+  allowOccurrenceFallback = false,
+} = {}) {
+  const now = Number(observedNow) || Date.now();
+  const official = extractOfficialElapsedMs(liveData, gameStats, now);
+  if (official.ok) {
+    return {
+      ok: true,
+      startTimeMs: now - official.elapsedMs,
+      elapsedMs: official.elapsedMs,
+      reason: 'official_elapsed_reconstructed',
+      clockSource: official.source,
+    };
+  }
+  const mile = Number(milestoneStartMs || 0);
+  if (mile > 0 && mile <= now && now - mile <= MAX_RECONSTRUCTED_ELAPSED_MS) {
+    return {
+      ok: true,
+      startTimeMs: mile,
+      elapsedMs: now - mile,
+      reason: 'milestone_start_reconstructed',
+      clockSource: 'milestone_start_date',
+    };
+  }
+  const occ = Number(occurrenceTimeMs || 0);
+  if (allowOccurrenceFallback && occ > 0 && occ <= now && now - occ <= MAX_RECONSTRUCTED_ELAPSED_MS) {
+    return {
+      ok: true,
+      startTimeMs: occ,
+      elapsedMs: now - occ,
+      reason: 'occurrence_passed_reconstructed',
+      clockSource: 'occurrence_time',
+    };
+  }
+  return { ok: false, reason: 'current_game_time_unresolved', startTimeMs: null, elapsedMs: null };
+}
+
 export function classifyLiveData(liveData) {
   const details = liveData?.details && typeof liveData.details === 'object' && !Array.isArray(liveData.details)
     ? liveData.details
@@ -765,19 +898,65 @@ export class GameClockAuthority {
       }
       if (liveIdentityValid && liveClass.classification === 'live') {
         const observedNow = Math.max(liveObservedAtMs, decisionNow());
-        const start = prior?.confirmed ? prior.startTimeMs : observedNow;
-        return makeConfirmed(event, observedNow, start, 'kalshi_live_data', {
+        if (prior?.confirmed && Number(prior.startTimeMs) > 0) {
+          return makeConfirmed(event, observedNow, prior.startTimeMs, 'kalshi_live_data', {
+            ...milestoneMeta,
+            occurrenceTimeMs,
+            occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > observedNow)),
+            observedAtMs: prior.observedAtMs || prior.startTimeMs,
+            evidenceObservedAtMs: observedNow,
+            authorizationReason: 'fresh_exact_milestone_live_data',
+            authorizationSource: 'kalshi_live_data',
+            reason: occurrenceTimeMs && occurrenceTimeMs > observedNow
+              ? 'official_live_overrides_future_occurrence'
+              : 'official_live_in_progress',
+            clockReconstructionReason: 'same_epoch_prior_start_retained',
+            sourceCurrentElapsedMinutes: Math.max(0, (observedNow - Number(prior.startTimeMs)) / 60000),
+            derivedStartTimeMs: Number(prior.startTimeMs),
+            evidence: { liveData: liveClass, forceFresh: Boolean(forceFresh) },
+          });
+        }
+        const statsForLive = allowGameStats
+          ? await this.statsForMilestone(milestone.id, { forceFresh })
+          : null;
+        const reconstructed = reconstructCurrentEpochStart({
+          observedNow,
+          liveData,
+          gameStats: statsForLive?.value || null,
+          milestoneStartMs: milestoneMeta.milestoneStartMs,
+          occurrenceTimeMs,
+          allowOccurrenceFallback: false,
+        });
+        if (!reconstructed.ok) {
+          return makeUnknown(event, observedNow, 'current_game_time_unresolved', {
+            ...milestoneMeta,
+            occurrenceTimeMs,
+            evidenceObservedAtMs: observedNow,
+            liveStatus: 'inprogress',
+            elapsedAuthorityAvailable: false,
+            clockReconstructionReason: reconstructed.reason,
+            clockSource: 'official_live_status_only',
+            evidence: { liveData: liveClass, forceFresh: Boolean(forceFresh), pbpEventCount: countPbpEvents(statsForLive?.value) },
+          });
+        }
+        return makeConfirmed(event, observedNow, reconstructed.startTimeMs, 'kalshi_live_data', {
           ...milestoneMeta,
           occurrenceTimeMs,
           occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > observedNow)),
-          observedAtMs: prior?.confirmed ? prior.observedAtMs : observedNow,
+          observedAtMs: observedNow,
           evidenceObservedAtMs: observedNow,
           authorizationReason: 'fresh_exact_milestone_live_data',
           authorizationSource: 'kalshi_live_data',
           reason: occurrenceTimeMs && occurrenceTimeMs > observedNow
             ? 'official_live_overrides_future_occurrence'
             : 'official_live_in_progress',
-          evidence: { liveData: liveClass, forceFresh: Boolean(forceFresh) },
+          clockReconstructionReason: reconstructed.reason,
+          clockSource: reconstructed.clockSource,
+          sourceCurrentElapsedMinutes: reconstructed.elapsedMs / 60000,
+          sourceObservedAtMs: observedNow,
+          derivedStartTimeMs: reconstructed.startTimeMs,
+          freshPostResetClockResolved: true,
+          evidence: { liveData: liveClass, forceFresh: Boolean(forceFresh), reconstruction: reconstructed },
         });
       }
 
@@ -788,7 +967,28 @@ export class GameClockAuthority {
       pbpCount = countPbpEvents(statsRecord?.value);
       if (pbpCount > 0 && prior?.phase !== 'CONFLICT') {
         const observedNow = Math.max(Number(statsRecord?.observedAtMs || 0), decisionNow());
-        const start = prior?.confirmed ? prior.startTimeMs : observedNow;
+        const reconstructed = prior?.confirmed && Number(prior.startTimeMs) > 0
+          ? { ok:true, startTimeMs:prior.startTimeMs, elapsedMs:Math.max(0, observedNow - Number(prior.startTimeMs)), reason:'same_epoch_prior_start_retained', clockSource:prior.source }
+          : reconstructCurrentEpochStart({
+            observedNow,
+            liveData,
+            gameStats: statsRecord?.value || null,
+            milestoneStartMs: milestoneMeta.milestoneStartMs,
+            occurrenceTimeMs,
+            allowOccurrenceFallback: Boolean(occurrence.coherent && occurrenceTimeMs && occurrenceTimeMs <= observedNow),
+          });
+        if (!reconstructed.ok) {
+          return makeUnknown(event, observedNow, 'current_game_time_unresolved', {
+            ...milestoneMeta,
+            occurrenceTimeMs,
+            evidenceObservedAtMs: observedNow,
+            liveStatus: liveClass?.classification || 'unknown',
+            elapsedAuthorityAvailable: false,
+            clockReconstructionReason: reconstructed.reason,
+            evidence: { liveData: liveClass, pbpEventCount: pbpCount, forceFresh: Boolean(forceFresh) },
+          });
+        }
+        const start = reconstructed.startTimeMs;
         const freshExactTrade = freshTradeActivity(quotes, observedNow);
         const occurrenceWindowCurrent = Boolean(occurrence.coherent && occurrenceTimeMs && occurrenceTimeMs <= observedNow);
         const milestoneStartMs = Number(milestoneMeta.milestoneStartMs || 0);
@@ -809,6 +1009,10 @@ export class GameClockAuthority {
           : null;
         return makeConfirmed(event, observedNow, start, prior?.source || 'kalshi_game_stats', {
           ...milestoneMeta,
+          clockReconstructionReason: reconstructed.reason,
+          clockSource: reconstructed.clockSource,
+          sourceCurrentElapsedMinutes: reconstructed.elapsedMs / 60000,
+          derivedStartTimeMs: start,
           occurrenceTimeMs,
           occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > observedNow)),
           observedAtMs: prior?.confirmed ? prior.observedAtMs : observedNow,
