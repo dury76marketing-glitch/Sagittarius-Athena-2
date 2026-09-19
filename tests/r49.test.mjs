@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents } from '../src/strategy.mjs';
+import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, snapshotEventClockMinutes } from '../src/strategy.mjs';
 import { SagittariusEngine } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { stampEventClockRecord } from '../src/eventClockAnchor.mjs';
 
 const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma'];
 const q=(ticker='MW-T',bid=55,ask=56)=>({ticker,eventTicker:ticker,title:ticker,sport:'Tennis',yesBid:bid,yesAsk:ask,volume24h:10000,status:'active',result:'',updatedAtMs:Date.now(),closeTimeMs:Date.now()+60*60_000});
@@ -481,4 +482,68 @@ test('SE1 Starlight executes after parent stop when crash/rebound/ticks qualify 
   const second=await strategy.executeStarlightExtinction(q(parent.ticker,46,47),parent,authorization,watch);
   assert.equal(second,null);
 });
+
+test('CW ladder missing per-proof keys inherit shared Crystal Wall geometry',()=>{
+  const migrated=sanitizeRuntimeSettings({crystalWallMinCrashCents:15,crystalWallMinReboundCents:5,crystalWallMinUpwardTicks:2,crystalWallWinsToTriggerAthena:3});
+  assert.equal(crystalWallRequiredProofCount(migrated),3);
+  for(const stage of [1,2,3,4,5]){
+    const g=crystalWallStageGeometry(migrated,stage);
+    assert.equal(g.minCrashCents,15);
+    assert.equal(g.minReboundCents,5);
+    assert.equal(g.minUpwardTicks,2);
+  }
+  assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('crystalWallProof3MinCrashCents'));
+});
+
+test('CW ladder each proof stage uses its own crash/rebound/ticks and one episode cannot satisfy the next stage',()=>{
+  const s=settings({
+    recoveryMinEntryCents:10,recoveryMaxEntryCents:89,
+    crystalWallWinsToTriggerAthena:3,
+    crystalWallProof1MinCrashCents:15,crystalWallProof1MinReboundCents:10,crystalWallProof1MinUpwardTicks:2,
+    crystalWallProof2MinCrashCents:10,crystalWallProof2MinReboundCents:5,crystalWallProof2MinUpwardTicks:2,
+    crystalWallProof3MinCrashCents:5,crystalWallProof3MinReboundCents:3,crystalWallProof3MinUpwardTicks:2,
+  });
+  const quote=(bid)=>q('CW-LADDER',bid,bid+1);
+  let p1=crystalWallSignalState({proofStage:1,preCrashPeakCents:80,troughCents:80,lastBidCents:80},quote(64),s);
+  assert.equal(p1.qualified,false);assert.equal(p1.minCrashCents,15);
+  p1=crystalWallSignalState({...p1,proofStage:1},quote(70),s);
+  p1=crystalWallSignalState({...p1,proofStage:1},quote(75),s);
+  assert.equal(p1.qualified,true,p1.reason);
+  const asProof2=crystalWallSignalState({...p1,proofStage:2,preCrashPeakCents:80,troughCents:64,lastBidCents:64,upwardTicks:0},quote(75),s);
+  assert.equal(asProof2.minCrashCents,10);
+  assert.notEqual(asProof2.proofStage,1);
+  let p2=crystalWallSignalState({proofStage:2,preCrashPeakCents:70,troughCents:70,lastBidCents:70},quote(59),s);
+  p2=crystalWallSignalState({...p2,proofStage:2},quote(62),s);
+  p2=crystalWallSignalState({...p2,proofStage:2},quote(65),s);
+  assert.equal(p2.qualified,true,p2.reason);
+  assert.equal(crystalWallNextProofStage({completedConsecutive:0,required:3}),1);
+  assert.equal(crystalWallNextProofStage({completedConsecutive:1,required:3}),2);
+  assert.equal(crystalWallNextProofStage({completedConsecutive:2,required:3}),3);
+});
+
+test('CW ladder later proof snapshots the continuous event clock and does not replace the leading anchor',()=>{
+  const first=stampEventClockRecord({eventTicker:'CW-CLK',ticker:'CW-CLK',crystalWallEntryId:'cw-1',elapsedMinutes:12.4,nowMs:1_000_000,source:'confirmed_clock_at_crystal_wall'});
+  assert.equal(first.ok,true);assert.equal(first.record.leading,true);
+  const later=stampEventClockRecord({eventTicker:'CW-CLK',ticker:'CW-CLK',crystalWallEntryId:'cw-2',elapsedMinutes:22.6,nowMs:1_000_000+10*60_000,source:'confirmed_clock_at_crystal_wall',prior:first.record});
+  assert.equal(later.reason,'already_anchored');
+  assert.equal(later.record.crystalWallEntryId,'cw-1');
+  const snap=snapshotEventClockMinutes(first.record,1_000_000+10*60_000,{});
+  assert.equal(snap.ok,true);
+  assert.ok(snap.elapsedMinutes>12.4);
+  assert.ok(snap.elapsedMinutes>=22.3);
+});
+
+test('CW ladder engine advances stage on profit and resets on loss',()=>{
+  const s=settings({crystalWallWinsToTriggerAthena:3});
+  const h=engineHarness([],s);
+  const profit={id:'cw1',ticker:'CW-SEQ',systemName:s.systemName,conceptName:CRYSTAL_WALL.shadowConceptName,status:'closed',closeReason:CRYSTAL_WALL.profitableCloseReason,pnlCents:12,closedAtMs:10,entryConfig:{crystalWall:{proofStage:1,crashEpisodeId:'ep1'}}};
+  const after1=h.e.noteCrystalWallProofClose(profit);
+  assert.equal(after1.completedProofCount,1);
+  assert.equal(after1.currentProofStage,2);
+  const loss={id:'cw2',ticker:'CW-SEQ',systemName:s.systemName,conceptName:CRYSTAL_WALL.shadowConceptName,status:'closed',closeReason:CRYSTAL_WALL.lossCloseReason||'crystal_wall_aurora',pnlCents:-8,closedAtMs:20,entryConfig:{crystalWall:{proofStage:2,crashEpisodeId:'ep2'}}};
+  const afterLoss=h.e.noteCrystalWallProofClose(loss);
+  assert.equal(afterLoss.completedProofCount,0);
+  assert.equal(afterLoss.currentProofStage,1);
+});
+
 

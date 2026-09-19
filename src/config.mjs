@@ -99,6 +99,21 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'crystalWallMinReboundCents',
   'crystalWallMinUpwardTicks',
   'crystalWallWinsToTriggerAthena',
+  'crystalWallProof1MinCrashCents',
+  'crystalWallProof1MinReboundCents',
+  'crystalWallProof1MinUpwardTicks',
+  'crystalWallProof2MinCrashCents',
+  'crystalWallProof2MinReboundCents',
+  'crystalWallProof2MinUpwardTicks',
+  'crystalWallProof3MinCrashCents',
+  'crystalWallProof3MinReboundCents',
+  'crystalWallProof3MinUpwardTicks',
+  'crystalWallProof4MinCrashCents',
+  'crystalWallProof4MinReboundCents',
+  'crystalWallProof4MinUpwardTicks',
+  'crystalWallProof5MinCrashCents',
+  'crystalWallProof5MinReboundCents',
+  'crystalWallProof5MinUpwardTicks',
   'crashRecoveryStakeCents',
   'crashRecoveryMinEntryCents',
   'crashRecoveryMaxEntryCents',
@@ -176,6 +191,17 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'crashRecoveryPri1R2Enabled',
   'lightningPlasmaPri1R2Enabled',
 ]);
+
+export const CRYSTAL_WALL_PROOF_STAGES = Object.freeze([1,2,3,4,5]);
+export function crystalWallProofSettingKeys(stage=1){
+  const n=Math.max(1,Math.min(5,Math.floor(Number(stage)||1)));
+  return Object.freeze({
+    stage:n,
+    crash:`crystalWallProof${n}MinCrashCents`,
+    rebound:`crystalWallProof${n}MinReboundCents`,
+    ticks:`crystalWallProof${n}MinUpwardTicks`,
+  });
+}
 
 export const EDITABLE_NUMERIC_SETTINGS = Object.freeze(CANONICAL_NUMERIC_SETTINGS.filter((k) => !['resetTimestampMs','simFillProbability'].includes(k)));
 export const EDITABLE_BOOLEAN_SETTINGS = Object.freeze(CANONICAL_BOOLEAN_SETTINGS.filter((k) => !['engineActive','justiceArrowPostScarletV3Migrated'].includes(k)));
@@ -290,6 +316,21 @@ export function originalSettings() {
     crystalWallMinReboundCents: 5,
     crystalWallMinUpwardTicks: 2,
     crystalWallWinsToTriggerAthena: 3,
+    crystalWallProof1MinCrashCents: 15,
+    crystalWallProof1MinReboundCents: 5,
+    crystalWallProof1MinUpwardTicks: 2,
+    crystalWallProof2MinCrashCents: 15,
+    crystalWallProof2MinReboundCents: 5,
+    crystalWallProof2MinUpwardTicks: 2,
+    crystalWallProof3MinCrashCents: 15,
+    crystalWallProof3MinReboundCents: 5,
+    crystalWallProof3MinUpwardTicks: 2,
+    crystalWallProof4MinCrashCents: 15,
+    crystalWallProof4MinReboundCents: 5,
+    crystalWallProof4MinUpwardTicks: 2,
+    crystalWallProof5MinCrashCents: 15,
+    crystalWallProof5MinReboundCents: 5,
+    crystalWallProof5MinUpwardTicks: 2,
     crashRecoveryStakeCents: 20000,
     crashRecoveryMinEntryCents: 50,
     crashRecoveryMaxEntryCents: 60,
@@ -438,6 +479,21 @@ export function freshInstallSettings() {
     crystalWallMinReboundCents:5,
     crystalWallMinUpwardTicks:4,
     crystalWallWinsToTriggerAthena:2,
+    crystalWallProof1MinCrashCents:15,
+    crystalWallProof1MinReboundCents:5,
+    crystalWallProof1MinUpwardTicks:4,
+    crystalWallProof2MinCrashCents:15,
+    crystalWallProof2MinReboundCents:5,
+    crystalWallProof2MinUpwardTicks:4,
+    crystalWallProof3MinCrashCents:15,
+    crystalWallProof3MinReboundCents:5,
+    crystalWallProof3MinUpwardTicks:4,
+    crystalWallProof4MinCrashCents:15,
+    crystalWallProof4MinReboundCents:5,
+    crystalWallProof4MinUpwardTicks:4,
+    crystalWallProof5MinCrashCents:15,
+    crystalWallProof5MinReboundCents:5,
+    crystalWallProof5MinUpwardTicks:4,
     crashRecoveryMinCrashCents:15,
     crashRecoveryMinReboundCents:5,
     crashRecoveryMinReclaimRate:0.33,
@@ -610,6 +666,19 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.crystalWallMinReboundCents = Math.max(1, Math.min(99, Math.floor(Number(out.crystalWallMinReboundCents) || 5)));
   out.crystalWallMinUpwardTicks = Math.max(1, Math.min(20, Math.floor(Number(out.crystalWallMinUpwardTicks) || 2)));
   out.crystalWallWinsToTriggerAthena = Math.max(1, Math.min(5, Math.floor(Number(out.crystalWallWinsToTriggerAthena) || 3)));
+  // CW proof-ladder migration: missing per-proof geometry inherits the shared
+  // Crystal Wall values so existing 15/5/2 (or operator) boxes stay identical.
+  for (const stage of [1,2,3,4,5]) {
+    const crashKey=`crystalWallProof${stage}MinCrashCents`;
+    const reboundKey=`crystalWallProof${stage}MinReboundCents`;
+    const ticksKey=`crystalWallProof${stage}MinUpwardTicks`;
+    if (!Object.hasOwn(src, crashKey)) out[crashKey] = out.crystalWallMinCrashCents;
+    if (!Object.hasOwn(src, reboundKey)) out[reboundKey] = out.crystalWallMinReboundCents;
+    if (!Object.hasOwn(src, ticksKey)) out[ticksKey] = out.crystalWallMinUpwardTicks;
+    out[crashKey] = Math.max(1, Math.min(99, Math.floor(Number(out[crashKey]) || out.crystalWallMinCrashCents)));
+    out[reboundKey] = Math.max(1, Math.min(99, Math.floor(Number(out[reboundKey]) || out.crystalWallMinReboundCents)));
+    out[ticksKey] = Math.max(1, Math.min(20, Math.floor(Number(out[ticksKey]) || out.crystalWallMinUpwardTicks)));
+  }
   out.justiceArrowMinCrashCents = Math.max(1, Math.min(99, Math.floor(Number(out.justiceArrowMinCrashCents) || 15)));
   out.justiceArrowMinReboundCents = Math.max(1, Math.min(99, Math.floor(Number(out.justiceArrowMinReboundCents) || 5)));
   out.justiceArrowMinUpwardTicks = Math.max(1, Math.min(20, Math.floor(Number(out.justiceArrowMinUpwardTicks) || 2)));

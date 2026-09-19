@@ -43,7 +43,7 @@ import {
   stableDropEntry,
   estimateTimeLeftMs,
 } from './doctrine.mjs';
-import { RELEASE } from './config.mjs';
+import { RELEASE, crystalWallProofSettingKeys } from './config.mjs';
 import { authoritativeClockSnapshot, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { EVENT_CLOCK_ANCHOR, eventClockEpisodeId, projectEventClock, stampEventClockRecord } from './eventClockAnchor.mjs';
 import { AthenaExclamationEngine, ATHENA_EXCLAMATION, athenaExclamationPrimeReview, isGoldSaintConcept } from './athenaExclamation.mjs';
@@ -767,20 +767,69 @@ function lightningPlasmaContinuationEconomicTarget({askCents=0,stakeCents=0,sett
   return{version:'LIGHTNING-PLASMA-CONTINUATION-ECONOMIC-TARGET-V1',authorityMode:LIGHTNING_PLASMA.strategicEntryAuthority,netPerOriginalContractCents:target,requiredTargetBidCents,requiredGrossMoveCents:requiredTargetBidCents-ask,estimatedEntryFeePerContractCents:Number(entryFeePerContract.toFixed(6)),estimatedExitFeePerContractCents:Number(exitFeePerContract.toFixed(6)),targetFeasibilityScore:requiredTargetBidCents<=99?100:0,targetFeasible:requiredTargetBidCents<=99};
 }
 
+export function crystalWallRequiredProofCount(settings={}){
+  return Math.max(1,Math.min(5,Math.floor(Number(settings?.crystalWallWinsToTriggerAthena??CRYSTAL_WALL.defaultWinsToTriggerAthena??3)||3)));
+}
+
+export function crystalWallStageGeometry(settings={}, stage=1){
+  const n=Math.max(1,Math.min(5,Math.floor(Number(stage)||1)));
+  const keys=crystalWallProofSettingKeys(n);
+  const sharedCrash=Math.max(1,Math.min(99,Math.floor(Number(settings?.crystalWallMinCrashCents??CRYSTAL_WALL.defaultMinCrashCents)||CRYSTAL_WALL.defaultMinCrashCents)));
+  const sharedRebound=Math.max(1,Math.min(99,Math.floor(Number(settings?.crystalWallMinReboundCents??CRYSTAL_WALL.defaultMinReboundCents)||CRYSTAL_WALL.defaultMinReboundCents)));
+  const sharedTicks=Math.max(1,Math.min(20,Math.floor(Number(settings?.crystalWallMinUpwardTicks??CRYSTAL_WALL.defaultMinUpwardTicks)||CRYSTAL_WALL.defaultMinUpwardTicks)));
+  const crash=Math.max(1,Math.min(99,Math.floor(Number(settings?.[keys.crash]??sharedCrash)||sharedCrash)));
+  const rebound=Math.max(1,Math.min(99,Math.floor(Number(settings?.[keys.rebound]??sharedRebound)||sharedRebound)));
+  const ticks=Math.max(1,Math.min(20,Math.floor(Number(settings?.[keys.ticks]??sharedTicks)||sharedTicks)));
+  return {proofStage:n,minCrashCents:crash,minReboundCents:rebound,minUpwardTicks:ticks,sharedMinCrashCents:sharedCrash,sharedMinReboundCents:sharedRebound,sharedMinUpwardTicks:sharedTicks};
+}
+
+export function crystalWallNextProofStage({completedConsecutive=0,required=3}={}){
+  const need=Math.max(1,Math.min(5,Math.floor(Number(required)||3)));
+  const done=Math.max(0,Math.floor(Number(completedConsecutive)||0));
+  if(done>=need)return need;
+  return Math.min(need,done+1);
+}
+
+export function snapshotEventClockMinutes(record, now=Date.now(), q={}){
+  const projected=projectEventClock(record, now);
+  if(projected.ok&&Number.isFinite(Number(projected.elapsedMinutes))){
+    return {
+      ok:true,
+      elapsedMinutes:Number(projected.elapsedMinutes),
+      source:'inherited_event_clock',
+      version:record?.version||null,
+      policyRevision:record?.policyRevision||null,
+      clockSource:record?.source||null,
+      phase:record?.phase||null,
+      anchoredElapsedMinutes:Number(record?.anchoredElapsedMinutes),
+      anchoredAtMs:Number(record?.anchoredAtMs),
+      gameStartTimeMs:Number(q?.gameStartTimeMs||0)||null,
+      observedAtMs:Number(now),
+    };
+  }
+  const live=Number.isFinite(Number(q?.gameMinutes))?Number(q.gameMinutes):null;
+  const start=Number(q?.gameStartTimeMs||0);
+  const fromStart=start>0&&start<=now?Math.max(0,(now-start)/60000):null;
+  const elapsed=live??fromStart;
+  if(!(Number.isFinite(elapsed)&&elapsed>=0))return {ok:false,elapsedMinutes:null,source:'clock_unavailable',observedAtMs:Number(now),gameStartTimeMs:start||null};
+  return {ok:true,elapsedMinutes:elapsed,source:live!=null?'quote_game_minutes':'start_time_elapsed',version:record?.version||null,policyRevision:record?.policyRevision||null,clockSource:record?.source||null,phase:record?.phase||null,gameStartTimeMs:start||null,observedAtMs:Number(now)};
+}
+
 export function crystalWallSignalState(priorWatch={}, q={}, settings={}, now=Date.now()) {
   const bid=Number(q?.yesBid||0),ask=Number(q?.yesAsk||0);
   const status=String(q?.status||'active').toLowerCase();
   const final=Boolean(q?.result)||FINAL_MARKET_STATUSES.has(status);
-  const minCrash=Math.max(1,Math.floor(Number(settings?.crystalWallMinCrashCents??CRYSTAL_WALL.defaultMinCrashCents)||CRYSTAL_WALL.defaultMinCrashCents));
-  const minRebound=Math.max(1,Math.floor(Number(settings?.crystalWallMinReboundCents??CRYSTAL_WALL.defaultMinReboundCents)||CRYSTAL_WALL.defaultMinReboundCents));
-  const minUpward=Math.max(1,Math.floor(Number(settings?.crystalWallMinUpwardTicks??CRYSTAL_WALL.defaultMinUpwardTicks)||CRYSTAL_WALL.defaultMinUpwardTicks));
+  const stageGeom=crystalWallStageGeometry(settings, priorWatch?.proofStage||1);
+  const minCrash=stageGeom.minCrashCents;
+  const minRebound=stageGeom.minReboundCents;
+  const minUpward=stageGeom.minUpwardTicks;
   const minEntry=Number(settings?.recoveryMinEntryCents??CRYSTAL_WALL.defaultMinEntryCents);
   const maxEntry=Number(settings?.recoveryMaxEntryCents??CRYSTAL_WALL.defaultMaxEntryCents);
   const maxSpread=Math.max(0,Number(settings?.maxSpreadCents??3));
   const peak=Math.max(0,Number(priorWatch?.preCrashPeakCents||0));
   const priorTrough=Math.max(0,Number(priorWatch?.troughCents||0));
   const priorLast=Math.max(0,Number(priorWatch?.lastBidCents||0));
-  const base={...structuredClone(priorWatch),observedAtMs:Number(now),bidCents:bid,askCents:ask,minCrashCents:minCrash,minReboundCents:minRebound,minUpwardTicks:minUpward,minEntryCents:minEntry,maxEntryCents:maxEntry,maxSpreadCents:maxSpread};
+  const base={...structuredClone(priorWatch),observedAtMs:Number(now),bidCents:bid,askCents:ask,proofStage:stageGeom.proofStage,minCrashCents:minCrash,minReboundCents:minRebound,minUpwardTicks:minUpward,minEntryCents:minEntry,maxEntryCents:maxEntry,maxSpreadCents:maxSpread};
   if(final)return{...base,qualified:false,terminal:true,reason:'market_final'};
   if(!(bid>0)||!(ask>0)||bid>ask)return{...base,qualified:false,terminal:false,reason:'quote_unavailable'};
   let trough=priorTrough>0?Math.min(priorTrough,bid):bid;
@@ -2669,13 +2718,18 @@ export class StrategyEngine {
       ? kalshiGeneralTakerFeeEstimateCents({count,priceCents:entryPriceCents})
       : Math.max(0,Number(s.simFeeCents||0))*count;
     const now=Date.now();
+    const qualifiedClock=snapshotEventClockMinutes(this.eventClockRecord(freshQ.eventTicker), now, freshQ);
     const aurora=calculateAuroraSnapshotFromFeeModel({entryPriceCents,count,entryFeeCents,mode:s.mode,simFeeCents:Number(s.simFeeCents||0),damageControlPercent:Number(s.auroraDamageControlPercent??AURORA_EXECUTION.defaultDamageControlPercent),calculatedAtMs:now});
     if(!aurora?.ok)return null;
     const lineage={
       version:CRYSTAL_WALL.version,policyRevision:CRYSTAL_WALL.policyRevision,authority:CRYSTAL_WALL.strategicEntryAuthority,
       authorizationId,crashEpisodeId,ticker,eventTicker:freshQ.eventTicker,sourceKind:String(watch?.sourceKind||'TRACKED_MARKET'),coexistingEntryIds:[...(watch?.coexistingEntryIds||[])].map(String),
       crashStartedAtMs:Number(watch?.crashStartedAtMs||0),preCrashPeakCents:Number(watch?.preCrashPeakCents||0),troughCents:Number(freshSignal.troughCents||0),troughAtMs:Number(freshSignal.troughAtMs||0),crashDepthCents:Number(freshSignal.crashDepthCents||0),
-      reboundCents:Number(freshSignal.reboundCents||0),minCrashCents:Number(freshSignal.minCrashCents||CRYSTAL_WALL.defaultMinCrashCents),minReboundCents:Number(freshSignal.minReboundCents||CRYSTAL_WALL.defaultMinReboundCents),upwardTicks:Number(freshSignal.upwardTicks||0),minUpwardTicks:Number(freshSignal.minUpwardTicks||CRYSTAL_WALL.defaultMinUpwardTicks),
+      reboundCents:Number(freshSignal.reboundCents||0),proofStage:Number(watch?.proofStage||freshSignal.proofStage||1),requiredProofCount:Number(watch?.requiredProofCount||crystalWallRequiredProofCount(s)),
+      configuredMinCrashCents:Number(freshSignal.minCrashCents||CRYSTAL_WALL.defaultMinCrashCents),configuredMinReboundCents:Number(freshSignal.minReboundCents||CRYSTAL_WALL.defaultMinReboundCents),configuredMinUpwardTicks:Number(freshSignal.minUpwardTicks||CRYSTAL_WALL.defaultMinUpwardTicks),
+      minCrashCents:Number(freshSignal.minCrashCents||CRYSTAL_WALL.defaultMinCrashCents),minReboundCents:Number(freshSignal.minReboundCents||CRYSTAL_WALL.defaultMinReboundCents),upwardTicks:Number(freshSignal.upwardTicks||0),minUpwardTicks:Number(freshSignal.minUpwardTicks||CRYSTAL_WALL.defaultMinUpwardTicks),
+      proofClock:{opened:structuredClone(watch?.proofClockOpened||null),qualified:qualifiedClock},
+      openedGameMinutes:Number(watch?.proofClockOpened?.elapsedMinutes),qualifiedGameMinutes:qualifiedClock.elapsedMinutes,
       authorizedAtMs:Number(watch?.authorizedAtMs||now),firedAtMs:now,sameTicker:true,sameSide:true,fixedStakeCents:stakeCents,stakeMultiplier:1,stakeMultiplierAllowed:false,fullConfiguredSizeRequired:true,oneEntryPerCrashEpisode:true,ordinaryGameClockBypassed:true,ordinaryCooldownBypassed:true,ordinaryEventEntryCapBypassed:true,fullExecutionSafetyRequired:true,reboundOrigin:CRYSTAL_WALL.reboundOrigin,reboundPrice:CRYSTAL_WALL.reboundPrice,
     };
     const command=sealCrystalWallFireCommand({version:CRYSTAL_WALL.version,policyRevision:CRYSTAL_WALL.policyRevision,authorityMode:CRYSTAL_WALL.strategicEntryAuthority,authoritySource:'CI1_CRASH_EPISODE',authorizationId,systemName:s.systemName,sourceRelease:RELEASE,decidedAtMs:now,expiresAtMs:now+5_000,ticker,eventTicker:lineage.eventTicker,side:'YES',selectedAttack:CRYSTAL_WALL.shadowConceptName,selectedAttackDisplay:CRYSTAL_WALL.displayName,stakeCents,operatorMinEntryCents:Number(s.recoveryMinEntryCents),operatorMaxEntryCents:Number(s.recoveryMaxEntryCents),entryPriceCents:entryPriceCents,authorizedMaxEntryCents:Number(s.recoveryMaxEntryCents),maxSpreadCents:Number(s.maxSpreadCents??3),auroraDamageControlPercent:Number(s.auroraDamageControlPercent??45),infinityBreakPolicyVersion:INFINITY_BREAK.version,economicTarget:target,decisionEvidence:{crystalWall:lineage}});
@@ -2702,7 +2756,10 @@ export class StrategyEngine {
     const at=Number(closedAtMs)||Date.now(),exit=Math.round(Number(exitPriceCents));
     if(!(exit>=0&&exit<=100)||!String(closeReason||''))return null;
     const remaining=Number(entry.remainingCount??entry.count??0);
-    const patch={status:'closed',exitPriceCents:exit,currentPriceCents:exit,remainingCount:0,pnlCents:Number(pnlCents||0),exitFeeCents:Number(exitFeeCents||0),exitFilledCount:remaining,exitNotionalCents:Number(exitAverageCents??exit)*remaining,exitAttemptBookMs:Number(bookMs||0),closeReason:String(closeReason),closedAtMs:at,updatedAtMs:at,peakPriceCents:Math.max(Number(entry.peakPriceCents||entry.entryPriceCents||0),Number(peakPriceCents||0)),lowestPriceAfterEntryCents:Number.isFinite(Number(lowestPriceAfterEntryCents))?Number(lowestPriceAfterEntryCents):entry.lowestPriceAfterEntryCents,maeCents:Number.isFinite(Number(maeCents))?Number(maeCents):Number(entry.maeCents||0),maeAtMs:maeAtMs??entry.maeAtMs};
+    const closedClock=snapshotEventClockMinutes(this.eventClockRecord(entry.eventTicker||entry.ticker), at, {gameStartTimeMs:entry.gameStartTimeMs});
+    const priorCw=entry.entryConfig?.crystalWall&&typeof entry.entryConfig.crystalWall==='object'?entry.entryConfig.crystalWall:{};
+    const crystalWall={...priorCw,proofClock:{...(priorCw.proofClock||{}),closed:closedClock},closedGameMinutes:closedClock.elapsedMinutes};
+    const patch={status:'closed',exitPriceCents:exit,currentPriceCents:exit,remainingCount:0,pnlCents:Number(pnlCents||0),exitFeeCents:Number(exitFeeCents||0),exitFilledCount:remaining,exitNotionalCents:Number(exitAverageCents??exit)*remaining,exitAttemptBookMs:Number(bookMs||0),closeReason:String(closeReason),closedAtMs:at,updatedAtMs:at,peakPriceCents:Math.max(Number(entry.peakPriceCents||entry.entryPriceCents||0),Number(peakPriceCents||0)),lowestPriceAfterEntryCents:Number.isFinite(Number(lowestPriceAfterEntryCents))?Number(lowestPriceAfterEntryCents):entry.lowestPriceAfterEntryCents,maeCents:Number.isFinite(Number(maeCents))?Number(maeCents):Number(entry.maeCents||0),maeAtMs:maeAtMs??entry.maeAtMs,entryConfig:{...(entry.entryConfig||{}),crystalWall}};
     const simulationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
     let releaseSimulationMutation=null;
     if(s.mode==='SIMULATION'&&this.enterSimulationMutation){releaseSimulationMutation=this.enterSimulationMutation(simulationToken);if(!releaseSimulationMutation)return null;}

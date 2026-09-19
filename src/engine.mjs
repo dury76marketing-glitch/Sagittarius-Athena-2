@@ -1,12 +1,12 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
-import { env, freshInstallSettings, factoryOperatorSettingsPatch, normalizeStartupExecutionMode, deploymentConfigRecord, applyJusticeArrowPostScarletV3Migration, EDITABLE_NUMERIC_SETTINGS, EDITABLE_BOOLEAN_SETTINGS, RELEASE } from './config.mjs';
+import { env, freshInstallSettings, factoryOperatorSettingsPatch, normalizeStartupExecutionMode, deploymentConfigRecord, applyJusticeArrowPostScarletV3Migration, EDITABLE_NUMERIC_SETTINGS, EDITABLE_BOOLEAN_SETTINGS, RELEASE, crystalWallProofSettingKeys, CRYSTAL_WALL_PROOF_STAGES } from './config.mjs';
 import { Database, LOW_PRIORITY_DB_PERSISTENCE } from './db.mjs';
 import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
+import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
 import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
@@ -383,6 +383,7 @@ export class SagittariusEngine {
     });
     this.crystalWallContinuationInFlight = new Set();
     this.crystalWallWatches = new Map();
+    this.crystalWallProofStages = new Map();
     this.crystalWallContinuationStats = {version:CRYSTAL_WALL.version,policyRevision:CRYSTAL_WALL.policyRevision,eligible:0,authorized:0,attempted:0,opened:0,blocked:0,watching:0,duplicateSuppressed:0,expired:0,ownedSource:0,trackedSource:0,lastEvent:null};
     this.crystalWallConsumedEpisodeIds = new Set();
     this.crystalWallShadowOpenByTicker = new Map();
@@ -993,7 +994,37 @@ export class SagittariusEngine {
     if(ids.some(x=>!x)||new Set(ids).size!==ids.length||crashes.some(x=>!x)||new Set(crashes).size!==crashes.length)return{ok:false,status:'BLOCKED',reason:'third_proof_independence_failed'};
     for(let i=1;i<groupRows.length;i++)if(Number(groupRows[i-1]?.closedAtMs||0)>Number(groupRows[i]?.openedAtMs||0))return{ok:false,status:'BLOCKED',reason:'third_proof_not_sequential'};
     const proofGroupIndex=priorAuthorizationCount+1;
-    const proofRows=groupRows.map((row,index)=>{const cw=row?.entryConfig?.crystalWall||{};return{index:index+1,entryId:String(row?.id||''),crashEpisodeId:String(cw?.crashEpisodeId||''),openedAtMs:Number(row?.openedAtMs||0),closedAtMs:Number(row?.closedAtMs||0),exitPriceCents:Number(row?.exitPriceCents||0),realizedPnlCents:Number(row?.pnlCents||0)};});
+    const proofRows=groupRows.map((row,index)=>{
+      const cw=row?.entryConfig?.crystalWall||{};
+      const clock=cw.proofClock||{};
+      return{
+        index:index+1,
+        proofStage:Number(cw.proofStage||index+1),
+        entryId:String(row?.id||''),
+        crashEpisodeId:String(cw?.crashEpisodeId||''),
+        openedAtMs:Number(row?.openedAtMs||0),
+        closedAtMs:Number(row?.closedAtMs||0),
+        entryPriceCents:Number(row?.entryPriceCents||0),
+        exitPriceCents:Number(row?.exitPriceCents||0),
+        realizedPnlCents:Number(row?.pnlCents||0),
+        profitableProof:Number(row?.pnlCents||0)>0&&String(row?.closeReason||'')===String(CRYSTAL_WALL.profitableCloseReason),
+        configuredMinCrashCents:Number(cw.minCrashCents??cw.configuredMinCrashCents??0),
+        configuredMinReboundCents:Number(cw.minReboundCents??cw.configuredMinReboundCents??0),
+        configuredMinUpwardTicks:Number(cw.minUpwardTicks??cw.configuredMinUpwardTicks??0),
+        actualCrashCents:Number(cw.crashDepthCents||0),
+        actualReboundCents:Number(cw.reboundCents||0),
+        actualUpwardTicks:Number(cw.upwardTicks||0),
+        preCrashPeakCents:Number(cw.preCrashPeakCents||0),
+        troughCents:Number(cw.troughCents||0),
+        openedGameMinutes:Number(clock.opened?.elapsedMinutes??cw.openedGameMinutes),
+        qualifiedGameMinutes:Number(clock.qualified?.elapsedMinutes??cw.qualifiedGameMinutes),
+        closedGameMinutes:Number(clock.closed?.elapsedMinutes??cw.closedGameMinutes),
+        gameStartTimeMs:Number(clock.opened?.gameStartTimeMs||row?.gameStartTimeMs||0)||null,
+        clockVersion:clock.opened?.version||clock.qualified?.version||null,
+        clockSource:clock.opened?.source||clock.qualified?.source||null,
+        proofClock:structuredClone(clock),
+      };
+    });
     const proof={version:ATHENA_EXCLAMATION.thirdProofVersion,policyRevision:ATHENA_EXCLAMATION.policyRevision,ticker,proofGroupIndex,pairing:ATHENA_EXCLAMATION.proofPairing,requiredConsecutiveProfitableShadowProofs:required,requiredProofCount:required,consecutiveProfitCount,proofStage,proofEntryIds:[...ids],proofCrashEpisodeIds:[...crashes],proofs:proofRows,finalProofEntryId:ids.at(-1),finalProofCrashEpisodeId:crashes.at(-1),finalProofClosedAtMs:Number(groupRows.at(-1)?.closedAtMs||0),independentCrashEpisodes:true,sameExactTicker:true,lossResetsProof:ATHENA_EXCLAMATION.shadowLossResetsProof===true};
     const names=['first','second','third','fourth','fifth'];
     for(let i=0;i<proofRows.length;i++){
@@ -1322,14 +1353,47 @@ export class SagittariusEngine {
     return prior;
   }
 
+  crystalWallProofStageKey(ticker, systemName=this.settings?.systemName){
+    return `${String(systemName||'')}|${String(ticker||'')}`;
+  }
+
+  crystalWallProofStageRecord(ticker){
+    if(!(this.crystalWallProofStages instanceof Map))this.crystalWallProofStages=new Map();
+    const required=crystalWallRequiredProofCount(this.settings||{});
+    const key=this.crystalWallProofStageKey(ticker);
+    const prior=this.crystalWallProofStages.get(key);
+    if(prior&&Number(prior.requiredProofCount)===required)return prior;
+    const rec={ticker:String(ticker||''),systemName:String(this.settings?.systemName||''),requiredProofCount:required,completedProofCount:Number(prior?.completedProofCount||0),currentProofStage:crystalWallNextProofStage({completedConsecutive:Number(prior?.completedProofCount||0),required}),proofs:[...(prior?.proofs||[])]};
+    this.crystalWallProofStages.set(key,rec);
+    return rec;
+  }
+
+  noteCrystalWallProofClose(entry){
+    const ticker=String(entry?.ticker||'');
+    if(!ticker)return this.crystalWallProofStageRecord(ticker);
+    const required=crystalWallRequiredProofCount(this.settings||{});
+    const rec=this.crystalWallProofStageRecord(ticker);
+    const profit=String(entry?.closeReason||'')===String(CRYSTAL_WALL.profitableCloseReason)&&Number(entry?.pnlCents||0)>0;
+    const completed=profit?Math.min(required,Number(rec.completedProofCount||0)+1):0;
+    const next={...rec,requiredProofCount:required,completedProofCount:completed,currentProofStage:crystalWallNextProofStage({completedConsecutive:completed>=required?0:completed,required}),lastCloseEntryId:String(entry?.id||''),lastCloseAtMs:Number(entry?.closedAtMs||Date.now()),lastCloseProfit:profit};
+    if(profit){
+      const cw=entry?.entryConfig?.crystalWall||{};
+      next.proofs=[...(rec.proofs||[]),{proofStage:Number(cw.proofStage||rec.currentProofStage||1),entryId:String(entry.id),crashEpisodeId:String(cw.crashEpisodeId||entry.sourceTradeId||''),closedAtMs:Number(entry.closedAtMs||0),pnlCents:Number(entry.pnlCents||0)}].slice(-5);
+    }else next.proofs=[];
+    this.crystalWallProofStages.set(this.crystalWallProofStageKey(ticker),next);
+    return next;
+  }
+
   observeCrystalWallQuote(q, crashState) {
     const s=this.settings||{};
     if(s.recoveryHunterEnabled!==true||!q?.ticker)return false;
     const ticker=String(q.ticker),now=Date.now();
+    const stageRec=this.crystalWallProofStageRecord(ticker);
+    const stageGeom=crystalWallStageGeometry(s, stageRec.currentProofStage);
     // An open Crystal Wall shadow owns only its own virtual lifecycle. It must
     // never arm a second shadow on the same ticker until that row closes.
     if(this.observeCrystalWallShadowExit(q))return true;
-    const minCrash=Math.max(1,Math.floor(Number(s.crystalWallMinCrashCents??CRYSTAL_WALL.defaultMinCrashCents)||CRYSTAL_WALL.defaultMinCrashCents));
+    const minCrash=stageGeom.minCrashCents;
     let newAuthorizationId=null;
     if(crashState?.episodeId){
       const peak=Math.max(0,Number(crashState.preCrashPeakCents||0));
@@ -1347,10 +1411,13 @@ export class SagittariusEngine {
           for(const [id,prior] of this.crystalWallWatches){
             if(String(prior?.ticker||'')===ticker&&String(id)!==authorizationId)this.dropCrystalWallWatch(id);
           }
+          const openedClock=snapshotEventClockMinutes(this.strategy?.eventClockRecord?.(q.eventTicker||ticker), now, q);
           watch={authorizationId,crashEpisodeId,ticker,eventTicker:String(q.eventTicker||q.ticker),sport:String(crashState.sport||'Unknown'),
             crashStartedAtMs:Number(crashState.crashStartedAtMs||crashState.startedAtMs||now),authorizedAtMs:now,preCrashPeakCents:peak,
             troughCents:trough||Number(q.yesBid||0),troughAtMs:Number(crashState.troughAtMs||now),crashDepthCents:crashDepth,
-            upwardTicks:0,lastBidCents:Number(q.yesBid||0),lastAttemptQueuedAtMs:0,status:'CRASH_ARMED'};
+            upwardTicks:0,lastBidCents:Number(q.yesBid||0),lastAttemptQueuedAtMs:0,status:'CRASH_ARMED',
+            proofStage:stageRec.currentProofStage,requiredProofCount:stageRec.requiredProofCount,minCrashCents:stageGeom.minCrashCents,minReboundCents:stageGeom.minReboundCents,minUpwardTicks:stageGeom.minUpwardTicks,
+            proofClockOpened:openedClock};
           this.crystalWallWatches.set(authorizationId,watch);
           const stats=this.crystalWallContinuationRuntime();stats.eligible+=1;stats.lastEvent={status:'CRASH_ARMED',atMs:now,authorizationId,crashEpisodeId,ticker,crashDepthCents:crashDepth};
           if(this.recoveryPriorityTickers instanceof Set)this.recoveryPriorityTickers.add(ticker);
@@ -1508,6 +1575,42 @@ export class SagittariusEngine {
     }
     const stats=this.crystalWallContinuationRuntime();
     stats.lastEvent=this.crystalWallWatches.size?{status:'RESTART_REHYDRATED',atMs:Date.now(),activeWatches:this.crystalWallWatches.size}:stats.lastEvent;
+  }
+
+  async hydrateCrystalWallProofStages(){
+    if(!(this.crystalWallProofStages instanceof Map))this.crystalWallProofStages=new Map();
+    const s=this.settings||{};
+    const required=crystalWallRequiredProofCount(s);
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    if(typeof this.db?.entriesByConcept!=='function')return 0;
+    const rows=await this.db.entriesByConcept(s.systemName,CRYSTAL_WALL.shadowConceptName,{limit:2000,includeArchived:false}).catch(()=>[]);
+    const byTicker=new Map();
+    for(const row of rows||[]){
+      if(String(row?.systemName||'')!==String(s.systemName)||String(row?.ownerId||'')!==String(s.ownerId)||String(row?.mode||'')!==String(s.mode||''))continue;
+      if(String(row?.status||'')!=='closed')continue;
+      const opened=Math.max(0,Number(row?.openedAtMs||0)),closed=Math.max(0,Number(row?.closedAtMs||0));
+      if(resetAt>0&&(opened<resetAt||closed<resetAt))continue;
+      const ticker=String(row?.ticker||'');if(!ticker)continue;
+      if(!byTicker.has(ticker))byTicker.set(ticker,[]);
+      byTicker.get(ticker).push(row);
+    }
+    let restored=0;
+    for(const [ticker,list] of byTicker){
+      const ordered=list.sort((a,b)=>Number(a.openedAtMs||0)-Number(b.openedAtMs||0)||Number(a.closedAtMs||0)-Number(b.closedAtMs||0)||String(a.id).localeCompare(String(b.id)));
+      let completed=0;const proofs=[];
+      for(const row of ordered){
+        const profit=String(row.closeReason||'')===String(CRYSTAL_WALL.profitableCloseReason)&&Number(row.pnlCents||0)>0;
+        if(!profit){completed=0;proofs.length=0;continue;}
+        completed=Math.min(required,completed+1);
+        const cw=row.entryConfig?.crystalWall||{};
+        proofs.push({proofStage:Number(cw.proofStage||completed),entryId:String(row.id),crashEpisodeId:String(cw.crashEpisodeId||row.sourceTradeId||''),closedAtMs:Number(row.closedAtMs||0),pnlCents:Number(row.pnlCents||0),configuredMinCrashCents:Number(cw.minCrashCents||cw.configuredMinCrashCents||0),openedGameMinutes:Number(cw.openedGameMinutes||cw.proofClock?.opened?.elapsedMinutes),qualifiedGameMinutes:Number(cw.qualifiedGameMinutes||cw.proofClock?.qualified?.elapsedMinutes),closedGameMinutes:Number(cw.closedGameMinutes||cw.proofClock?.closed?.elapsedMinutes)});
+        if(completed>=required){completed=0;proofs.length=0;}
+      }
+      const rec={ticker,systemName:String(s.systemName||''),requiredProofCount:required,completedProofCount:completed,currentProofStage:crystalWallNextProofStage({completedConsecutive:completed,required}),proofs};
+      this.crystalWallProofStages.set(this.crystalWallProofStageKey(ticker),rec);
+      restored+=1;
+    }
+    return restored;
   }
 
   rememberCrystalWallConsumedEpisode(crashEpisodeId) {
@@ -2291,9 +2394,11 @@ export class SagittariusEngine {
           if(entry?.status==='closed'){
             if(Number(entry?.pnlCents||0)>0&&String(entry?.closeReason||'')===String(CRYSTAL_WALL.profitableCloseReason)){
               this.crystalWallContinuationStats.profitClosed=Number(this.crystalWallContinuationStats.profitClosed||0)+1;
+              this.noteCrystalWallProofClose(entry);
               this.queueMegaWaveAthenaContinuation(entry);
             } else {
               this.crystalWallContinuationStats.lossClosed=Number(this.crystalWallContinuationStats.lossClosed||0)+1;
+              this.noteCrystalWallProofClose(entry);
               if(String(entry?.entryConfig?.crystalWall?.policyRevision||'')===String(ATHENA_EXCLAMATION.requiredParentPolicyRevision)){
                 const mwStats=this.megaWaveRuntime();mwStats.proofLossResets=Number(mwStats.proofLossResets||0)+1;
                 void this.db?.audit?.('info','mega_wave_crystal_proof_sequence_reset_by_loss',{entryId:entry?.id||null,ticker:entry?.ticker||null,crashEpisodeId:entry?.entryConfig?.crystalWall?.crashEpisodeId||null,closeReason:entry?.closeReason||null,pnlCents:Number(entry?.pnlCents||0)}).catch(()=>{});
@@ -2321,6 +2426,7 @@ export class SagittariusEngine {
     await this.hydrateCrystalWallShadow();
     await this.strategy.hydrateEventClockAnchors().catch(()=>({restored:0}));
     await this.hydrateCrystalWallV3();
+    await this.hydrateCrystalWallProofStages();
     await this.hydrateJusticeArrowV3();
     await this.refreshFeederPriorityTickers();
     const trackers = typeof this.db?.trackerHistoryRows==='function'
@@ -3647,6 +3753,12 @@ export class SagittariusEngine {
     if(next.crystalWallMinReboundCents<1||next.crystalWallMinReboundCents>99||!Number.isInteger(next.crystalWallMinReboundCents))throw new Error('crystalWallMinReboundCents must be an integer from 1 to 99');
     if(next.crystalWallMinUpwardTicks<1||next.crystalWallMinUpwardTicks>20||!Number.isInteger(next.crystalWallMinUpwardTicks))throw new Error('crystalWallMinUpwardTicks must be an integer from 1 to 20');
     if(next.crystalWallWinsToTriggerAthena<1||next.crystalWallWinsToTriggerAthena>5||!Number.isInteger(next.crystalWallWinsToTriggerAthena))throw new Error('crystalWallWinsToTriggerAthena must be an integer from 1 to 5');
+    for(const stage of CRYSTAL_WALL_PROOF_STAGES){
+      const keys=crystalWallProofSettingKeys(stage);
+      if(next[keys.crash]<1||next[keys.crash]>99||!Number.isInteger(next[keys.crash]))throw new Error(`${keys.crash} must be an integer from 1 to 99`);
+      if(next[keys.rebound]<1||next[keys.rebound]>99||!Number.isInteger(next[keys.rebound]))throw new Error(`${keys.rebound} must be an integer from 1 to 99`);
+      if(next[keys.ticks]<1||next[keys.ticks]>20||!Number.isInteger(next[keys.ticks]))throw new Error(`${keys.ticks} must be an integer from 1 to 20`);
+    }
     if(next.justiceArrowMinCrashCents<1||next.justiceArrowMinCrashCents>99||!Number.isInteger(next.justiceArrowMinCrashCents))throw new Error('justiceArrowMinCrashCents must be an integer from 1 to 99');
     if(next.justiceArrowMinReboundCents<1||next.justiceArrowMinReboundCents>99||!Number.isInteger(next.justiceArrowMinReboundCents))throw new Error('justiceArrowMinReboundCents must be an integer from 1 to 99');
     if(next.justiceArrowMinUpwardTicks<1||next.justiceArrowMinUpwardTicks>20||!Number.isInteger(next.justiceArrowMinUpwardTicks))throw new Error('justiceArrowMinUpwardTicks must be an integer from 1 to 20');
@@ -5096,6 +5208,11 @@ export class SagittariusEngine {
         crystalWallFullConfiguredSizeRequired:true,
         crystalWallOneEntryPerCrashEpisode:true,
         crystalWallRuntime:{...(this.crystalWallContinuationStats||{}),activeWatches:this.crystalWallWatches?.size||0,activeShadowTrades:this.crystalWallShadowOpenByTicker?.size||0,recentShadowTrades:this.crystalWallShadowRecent?.size||0,consumedCrashEpisodes:this.crystalWallConsumedEpisodeIds?.size||0,queue:this.crystalWallContinuationQueue?.snapshot?.()||null,shadowQueue:this.crystalWallShadowQueue?.snapshot?.()||null},
+        crystalWallProofLadder:{
+          requiredProofCount:crystalWallRequiredProofCount(this.settings||{}),
+          stages:CRYSTAL_WALL_PROOF_STAGES.map((stage)=>({stage,...crystalWallStageGeometry(this.settings||{},stage)})),
+          sequences:[...((this.crystalWallProofStages instanceof Map)?this.crystalWallProofStages.values():[])],
+        },
         lightningPlasmaContinuationAuthority:false,
         lightningPlasmaMegaWaveDownstreamAuthority:this.settings.lightningPlasmaEnabled===true,
         lightningPlasmaTrigger:LIGHTNING_PLASMA.trigger,
