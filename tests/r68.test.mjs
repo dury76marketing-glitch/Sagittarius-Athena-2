@@ -87,6 +87,55 @@ test('R68 server and browser explicitly coalesce slow-client UI work instead of 
   assert.ok(engine.includes('const {states:_operatorCrashStates,...crashLearning}=crashLearningFull'));
 });
 
+test('homepage scoreboard counts executable fleet hunters and drops Crystal Wall paper',async()=>{
+  const {EXECUTABLE_HUNTER_CONCEPTS}=await import('../src/doctrine.mjs');
+  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Athena Exclamation'),true);
+  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Scarlet Needle'),true);
+  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Recovery Hunter'),false);
+  assert.equal(OPERATOR_PLANE_ISOLATION.maximumClosedRows,500);
+  const e=Object.create(SagittariusEngine.prototype);
+  e.settings={systemName:'LIBRA',ownerId:'sagittarius-main',mode:'SIMULATION',resetTimestampMs:1000,startingCapitalCents:100000,simFeeCents:2};
+  e.quoteView=()=>({priceCents:50});e.openUnrealized=()=>0;
+  e.strategy={async simulationAvailableCashCents(){return 100000;}};
+  let fleetLog=0;
+  e.db={
+    async performanceAggregate(){throw new Error('host-only aggregate must not score the homepage');},
+    async openEntries(){throw new Error('host-only open reader must not score the homepage');},
+    async recentClosedHunters(){throw new Error('host-only closed reader must not score the homepage');},
+    async conceptStatsAggregate(){return[];},
+    async performanceAggregateFleet(){return{closed_hunters:2,open_hunters:1,wins:2,losses:0,scratches:0,closed_realized_cents:521,partial_realized_cents:0,day_realized_cents:521,week_realized_cents:521,month_realized_cents:521,year_realized_cents:521,simulation_ledger_pnl_cents:521};},
+    async dashboardOpenEntriesFleet(){return[
+      {conceptName:'Athena Exclamation',status:'open',pnlCents:0,mode:'SIMULATION',count:1,remainingCount:1,entryPriceCents:45,entryFeeCents:2,updatedAtMs:2000},
+      {conceptName:'Recovery Hunter',status:'open',pnlCents:-80,mode:'SIMULATION',count:1,remainingCount:1,entryPriceCents:40,entryFeeCents:0,updatedAtMs:2000},
+    ];},
+    async dashboardRecentClosedHuntersFleet(){return[
+      {conceptName:'Athena Exclamation',status:'closed',pnlCents:300,closedAtMs:2000},
+      {conceptName:'Scarlet Needle',status:'closed',pnlCents:221,closedAtMs:2000},
+      {conceptName:'Recovery Hunter',status:'closed',pnlCents:-900,closedAtMs:2000},
+    ];},
+    async conceptStatsAggregateFleet(){return[];},
+    async tradingLogRows(){throw new Error('single-room trading log must not be used when fleet reader exists');},
+    async tradingLogRowsFleet(){fleetLog++;return[
+      {conceptName:'Athena Exclamation',status:'closed',archived:false,pnlCents:300,systemName:'ARIES',closedAtMs:2000,openedAtMs:1500},
+      {conceptName:'Scarlet Needle',status:'closed',archived:false,pnlCents:221,systemName:'TAURUS',closedAtMs:2000,openedAtMs:1600},
+      {conceptName:'Recovery Hunter',status:'closed',archived:false,pnlCents:-900,systemName:'LIBRA',closedAtMs:2000,openedAtMs:1700},
+    ];},
+    async entries(){throw new Error('generic entries loader must not run');},
+  };
+  const dash=await e.performance({dashboard:true});
+  assert.equal(dash.open.length,1);
+  assert.equal(dash.open[0].conceptName,'Athena Exclamation');
+  assert.equal(dash.closed.length,2);
+  assert.equal(dash.closed.some((row)=>row.conceptName==='Recovery Hunter'),false);
+  assert.equal(dash.closedHunters,2);
+  assert.equal(dash.hunterRealizedCents,521);
+  const hist=await e.performance({fullHistory:true});
+  assert.equal(fleetLog,1);
+  assert.equal(hist.closed.length,2);
+  assert.equal(hist.hunters.length,2);
+  assert.equal(hist.closedHunters,2);
+});
+
 test('R68 diagnostics explicitly restore full open-position and Athena fidelity outside the compact SSE path',async()=>{
   const src=await readFile(resolve(root,'src/engine.mjs'),'utf8');
   const at=src.indexOf('async diagnostics()');const end=src.indexOf('async tradingLogText()',at);const d=src.slice(at,end);

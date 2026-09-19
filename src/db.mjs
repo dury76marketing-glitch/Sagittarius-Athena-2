@@ -1,11 +1,12 @@
 import pg from 'pg';
 import { decryptSecret, encryptSecret, sanitizeRuntimeSettings } from './config.mjs';
-import { PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS } from './doctrine.mjs';
+import { PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS } from './doctrine.mjs';
 import { CONSTELLATION, COSMOS_IDS, cosmosSettingsKey, normalizeCosmosId } from './constellation.mjs';
 const { Pool } = pg;
 
 const n = (v, d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
 const PORTFOLIO_CONCEPT_NAMES = Object.freeze([...PORTFOLIO_CONCEPTS]);
+const EXECUTABLE_HUNTER_CONCEPT_NAMES = Object.freeze([...EXECUTABLE_HUNTER_CONCEPTS]);
 const FEEDER_CONCEPT_NAMES = Object.freeze([...FEEDER_CONCEPTS]);
 
 // HF6/DBPI2: high-cardinality diagnostic/learning persistence must never
@@ -835,8 +836,8 @@ export class Database {
   }
   async dashboardRecentClosedHuntersFleet({ownerId,mode,limit=100,resetTimestampMs=0}={}){
     const f=this.fleetBookFilter({ownerId,mode});
-    const lim=Math.max(1,Math.min(200,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
-    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+    const lim=Math.max(1,Math.min(500,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
   async recentClosedHuntersFleet({ownerId,mode,limit=150,resetTimestampMs=0}={}){
@@ -847,7 +848,7 @@ export class Database {
       entry_fee_cents,profit_harvest_peak_pnl_cents,exit_fee_cents,exit_filled_count,exit_notional_cents,exit_attempt_book_ms,close_reason,game_start_time_ms,opened_at_ms,updated_at_ms,closed_at_ms,archived,
       lowest_price_after_entry_cents,mae_cents,mae_at_ms,recovery_to_entry_at_ms,recovery_to_green_at_ms,recovery_green_price_cents,research_tracking_complete,
       jsonb_build_object('aurora',coalesce(entry_config->'aurora','{}'::jsonb),'infinityBreak',coalesce(entry_config->'infinityBreak','{}'::jsonb)) as entry_config
-      from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+      from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
   async performanceAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
@@ -880,7 +881,7 @@ export class Database {
       coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') and ($3::bigint=0 or updated_at_ms >= $3)),0)::double precision as partial_realized_cents,
       coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and mode='SIMULATION'),0)::double precision as simulation_ledger_pnl_cents
       from sag_entries cross join ms
-      where archived=false and owner_id=$1 and mode=$4 and system_name = any($5::text[])`,[f.owner,PORTFOLIO_CONCEPT_NAMES,reset,f.mode,f.ids]);
+      where archived=false and owner_id=$1 and mode=$4 and system_name = any($5::text[])`,[f.owner,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,f.mode,f.ids]);
     const x=r.rows[0]||{};return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,Number(v)||0]));
   }
   async conceptStatsAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
@@ -909,13 +910,20 @@ export class Database {
     return r.rows.map(rowEntry);
   }
   async dashboardRecentClosedHunters(systemName,{limit=100,resetTimestampMs=0}={}){
-    const lim=Math.max(1,Math.min(200,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
-    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3) order by closed_at_ms desc nulls last limit $4`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+    const lim=Math.max(1,Math.min(500,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3) order by closed_at_ms desc nulls last limit $4`,[String(systemName),EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
   async tradingLogRows(systemName,{limit=5000}={}){
     const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||5000)));
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false order by opened_at_ms desc limit $2`,[String(systemName),lim]);
+    return r.rows.map(rowEntry);
+  }
+  async tradingLogRowsFleet({ownerId,mode,limit=5000,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode});
+    const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||5000)));
+    const reset=Math.max(0,Number(resetTimestampMs)||0);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and ($4::bigint=0 or opened_at_ms >= $4 or closed_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery')) order by opened_at_ms desc limit $5`,[f.owner,f.mode,f.ids,reset,lim]);
     return r.rows.map(rowEntry);
   }
   // R54/RGM3 trade-priority readers: execution and Athena hot paths must never
@@ -1020,7 +1028,7 @@ export class Database {
       coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status='closed' and closed_at_ms >= greatest($3::bigint,bounds.year_ms)),0)::double precision as year_realized_cents,
       coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') and ($3::bigint=0 or updated_at_ms >= $3)),0)::double precision as partial_realized_cents,
       coalesce(sum(pnl_cents) filter(where concept_name = any($2::text[]) and mode='SIMULATION'),0)::double precision as simulation_ledger_pnl_cents
-      from sag_entries cross join bounds where system_name=$1 and archived=false`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,reset]);
+      from sag_entries cross join bounds where system_name=$1 and archived=false`,[String(systemName),EXECUTABLE_HUNTER_CONCEPT_NAMES,reset]);
     const x=r.rows[0]||{};return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,Number(v)||0]));
   }
   async recentClosedHunters(systemName,{limit=150,resetTimestampMs=0}={}){
@@ -1034,7 +1042,7 @@ export class Database {
       lowest_price_after_entry_cents,mae_cents,mae_at_ms,recovery_to_entry_at_ms,recovery_to_green_at_ms,recovery_green_price_cents,research_tracking_complete,
       jsonb_build_object('aurora',coalesce(entry_config->'aurora','{}'::jsonb),'infinityBreak',coalesce(entry_config->'infinityBreak','{}'::jsonb)) as entry_config,
       '{}'::jsonb as feeder_state,'{}'::jsonb as stop_guard_state,'{}'::jsonb as profit_guard_state,'{}'::jsonb as apex_profit_guard_state,post_exit_state
-      from sag_entries where system_name=$1 and archived=false and concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3) order by closed_at_ms desc nulls last limit $4`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,reset,lim]);
+      from sag_entries where system_name=$1 and archived=false and concept_name = any($2::text[]) and status='closed' and ($3::bigint=0 or closed_at_ms >= $3) order by closed_at_ms desc nulls last limit $4`,[String(systemName),EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
   async conceptStatsAggregate(systemName,{resetTimestampMs=0}={}){

@@ -179,7 +179,7 @@ export function serializeDiagnosticDownload(data,maxBytes=DIAGNOSTIC_EXPORT_MAX_
     const essential={
       settings:d.settings,riskControls:d.riskControls,health:d.health,resourceUsage:d.resourceUsage,balance:d.balance,brokerContext:d.brokerContext,
       performance:d.performance,conceptStats:d.conceptStats,feederSummary:d.feederSummary,goldenPipeline:d.goldenPipeline,goldenFeedSummary:d.goldenFeedSummary,
-      entryPipeline:d.entryPipeline,entryCandidateFunnel:d.entryCandidateFunnel,entryPathConfiguration:d.entryPathConfiguration,openHunters:d.openHunters,closedHunters:Array.isArray(d.closedHunters)?d.closedHunters.slice(0,100):[],
+      entryPipeline:d.entryPipeline,entryCandidateFunnel:d.entryCandidateFunnel,entryPathConfiguration:d.entryPathConfiguration,openHunters:d.openHunters,closedHunters:Array.isArray(d.closedHunters)?d.closedHunters.slice(0,500):[],
       trackerSummary:d.trackerSummary,recoveryTracking:d.recoveryTracking,profitLearning:d.profitLearning,stopGuardRecoveryLearning:d.stopGuardRecoveryLearning,
       athena:d.athena,goldenEye:d.goldenEye,scanner:d.scanner,audit:Array.isArray(d.audit)?d.audit.slice(0,25):[],
       feederSignalIntelligence:{version:fsi.version,role:fsi.role,executionAuthority:fsi.executionAuthority,entryAuthority:fsi.entryAuthority,athenaDecisionAuthority:fsi.athenaDecisionAuthority,analysisStakeCents:fsi.analysisStakeCents,referenceProfitThresholdsCents:fsi.referenceProfitThresholdsCents,horizonMs:fsi.horizonMs,summary:fsi.summary,records:[],recordsAvailable:fsi.recordsAvailable||0,recordsIncluded:0,recordsOmitted:fsi.recordsAvailable||0,recordsCompact:true,rawObservationsIncluded:false},

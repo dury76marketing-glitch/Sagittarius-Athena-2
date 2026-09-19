@@ -632,6 +632,10 @@ test('TC1 homepage performance and open/closed tables read all twelve cosmos boo
   assert.ok(db.includes('async openEntriesFleet'));
   assert.ok(db.includes('system_name = any($3::text[])'));
   assert.ok(engine.includes('ownerId:this.settings.ownerId'));
+  assert.ok(engine.includes('EXECUTABLE_HUNTER_CONCEPTS'));
+  assert.ok(engine.includes('tradingLogRowsFleet'));
+  assert.ok(db.includes('async tradingLogRowsFleet'));
+  assert.ok(db.includes('EXECUTABLE_HUNTER_CONCEPT_NAMES'));
 });
 
 test('TC1 Excalibur sits under Rozan, defaults off, and is exclusive with Rozan', async () => {

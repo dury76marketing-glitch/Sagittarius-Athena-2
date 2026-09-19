@@ -7,6 +7,10 @@
 export const ACTIVE_PORTFOLIO_CONCEPTS = new Set(['Athena Exclamation', 'Scarlet Needle', 'Sagittarius Justice Arrow', 'Momentum Hunter', 'Recovery Hunter', 'Wave Surfer', 'Crash Recovery Hunter', 'Lightning Plasma']);
 export const RETIRED_PORTFOLIO_CONCEPTS = new Set(['Dragon Recovery Hunter', 'Golden Dragon Hunter']);
 export const PORTFOLIO_CONCEPTS = new Set([...ACTIVE_PORTFOLIO_CONCEPTS, ...RETIRED_PORTFOLIO_CONCEPTS]);
+// Homepage / trading-log scoreboard only. Crystal Wall paper is stored as
+// Recovery Hunter and must not move realized P/L, win rate, or the closed table.
+// Execution locks, occupancy, and event caps still use PORTFOLIO_CONCEPTS.
+export const EXECUTABLE_HUNTER_CONCEPTS = new Set(['Athena Exclamation', 'Scarlet Needle', 'Sagittarius Justice Arrow', 'Momentum Hunter', 'Wave Surfer', 'Crash Recovery Hunter', 'Lightning Plasma']);
 export const ACTIVE_FEEDER_CONCEPTS = new Set(['Pegasus', 'Dragon', 'Phoenix']);
 export const RETIRED_FEEDER_CONCEPTS = new Set(['Sagittarius', 'Golden Dragon']);
 export const FEEDER_CONCEPTS = new Set([...ACTIVE_FEEDER_CONCEPTS, ...RETIRED_FEEDER_CONCEPTS]);

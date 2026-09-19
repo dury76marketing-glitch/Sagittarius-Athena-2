@@ -11,7 +11,7 @@ import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
 import { PhoenixCosmoEngine } from './phoenix.mjs';
-import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
+import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
 import { sealAthenaFireCommand } from './authority.mjs';
 import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
@@ -51,7 +51,7 @@ export const OPERATOR_PLANE_ISOLATION = Object.freeze({
   version:'OPI1',
   slowTelemetryTtlMs:10_000,
   targetStateBytes:220_000,
-  maximumClosedRows:60,
+  maximumClosedRows:500,
   maximumAuditRows:20,
   role:'compact_dashboard_state_and_cached_observability_separate_from_diagnostics',
 });
@@ -3158,7 +3158,7 @@ export class SagittariusEngine {
     if(!concept) return false;
     if(FEEDER_CONCEPTS.has(concept) || SHADOW_ATTACK_CONCEPTS.has(concept)) return false;
     if(concept===CRYSTAL_WALL.shadowConceptName || concept===CRYSTAL_WALL.conceptName || concept==='Recovery Hunter') return false;
-    return PORTFOLIO_CONCEPTS.has(concept);
+    return EXECUTABLE_HUNTER_CONCEPTS.has(concept);
   }
 
   liveKalshiBalanceCents() {
@@ -4239,14 +4239,17 @@ export class SagittariusEngine {
       && typeof this.db?.recentClosedHunters === 'function'
       && typeof this.db?.conceptStatsAggregate === 'function';
     if (!canUseOperational) {
-      const entries = fullHistory && typeof this.db?.tradingLogRows==='function'
+      const reset = this.settings.resetTimestampMs || 0;
+      const fleet={ownerId:this.settings.ownerId,mode:this.settings.mode,resetTimestampMs:reset,limit:5000};
+      const entries = fullHistory && typeof this.db?.tradingLogRowsFleet==='function'
+        ? await this.db.tradingLogRowsFleet(fleet)
+        : fullHistory && typeof this.db?.tradingLogRows==='function'
         ? await this.db.tradingLogRows(this.settings.systemName,{limit:5000})
         : (fullHistory && typeof this.db.entriesAllCosmoses==='function'
           ? await this.db.entriesAllCosmoses({ limit: 5000 })
           : await this.db.entries(this.settings.systemName, { limit: 5000 }));
-      const reset = this.settings.resetTimestampMs || 0;
       const active = entries.filter((e) => !e.archived);
-      const hunters = active.filter((e) => PORTFOLIO_CONCEPTS.has(e.conceptName));
+      const hunters = active.filter((e) => EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
       const closed = hunters.filter((e) => e.status === 'closed' && (!reset || e.closedAtMs >= reset));
       const open = hunters.filter((e) => openLike(e.status));
       const wins = closed.filter((e) => e.pnlCents > 0).length;
@@ -4275,9 +4278,9 @@ export class SagittariusEngine {
       () => typeof this.db.conceptStatsAggregateFleet==='function' ? this.db.conceptStatsAggregateFleet(fleet) : this.db.conceptStatsAggregate(this.settings.systemName,{resetTimestampMs:reset}),
     ];
     const [aggregate,openEntries,recentClosed,conceptAggregate] = await mapLimit(jobs,2,(job)=>job());
-    const open = (openEntries||[]).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));
+    const open = (openEntries||[]).filter((e)=>EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
     const ghosts = (openEntries||[]).filter((e)=>FEEDER_CONCEPTS.has(e.conceptName));
-    const closed = (recentClosed||[]).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));
+    const closed = (recentClosed||[]).filter((e)=>EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
     const active = [...(openEntries||[]),...closed];
     const hunters = [...open,...closed];
     const unrealized = open.reduce((sum,e)=>{const v=this.quoteView(e);return sum+this.openUnrealized(e,v.priceCents);},0);
@@ -5427,18 +5430,18 @@ export class SagittariusEngine {
     });
     const lines = [
       '=== SAGITTARIUS TRADING LOGS ===',
-      'Scope: combined twelve-cosmos book',
+      'Scope: combined twelve-cosmos executable book after Reset',
       `Generated: ${new Date().toISOString()}`,
       `Release: ${RELEASE}`,
       'Format: TLX1 compact analysis log | Server hard cap: 2000000 UTF-8 bytes',
-      `Loaded records: ${active.length} | Hunter trades: ${p.hunters.length} | Open Hunters: ${p.open.length} | Closed Hunters: ${p.closed.length}`,
+      `Loaded records: ${active.length} | Executable hunters: ${p.hunters.length} | Open Hunters: ${p.open.length} | Closed Hunters: ${p.closed.length}`,
       `Wins: ${p.wins} | Losses: ${p.losses} | Scratches: ${p.scratches} | Realized P&L: ${money(p.hunterRealizedCents)} | Unrealized P&L: ${money(p.hunterUnrealizedCents)}`,
       'Fields: ticker | concept<-source | mode/status/data | entry/ref/signal/current/peak/stop | count/remain | pnl | MAE/low/MAEtime/recoveryEntry/recoveryGreen | postPrice/delta/bestExec/missed/worstExec/saved | reason | opened/closed',
       '',
     ];
     for (const raw of active) {
       const e = this.decorateEntry(raw);
-      const hunter=PORTFOLIO_CONCEPTS.has(e.conceptName);
+      const hunter=EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName);
       const shownPnl = hunter && openLike(e.status) ? e.positionPnlCents : e.pnlCents;
       const source=e.sourceFeeder?`<-${clean(e.sourceFeeder,40)}`:'';
       const data=e.quoteAgeMs==null?clean(e.dataState,20):`${clean(e.dataState,20)}:${Math.round(Number(e.quoteAgeMs)/1000)}s`;
