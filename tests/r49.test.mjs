@@ -805,6 +805,15 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
 });
 
+test('createHunter source has no Game Clock execution vetoes',async()=>{
+  const src=await readFile(new URL('../src/strategy.mjs',import.meta.url),'utf8');
+  assert.equal(src.includes("trace('GAME_CLOCK','BLOCKED'"),false);
+  assert.equal(src.includes("trace('FINAL_CLOCK','BLOCKED'"),false);
+  assert.equal(src.includes('hunter_clock_revalidation_blocked'),false);
+  assert.equal(src.includes('hunter_clock_authorization_expired_before_execution'),false);
+  assert.ok(src.includes('clock_authority_retired'));
+});
+
 test('Athena policy passes with no Game Clock record at all',async()=>{
   const s=settings({hunterCooldownMinutes:0,minGameMinutes:10,maxGameMinutes:90});
   const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});

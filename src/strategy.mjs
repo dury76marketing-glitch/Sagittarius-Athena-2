@@ -2021,50 +2021,12 @@ export class StrategyEngine {
       if(!preExecutionPolicy.ok){trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','BLOCKED',preExecutionPolicy.reason,preExecutionPolicy);return null;}
       trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','PASS',preExecutionPolicy.reason,preExecutionPolicy);
 
-      // Ordinary attacks require the shared Game Clock. Crystal Wall V3 is
-      // intentionally exempt because the independently observed CI1 crash and
-      // rebound are its timing authority. Lifecycle/fresh-book truth remains
-      // mandatory immediately below and again at the broker boundary.
-      const executionMinGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 20));
+      // Game Clock is historical telemetry only. Elapsed minutes never veto
+      // createHunter. Closed/settled books are still rejected by prepareEntryExecution.
+      const executionMinGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 0));
       const executionMaxGameMinutes = Math.max(0, Number(s.maxGameMinutes ?? 0));
-      let executionElapsed=null;
-      if(strategicClockBypass){
-        trace('GAME_CLOCK','PASS',crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_post_scarlet_authority_exempt':'scarlet_crystal_wall_win_authority_exempt',{minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
-      }else{
-        if (!this.refreshGameClock) {
-          trace('GAME_CLOCK','BLOCKED','clock_refresh_unavailable');
-          await this.audit('hunter_clock_refresh_unavailable', { concept, ticker: q.ticker, eventTicker: q.eventTicker || q.ticker });
-          return null;
-        }
-        const refreshed = await this.refreshGameClock(q, { forceFresh: true }).catch(() => null);
-        if (!refreshed?.gameClockState) {
-          trace('GAME_CLOCK','BLOCKED','clock_refresh_failed');
-          await this.audit('hunter_clock_refresh_failed_closed', { concept, ticker: q.ticker, eventTicker: q.eventTicker || q.ticker });
-          return null;
-        }
-        q.gameClockState = refreshed.gameClockState;
-        q.gameStartTimeMs = refreshed.gameStartTimeMs ?? null;
-        q.liveStatus = refreshed.liveStatus || q.liveStatus;
-        const executionNow = Date.now();
-        const resolved=this.resolveRealAttackElapsedMinutes(q, executionNow);
-        executionElapsed = resolved.elapsedMinutes;
-        const inherited=resolved.source==='crystal_wall_leading_clock';
-        const entryAuthorityFresh = inherited||isEntryAuthorizedGameClockState(q.gameClockState, q.eventTicker || q.ticker, executionNow);
-        const maximumExceeded=executionMaxGameMinutes>0&&executionElapsed!=null&&executionElapsed-1e-9>executionMaxGameMinutes;
-        if (!entryAuthorityFresh || executionElapsed == null || executionElapsed + 1e-9 < executionMinGameMinutes || maximumExceeded) {
-          const clockBlockReason=!entryAuthorityFresh?(q.gameClockState?.reason||'entry_authority_not_fresh'):executionElapsed==null?'elapsed_unknown':maximumExceeded?'maximum_game_time':'minimum_game_time';
-          trace('GAME_CLOCK','BLOCKED',clockBlockReason,{phase:q.gameClockState?.phase || 'UNKNOWN',entryAuthorized:Boolean(q.gameClockState?.entryAuthorized),elapsedMinutes:executionElapsed,minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
-          await this.audit('hunter_clock_revalidation_blocked', {
-            concept, ticker: q.ticker, eventTicker: q.eventTicker || q.ticker,
-            minGameMinutes: executionMinGameMinutes, maxGameMinutes:executionMaxGameMinutes, elapsedMinutes: executionElapsed,
-            phase: q.gameClockState?.phase || 'UNKNOWN', reason: q.gameClockState?.reason || null,
-            entryAuthorized: Boolean(q.gameClockState?.entryAuthorized),
-            evidenceObservedAtMs: Number(q.gameClockState?.evidenceObservedAtMs || 0) || null,
-          });
-          return null;
-        }
-        trace('GAME_CLOCK','PASS',q.gameClockState?.authorizationReason || q.gameClockState?.reason || 'authorized',{elapsedMinutes:executionElapsed,minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
-      }
+      const executionElapsed=this.resolveRealAttackElapsedMinutes(q).elapsedMinutes;
+      trace('GAME_CLOCK','PASS','clock_authority_retired',{elapsedMinutes:executionElapsed,minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes,clockAuthority:'NONE'});
 
       // Refresh market + orderbook AFTER the authority call so execution depth,
       // exact event identity and lifecycle are newer than the evidence request.
@@ -2288,31 +2250,13 @@ export class StrategyEngine {
       // The market refresh itself may consume time. Authorization is deliberately
       // short-lived; recheck its freshness at the last executable boundary.
       const finalNow = Date.now();
-      if((megaWaveAthenaEntry||megaWaveSaintEntry)&&!strategicClockBypass){const capacity=await this.portfolioCapacityState();if(capacity.blocked){trace('PORTFOLIO_CAPACITY','BLOCKED','max_positions',capacity);await this.audit(megaWaveAthenaEntry?'mega_wave_athena_capacity_blocked':'mega_wave_saint_capacity_blocked',{ticker:q.ticker,eventTicker:expectedEventTicker,stage:'commit',...capacity});return null;}trace('PORTFOLIO_CAPACITY','PASS','commit_recheck',capacity);}
-      if(strategicClockBypass){
-        trace('FINAL_CLOCK','PASS',crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_post_scarlet_authority_exempt':'scarlet_crystal_wall_win_authority_exempt');
+      if(megaWaveAthenaEntry||megaWaveSaintEntry||strategicClockBypass){
         const capacity=await this.portfolioCapacityState();
         const event=crystalWallIndependentEntry?'crystal_wall_v3_capacity_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_capacity_blocked':megaWaveAthenaEntry?'mega_wave_athena_capacity_blocked':'mega_wave_saint_capacity_blocked';
         if(capacity.blocked){trace('PORTFOLIO_CAPACITY','BLOCKED','max_positions',capacity);await this.audit(event,{ticker:q.ticker,eventTicker:expectedEventTicker,stage:'commit',...capacity});return null;}
         trace('PORTFOLIO_CAPACITY','PASS','commit_recheck',capacity);
-      }else{
-        const finalResolved=this.resolveRealAttackElapsedMinutes({...q,eventTicker:expectedEventTicker||q.eventTicker}, finalNow);
-        const finalElapsed = finalResolved.elapsedMinutes;
-        const finalInherited=finalResolved.source==='crystal_wall_leading_clock';
-        const finalMaximumExceeded=executionMaxGameMinutes>0&&finalElapsed!=null&&finalElapsed-1e-9>executionMaxGameMinutes;
-        if ((!finalInherited&&!isEntryAuthorizedGameClockState(q.gameClockState, expectedEventTicker, finalNow))
-            || finalElapsed == null || finalElapsed + 1e-9 < executionMinGameMinutes || finalMaximumExceeded) {
-          trace('FINAL_CLOCK','BLOCKED',finalMaximumExceeded?'maximum_game_time':'authorization_expired',{elapsedMinutes:finalElapsed,minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
-          await this.audit('hunter_clock_authorization_expired_before_execution', {
-            concept, ticker: q.ticker, eventTicker: expectedEventTicker,
-            minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes,elapsedMinutes:finalElapsed,
-            reason:finalMaximumExceeded?'maximum_game_time':'authorization_expired',
-            evidenceObservedAtMs: Number(q.gameClockState?.evidenceObservedAtMs || 0) || null,
-          });
-          return null;
-        }
-        trace('FINAL_CLOCK','PASS');
       }
+      trace('FINAL_CLOCK','PASS','clock_authority_retired',{clockAuthority:'NONE'});
       // Re-run hard exposure topology at the serialized commit boundary. Crystal
       // Wall's overlay exemption applies only to the parent/other Attack; a
       // second Crystal Wall on the same ticker remains blocked.

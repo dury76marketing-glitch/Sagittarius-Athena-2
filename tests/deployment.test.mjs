@@ -527,7 +527,9 @@ test('R60 Athena receives COSMO_GREEN directly; Arayashiki and ATB2 remain non-a
   assert.equal(strategy.includes('examineArayashikiSurvival'),false);
   assert.ok(opportunity.includes("event:COSMO_SHADOW_TRADING.atomicThunderEvent"));
   assert.ok(opportunity.includes("stage:'COSMO_GREEN'"));
-  assert.ok(engine.includes("authorityChain:'GAME_CLOCK->COSMO_SHADOW->COSMO_GREEN->ATOMIC_THUNDER_BOLT->ATHENA->EXECUTION_ATTACK->INFINITY_BREAK/AURORA'"));
+  assert.ok(engine.includes("authorityChain:'COSMO_SHADOW->COSMO_GREEN->ATOMIC_THUNDER_BOLT->ATHENA->EXECUTION_ATTACK->INFINITY_BREAK/AURORA'"));
+  assert.ok(engine.includes("gameClockTradingAuthority: false"));
+  assert.ok(engine.includes("gameClockRole: 'HISTORICAL_TELEMETRY_ONLY'"));
   assert.ok(html.includes('COSMO SHADOW TRADES'));
   assert.ok(html.includes('Cosmo GREEN trigger'));
   assert.ok(app.includes('atomicThunderGreenTriggerCents'));
