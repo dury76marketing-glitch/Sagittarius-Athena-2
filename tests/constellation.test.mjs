@@ -200,13 +200,10 @@ test('TC1-P3 restart hydrates twelve isolated books', async () => {
 });
 
 
-test('TC1-P4 one shared elapsed minutes supports three room windows', () => {
-  const elapsed = 48;
-  assert.equal(inCosmosClockWindow(elapsed, 10, 45), false);
-  assert.equal(inCosmosClockWindow(elapsed, 10, 50), true);
-  assert.equal(inCosmosClockWindow(elapsed, 10, 55), true);
-  assert.equal(inCosmosClockWindow(22, 10, 45), true);
-  assert.equal(inCosmosClockWindow(null, 10, 45), false);
+test('TC1-P4 Game Clock windows no longer exclude rooms from the shared scan', () => {
+  assert.equal(inCosmosClockWindow(48, 10, 45), true);
+  assert.equal(inCosmosClockWindow(48, 10, 50), true);
+  assert.equal(inCosmosClockWindow(null, 10, 45), true);
 });
 
 test('TC1-P4 fair scheduler rotates rooms and does not invent twelve scanners', () => {
@@ -236,7 +233,7 @@ test('TC1-P4 engine scan observer uses one discover and host probe', async () =>
   assert.equal(snap.discoverOnce, true);
   assert.equal(snap.probeOwner, 'host');
   assert.deepEqual(snap.evaluated, ['ARIES', 'TAURUS', 'GEMINI', 'CANCER']);
-  assert.equal(snap.windows.ARIES.outWindow, 1);
+  assert.equal(snap.windows.ARIES.inWindow, 1);
   assert.equal(snap.windows.TAURUS.inWindow, 1);
   assert.equal(snap.windows.GEMINI.inWindow, 1);
 });

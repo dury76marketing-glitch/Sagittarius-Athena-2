@@ -223,12 +223,7 @@ export function emptyCosmosBooks() {
 
 
 export function inCosmosClockWindow(elapsedMinutes, minGameMinutes = 0, maxGameMinutes = 0) {
-  if (elapsedMinutes == null || !Number.isFinite(Number(elapsedMinutes))) return false;
-  const elapsed = Number(elapsedMinutes);
-  const min = Math.max(0, Number(minGameMinutes || 0));
-  const max = Math.max(0, Number(maxGameMinutes || 0));
-  if (elapsed + 1e-9 < min) return false;
-  if (max > 0 && elapsed - 1e-9 > max) return false;
+  void elapsedMinutes; void minGameMinutes; void maxGameMinutes;
   return true;
 }
 

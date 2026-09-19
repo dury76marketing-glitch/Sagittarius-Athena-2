@@ -38,7 +38,7 @@ const COSMOS=[
   {legacy:'Gemini',name:'Gemini',key:'geminiEnabled',desc:'Isolated shadow universe. Another Dimension is the full virtual Attack inside Gemini; it uses no broker money and no simulation portfolio money and no longer authorizes Sagittarius Justice Arrow.',fields:[['geminiReferenceStakeCents','Virtual stake','c'],['geminiMinPriceCents','Min price','c'],['geminiMaxPriceCents','Max price','c']]},
 ];
 const SHARED=[
- ['maxPositions','Max Attack Positions',''],['maxEntriesPerTrade','Max Entries / Event',''],['hunterCooldownMinutes','Shared Attack Cooldown','min'],['minGameMinutes','Minimum Game Minutes','min'],['maxGameMinutes','Maximum Game Minutes','min'],['eventCooldownMinutes','Cosmo Event Cooldown','min'],['maxSpreadCents','Shared Max Spread','c'],['startingCapitalCents','Simulation Starting Capital','c'],['simFeeCents','Simulation Fee / Contract','c'],['recoveryTrackingHours','Recovery Research Tracking','h'],
+ ['maxPositions','Max Attack Positions',''],['maxEntriesPerTrade','Max Entries / Event',''],['hunterCooldownMinutes','Shared Attack Cooldown','min'],['eventCooldownMinutes','Cosmo Event Cooldown','min'],['maxSpreadCents','Shared Max Spread','c'],['startingCapitalCents','Simulation Starting Capital','c'],['simFeeCents','Simulation Fee / Contract','c'],['recoveryTrackingHours','Recovery Research Tracking','h'],
 ];
 const drafts=new Map();
 function inputHtml(key,label,value,suffix='',step=1,min=null,max=null){const v=drafts.has(key)?drafts.get(key):value,bounds=`${min==null?'':` min=\"${esc(min)}\"`}${max==null?'':` max=\"${esc(max)}\"`}`;return `<label>${esc(label)}<span><input data-setting-key="${esc(key)}" type="number" step="${step}"${bounds} value="${esc(v??'')}"><em>${esc(suffix)}</em></span></label>`;}
@@ -115,7 +115,7 @@ function renderTwelveCosmos(s){
     const list=rows.length?rows:['ARIES','TAURUS','GEMINI','CANCER','LEO','VIRGO','LIBRA','SCORPIO','SAGITTARIUS','CAPRICORN','AQUARIUS','PISCES'].map((id)=>({id,displayName:id,open:0,closed:0,pnlCents:0,minGameMinutes:s.settings?.minGameMinutes,maxGameMinutes:s.settings?.maxGameMinutes}));
     b.innerHTML=list.map((row)=>{
       const id=row.id||row.displayName;
-      const window=`${row.minGameMinutes??s.settings?.minGameMinutes??0}-${row.maxGameMinutes??s.settings?.maxGameMinutes??0}`;
+      const window='open';
       const andromeda=row.andromedaThunderWaveEnabled===true?`ON ${esc(row.andromedaThunderWaveLevel||'HIGH')}`:'OFF';
       return `<tr><td>${esc(row.displayName||id)}</td><td>${esc(window)}</td><td>${esc(andromeda)}</td><td>${Number(row.open||0)}</td><td>${Number(row.closed||0)}</td><td class="${pnlClass(row.pnlCents)}">${money(row.pnlCents)}</td><td><a class="btn light" href="#cosmos/${esc(id)}">Settings</a></td></tr>`;
     }).join('');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
 import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes } from '../src/strategy.mjs';
-import { SagittariusEngine } from '../src/engine.mjs';
+import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
@@ -341,11 +341,10 @@ test('ECA1 Crystal Wall leading clock is inherited by Athena and Saints; a young
   const lateStore=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
   const tLate=Date.now()-20*60000;
   await lateStore.stampCrystalWallEventClock({id:'cw-50',ticker:'EV-YOU',eventTicker:'EV-YOU'},confirmedClockQuote('EV-YOU',50,tLate),tLate);
-  const blocked=await lateStore.hunterEntryPolicyDecision('Lightning Plasma',q('EV-YOU'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
-  assert.equal(blocked.ok,false);assert.equal(blocked.reason,'maximum_game_time');
-  assert.ok(blocked.elapsedMinutes>45);
+  const afterMax=await lateStore.hunterEntryPolicyDecision('Lightning Plasma',q('EV-YOU'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(afterMax.ok,true,afterMax.reason);
   const missing=await new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0}).hunterEntryPolicyDecision('Athena Exclamation',q('EV-NONE'),{requireClock:true,includeCooldown:false,stage:'test'});
-  assert.equal(missing.ok,false);assert.equal(missing.reason,'game_clock_unknown');
+  assert.equal(missing.ok,true,missing.reason);
 });
 
 test('RJA5 Great Horn and Starlight use Athena-style crash/rebound/tick parameters',()=>{
@@ -674,17 +673,15 @@ test('pre-reset Event Clock cannot authorize Athena after reset; 10-90 still hol
   await st.stampCrystalWallEventClock({id:'old',ticker:'EV-ATH',eventTicker:'EV-ATH'},confirmedClockQuote('EV-ATH',20,now-60_000),now-60_000);
   s.resetTimestampMs=now;
   st.invalidateEventClockExecutableAuthority(now);
-  const blocked=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EV-ATH'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
-  assert.equal(blocked.ok,false);assert.equal(blocked.reason,'game_clock_unknown');
+  const afterReset=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EV-ATH'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(afterReset.ok,true,afterReset.reason);
   await st.stampCrystalWallEventClock({id:'new',ticker:'EV-ATH',eventTicker:'EV-ATH'},confirmedClockQuote('EV-ATH',69,now),now);
   const pass=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EV-ATH'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
   assert.equal(pass.ok,true,pass.reason);
-  const inherited=st.leadingEventElapsedMinutes('EV-ATH',now);
-  assert.ok(inherited>=68 && inherited<=71,String(inherited));
   const lateStore=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
   await lateStore.stampCrystalWallEventClock({id:'late',ticker:'EV-90',eventTicker:'EV-90'},confirmedClockQuote('EV-90',91,now),now);
   const late=await lateStore.hunterEntryPolicyDecision('Athena Exclamation',q('EV-90'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
-  assert.equal(late.ok,false);assert.equal(late.reason,'maximum_game_time');
+  assert.equal(late.ok,true,late.reason);
 });
 
 test('stale async Game Clock and milestone results after reset are discarded',async()=>{
@@ -782,16 +779,37 @@ test('inprogress without elapsed stays unresolved instead of start=now',async()=
   assert.equal(state.startTimeMs,null);
 });
 
-test('a 4-minute official clock still fails the 10-minute gate; 95 fails max; 35 passes',async()=>{
+test('Game Clock no longer vetoes Athena at former 4, 35, or 95 minutes',async()=>{
   const s=settings({minGameMinutes:10,maxGameMinutes:90,hunterCooldownMinutes:0,resetTimestampMs:Date.now()});
-  for(const [minutes,expectOk,reason] of [[4,false,'minimum_game_time'],[35,true,null],[95,false,'maximum_game_time']]){
+  for(const minutes of [4,35,95]){
     const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
     const t=Date.now();
     await st.stampCrystalWallEventClock({id:`cw-${minutes}`,ticker:`EV-${minutes}`,eventTicker:`EV-${minutes}`},confirmedClockQuote(`EV-${minutes}`,minutes,t),t);
     const decision=await st.hunterEntryPolicyDecision('Athena Exclamation',q(`EV-${minutes}`),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
-    assert.equal(decision.ok,expectOk,`${minutes}:${decision.reason}`);
-    if(!expectOk)assert.equal(decision.reason,reason);
+    assert.equal(decision.ok,true,`${minutes}:${decision.reason}`);
+    assert.notEqual(decision.reason,'minimum_game_time');
+    assert.notEqual(decision.reason,'maximum_game_time');
+    assert.notEqual(decision.reason,'game_clock_unknown');
   }
+});
+
+test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>{
+  const young={ticker:'Y',eventTicker:'Y',status:'active',gameClockState:{phase:'CONFIRMED',startTimeMs:Date.now()-2*60_000}};
+  const old={ticker:'O',eventTicker:'O',status:'active',gameClockState:{phase:'CONFIRMED',startTimeMs:Date.now()-200*60_000}};
+  const unknown={ticker:'U',eventTicker:'U',status:'active'};
+  assert.equal(entryAdmissionDecision({quote:young,minGameMinutes:10,maxGameMinutes:90}).action,'ALLOW');
+  assert.equal(entryAdmissionDecision({quote:old,minGameMinutes:10,maxGameMinutes:90}).action,'ALLOW');
+  assert.equal(entryAdmissionDecision({quote:unknown}).action,'ALLOW');
+  assert.equal(entryAdmissionDecision({quote:unknown}).reason,'clock_authority_retired');
+  assert.equal(entryChainAdmissionDecision({quote:young,minGameMinutes:10,maxGameMinutes:90}).action,'ALLOW');
+  assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
+});
+
+test('Athena policy passes with no Game Clock record at all',async()=>{
+  const s=settings({hunterCooldownMinutes:0,minGameMinutes:10,maxGameMinutes:90});
+  const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const decision=await st.hunterEntryPolicyDecision('Athena Exclamation',q('NO-CLOCK'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(decision.ok,true,decision.reason);
 });
 
 test('stale pre-reset live reconstruction cannot authorize the new epoch',async()=>{

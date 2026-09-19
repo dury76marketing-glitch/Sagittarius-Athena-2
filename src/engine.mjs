@@ -210,40 +210,14 @@ export function resolveObservedGameStart({ priorStart = 0, liveStatus = 'unknown
 }
 
 
-export function entryAdmissionDecision({ quote=null, mode='SIMULATION', minGameMinutes=0, maxGameMinutes=0, now=Date.now() }={}) {
-  const state=quote?.gameClockState&&typeof quote.gameClockState==='object'?quote.gameClockState:{};
-  const phase=String(state.phase||'UNKNOWN');
-  const minMs=Math.max(0,Number(minGameMinutes||0))*60_000;
-  const configuredMaxMinutes=Math.max(0,Number(maxGameMinutes||0));
-  const maxMs=configuredMaxMinutes>0?configuredMaxMinutes*60_000:0;
-  const t=Number(now);
-  if(phase==='FINAL')return{action:'BLOCK',reason:'game_final',nextEligibleAtMs:null};
-  if(phase==='CONFLICT')return{action:'BLOCK',reason:'game_clock_conflict',nextEligibleAtMs:null};
-  const start=Number(state.startTimeMs||quote?.gameStartTimeMs||0);
-  if(phase==='CONFIRMED'&&Number.isFinite(start)&&start>0){
-    const nextEligibleAtMs=start+minMs;
-    if(Number.isFinite(t)&&t+1e-9<nextEligibleAtMs)return{action:'BLOCK',reason:'minimum_game_time_wait',nextEligibleAtMs,startTimeMs:start};
-    const lastEligibleAtMs=maxMs>0?start+maxMs:null;
-    if(lastEligibleAtMs!=null&&Number.isFinite(t)&&t-1e-9>lastEligibleAtMs)return{action:'BLOCK',reason:'maximum_game_time_exceeded',nextEligibleAtMs:null,lastEligibleAtMs,startTimeMs:start};
-    return{action:'ALLOW',reason:maxMs>0?'confirmed_entry_window':'confirmed_minimum_elapsed',nextEligibleAtMs,startTimeMs:start,lastEligibleAtMs};
+export function entryAdmissionDecision({ quote=null }={}) {
+  const status=String(quote?.status||'active').toLowerCase();
+  const result=String(quote?.result||'').trim();
+  const phase=String(quote?.gameClockState?.phase||'');
+  if(result || status==='closed' || status==='settled' || phase==='FINAL'){
+    return{action:'BLOCK',reason:'game_final',nextEligibleAtMs:null};
   }
-  // GCA2-R3 LIVE/SIM parity: the observed-activity lower bound is shared
-  // strategic evidence. Legacy simulationActivityStartMs is accepted only as
-  // restart-safe migration input from pre-parity persisted GCA2 rows.
-  const observedStart=Number(state.observedActivityStartMs||state.simulationActivityStartMs||0);
-  if(Number.isFinite(observedStart)&&observedStart>0){
-    const nextEligibleAtMs=observedStart+minMs;
-    if(Number.isFinite(t)&&t+1e-9<nextEligibleAtMs)return{action:'BLOCK',reason:'observed_activity_aging_wait',nextEligibleAtMs,startTimeMs:observedStart};
-    // The lower bound is conservative. If even it exceeds the configured
-    // maximum, the event is certainly too old and may be rejected before an
-    // execution worker is consumed in either mode.
-    const lastEligibleAtMs=maxMs>0?observedStart+maxMs:null;
-    if(lastEligibleAtMs!=null&&Number.isFinite(t)&&t-1e-9>lastEligibleAtMs)return{action:'BLOCK',reason:'maximum_game_time_exceeded',nextEligibleAtMs:null,lastEligibleAtMs,startTimeMs:observedStart};
-    // Maturity is not exposure authority. It earns one bounded shared GCA2
-    // probe; only fresh exact-trade evidence can promote the event to CONFIRMED.
-    return{action:'PROBE',reason:'observed_activity_due_for_authority_probe',nextEligibleAtMs,startTimeMs:observedStart,lastEligibleAtMs};
-  }
-  return{action:'PROBE',reason:'clock_authority_probe_required',nextEligibleAtMs:null};
+  return{action:'ALLOW',reason:'clock_authority_retired',nextEligibleAtMs:null,clockAuthority:'NONE'};
 }
 
 // EAC3 keeps only the hard game-window proof needed by the immediate
@@ -261,17 +235,7 @@ export function entryChainAdmissionDecision({
 }={}){
   const normalizedStage=stage==='NEW_PRE_BOLT'||stage==='ACTIVE_PRE_BOLT'?'ATOMIC_GREEN':stage==='POST_ATB2'?'POST_BOLT':String(stage||'ATOMIC_GREEN');
   const base=entryAdmissionDecision({quote,mode,minGameMinutes,maxGameMinutes,now});
-  if(base.action!=='ALLOW')return{...base,stage:normalizedStage};
-  const maxAt=Number(base.lastEligibleAtMs||0),t=Number(now),margin=Math.max(0,Number(executionMarginMs)||0);
-  if(!(maxAt>0))return{...base,stage:normalizedStage,executionMarginMs:margin,preBoltFeasible:true,immediateGreenChain:true};
-  const expectedEvent=String(quote?.eventTicker||quote?.ticker||'');
-  const freshClock=isEntryAuthorizedGameClockState(quote?.gameClockState,expectedEvent,t);
-  if(['ATOMIC_GREEN','POST_BOLT'].includes(normalizedStage)&&!freshClock){
-    return{action:'PROBE',reason:normalizedStage==='POST_BOLT'?'post_bolt_clock_authorization_refresh_required':'cosmo_green_clock_authorization_refresh_required',stage:normalizedStage,startTimeMs:base.startTimeMs,lastEligibleAtMs:maxAt,nextEligibleAtMs:base.nextEligibleAtMs};
-  }
-  const readyAtMs=t+margin;
-  if(!(readyAtMs<maxAt))return{action:'BLOCK',reason:'execution_window_infeasible',stage:normalizedStage,startTimeMs:base.startTimeMs,lastEligibleAtMs:maxAt,readyAtMs,executionMarginMs:margin,nextEligibleAtMs:null};
-  return{...base,stage:normalizedStage,executionMarginMs:margin,readyAtMs,preBoltFeasible:true,immediateGreenChain:true};
+  return{...base,stage:normalizedStage,executionMarginMs:Math.max(0,Number(executionMarginMs)||0),preBoltFeasible:true,immediateGreenChain:true,clockAuthority:'NONE'};
 }
 
 // R60-HF1 simulation reset mutation barrier. Reset invalidates the epoch,

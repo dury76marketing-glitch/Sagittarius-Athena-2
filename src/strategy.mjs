@@ -1198,16 +1198,9 @@ export class StrategyEngine {
     const bid=Number(q.yesBid||0),ask=Number(q.yesAsk||0);
     const status=String(q.status||'active').toLowerCase();
     if (!(bid>0) || !(ask>0) || bid>ask || status!=='active' || Boolean(q.result)) return { vote:null, candidate:null, entry:null };
-    const gameMinutes=confirmedInGameElapsedMinutes(q);
-    const sharedMin=Math.max(0,Number(s.minGameMinutes??20));
-    const sharedMax=Math.max(0,Number(s.maxGameMinutes??0));
-    // A Saint vote is an independently qualified Attack doctrine observation,
-    // not an exposure grant. Require a confirmed in-game clock when available
-    // here; the eventual Big Bang still force-refreshes GCA2 and the full book.
-    if (gameMinutes==null || gameMinutes+1e-9<sharedMin || (sharedMax>0&&gameMinutes-1e-9>sharedMax)) return { vote:null, candidate:null, entry:null };
     const result=await this.athenaExclamation.recordQualification({
       conceptName:concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,qualifiedAtMs:Date.now(),
-      priceCents:ask,bidCents:bid,sourceFeeder,sourceTradeId,gameMinutes,qualificationSnapshot,
+      priceCents:ask,bidCents:bid,sourceFeeder,sourceTradeId,gameMinutes:null,qualificationSnapshot,
     });
     if (!result?.candidate || s.athenaExclamationEnabled!==true) return { ...result, entry:null };
     const entry=await this.executeAthenaExclamationCandidate(result.candidate,q);
@@ -1740,24 +1733,7 @@ export class StrategyEngine {
 
   async hunterEntryPolicyDecision(concept, q, { requireClock = true, includeCooldown = true, stage = 'policy', crystalWallOverlay = false, megaWaveAuthorized = false, starlightReentry = false } = {}) {
     const s = this.getSettings();
-    if (requireClock && crystalWallOverlay!==true) {
-      const minGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 20));
-      const maxGameMinutes = Math.max(0, Number(s.maxGameMinutes ?? 0));
-      const resolved=this.resolveRealAttackElapsedMinutes(q);
-      const elapsedMinutes = resolved.elapsedMinutes;
-      if (elapsedMinutes == null) {
-        await this.audit('hunter_in_game_time_unknown', { concept, ticker:q?.ticker || null, eventTicker:q?.eventTicker || q?.ticker || null, minGameMinutes, maxGameMinutes, stage, clockSource:resolved.source });
-        return {ok:false,reason:'game_clock_unknown',elapsedMinutes:null,minGameMinutes,maxGameMinutes};
-      }
-      if (elapsedMinutes + 1e-9 < minGameMinutes) {
-        await this.audit('hunter_min_game_minutes_blocked', { concept, ticker:q?.ticker || null, eventTicker:q?.eventTicker || q?.ticker || null, minGameMinutes, maxGameMinutes, elapsedMinutes, stage, clockSource:resolved.source });
-        return {ok:false,reason:'minimum_game_time',elapsedMinutes,minGameMinutes,maxGameMinutes};
-      }
-      if (maxGameMinutes > 0 && elapsedMinutes - 1e-9 > maxGameMinutes) {
-        await this.audit('hunter_max_game_minutes_blocked', { concept, ticker:q?.ticker || null, eventTicker:q?.eventTicker || q?.ticker || null, minGameMinutes, maxGameMinutes, elapsedMinutes, stage, clockSource:resolved.source });
-        return {ok:false,reason:'maximum_game_time',elapsedMinutes,minGameMinutes,maxGameMinutes};
-      }
-    }
+    void requireClock;
     // Galactic Explosion topology is a hard exposure invariant, not a second
     // strategic opinion. It remains valid after FIRE and is returned with an
     // exact reason instead of the old generic STATIC_POLICY label.
