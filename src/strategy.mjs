@@ -45,7 +45,7 @@ import {
 } from './doctrine.mjs';
 import { RELEASE, crystalWallProofSettingKeys } from './config.mjs';
 import { authoritativeClockSnapshot, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
-import { EVENT_CLOCK_ANCHOR, eventClockEpisodeId, projectEventClock, stampEventClockRecord } from './eventClockAnchor.mjs';
+import { EVENT_CLOCK_ANCHOR, eventClockEpisodeId, isExecutableLeadingEventClock, projectEventClock, stampEventClockRecord } from './eventClockAnchor.mjs';
 import { AthenaExclamationEngine, ATHENA_EXCLAMATION, athenaExclamationPrimeReview, isGoldSaintConcept } from './athenaExclamation.mjs';
 import { authorityHash, sealAthenaFireCommand, verifyAthenaFireCommandHash } from './authority.mjs';
 import { phoenixSignalActive, revalidatePhoenixQualification } from './phoenix.mjs';
@@ -1625,10 +1625,7 @@ export class StrategyEngine {
     const record=this.eventClockByEvent.get(event)||null;
     if(!record)return null;
     const epoch=this.eventClockResetEpoch();
-    if(epoch>0){
-      const recordEpoch=Math.max(0,Number(record.resetEpoch||record.resetTimestampMs||0));
-      if(recordEpoch!==epoch)return null;
-    }
+    if(!isExecutableLeadingEventClock(record, epoch))return null;
     return record;
   }
 
@@ -1648,26 +1645,64 @@ export class StrategyEngine {
     const inherited=this.leadingEventElapsedMinutes(event, now);
     if(inherited!=null)return {elapsedMinutes:inherited,source:'crystal_wall_leading_clock',record:this.eventClockRecord(event)};
     const live=confirmedInGameElapsedMinutes(q, now);
-    return {elapsedMinutes:live,source:live==null?'none':'live_confirmed_clock',record:null};
+    if(live==null)return {elapsedMinutes:null,source:'none',record:null};
+    this.stampCrystalWallEventClock({id:'gca-promote',ticker:q?.ticker||event,eventTicker:event}, q, now).catch(()=>{});
+    return {elapsedMinutes:live,source:'live_confirmed_clock',record:this.eventClockRecord(event)};
   }
 
   async stampCrystalWallEventClock(entry, q={}, now=Date.now()){
     const event=String(entry?.eventTicker||q?.eventTicker||q?.ticker||'');
     if(!event)return {ok:false,reason:'missing_event_ticker'};
+    const epoch=this.eventClockResetEpoch();
+    const existing=this.eventClockByEvent.get(event)||null;
+    if(isExecutableLeadingEventClock(existing, epoch)){
+      return stampEventClockRecord({
+        eventTicker:event,
+        ticker:String(entry?.ticker||q?.ticker||existing.ticker||''),
+        crystalWallEntryId:String(entry?.id||existing.crystalWallEntryId||''),
+        elapsedMinutes:existing.anchoredElapsedMinutes,
+        nowMs:now,
+        source:existing.source,
+        prior:existing,
+        resetTimestampMs:epoch,
+      });
+    }
     const live=confirmedInGameElapsedMinutes({...(q||{}),eventTicker:event,ticker:entry?.ticker||q?.ticker,gameClockState:q?.gameClockState,gameStartTimeMs:q?.gameStartTimeMs||entry?.gameStartTimeMs}, now);
-    const fallback=Number.isFinite(Number(q?.gameMinutes))?Number(q.gameMinutes):null;
-    const start=Number(q?.gameStartTimeMs||entry?.gameStartTimeMs||0);
-    const fromStart=start>0&&start<=now?Math.max(0,(now-start)/60000):null;
-    const elapsed=live??fallback??fromStart;
+    if(live==null){
+      const waiting=stampEventClockRecord({
+        eventTicker:event,
+        ticker:String(entry?.ticker||q?.ticker||''),
+        crystalWallEntryId:String(entry?.id||''),
+        elapsedMinutes:null,
+        nowMs:now,
+        source:'event_clock_waiting_for_confirmed_game_time',
+        phase:'UNKNOWN',
+        prior:existing,
+        resetTimestampMs:epoch,
+        executableAuthority:false,
+        provisional:true,
+        clockConfirmed:false,
+      });
+      if(waiting.record)this.eventClockByEvent.set(event, waiting.record);
+      await this.audit('event_clock_waiting_for_confirmed_game_time',{eventTicker:event,ticker:waiting.record?.ticker||null,crystalWallEntryId:String(entry?.id||''),reason:waiting.reason}).catch(()=>{});
+      return waiting;
+    }
+    const gca=q?.gameClockState||{};
     const stamped=stampEventClockRecord({
       eventTicker:event,
       ticker:String(entry?.ticker||q?.ticker||''),
       crystalWallEntryId:String(entry?.id||''),
-      elapsedMinutes:elapsed,
+      elapsedMinutes:live,
       nowMs:now,
-      source:live!=null?'confirmed_clock_at_crystal_wall':fallback!=null?'quote_game_minutes_at_crystal_wall':'start_time_at_crystal_wall',
-      prior:this.eventClockRecord(event),
-      resetTimestampMs:this.eventClockResetEpoch(),
+      source:existing?.provisional?'confirmed_gca_promoted':'confirmed_clock_at_crystal_wall',
+      prior:existing,
+      resetTimestampMs:epoch,
+      executableAuthority:true,
+      provisional:false,
+      clockConfirmed:true,
+      anchorClockReconstructionReason:gca.clockReconstructionReason||'',
+      anchorAuthoritySource:gca.source||'kalshi_game_clock',
+      anchorSourceCurrentElapsedMinutes:live,
     });
     if(!stamped.record)return stamped;
     this.eventClockByEvent.set(event, stamped.record);
@@ -1694,7 +1729,7 @@ export class StrategyEngine {
       const record=row?.athenaDecision?.eventClockAnchor;
       const event=String(record?.eventTicker||row?.eventTicker||'');
       if(!event||record?.leading!==true)continue;
-      if(record?.executableAuthority===false)continue;
+      if(!isExecutableLeadingEventClock(record, this.eventClockResetEpoch()))continue;
       const epoch=this.eventClockResetEpoch();
       const recordEpoch=Math.max(0,Number(record.resetEpoch||record.resetTimestampMs||0));
       if(epoch>0&&recordEpoch!==epoch)continue;
