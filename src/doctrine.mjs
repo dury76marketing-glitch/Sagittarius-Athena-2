@@ -141,7 +141,7 @@ export const MEGA_WAVE = Object.freeze({
   defaultCrystalProofsRequired:3,
   maximumCrystalProofsRequired:5,
   athenaConcept:'Athena Exclamation',
-  downstreamSaints:Object.freeze(['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Crash Recovery Hunter','Lightning Plasma']),
+  downstreamSaints:Object.freeze(['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma']),
   defaultFollowUpAttacks:6,
   minimumFollowUpAttacks:0,
   maximumFollowUpAttacks:12,
@@ -151,6 +151,25 @@ export const MEGA_WAVE = Object.freeze({
   downstreamAuthority:'MEGA_WAVE_ATHENA_PROFIT_RELEASE',
   galacticOpenAuthority:'MEGA_WAVE_ATHENA_OPEN_RELEASE',
 });
+
+export const STARLIGHT_EXTINCTION = Object.freeze({
+  version:'STARLIGHT-EXTINCTION-SE1',
+  policyRevision:'SE1-R1-STOP-LOSS-SAME-COSMOS-REENTRY',
+  conceptName:'Crash Recovery Hunter',
+  displayName:'Starlight Extinction',
+  role:'same_cosmos_stop_loss_reentry_only',
+  strategicEntryAuthority:'STARLIGHT_STOP_LOSS_REENTRY',
+  oneAttemptPerParent:true,
+  selfChainForbidden:true,
+  defaultInfinityNetPerOriginalContractCents:5,
+  stopLossReasons:Object.freeze(['hard_stop_loss','aurora_covenant_fault']),
+});
+
+export function isStarlightParentStopLoss(closeReason=''){
+  const reason=String(closeReason||'');
+  if(STARLIGHT_EXTINCTION.stopLossReasons.includes(reason))return true;
+  return /(?:^|_)(hard_stop_loss|stop_loss_watchdog|slw1|ultimate_stop)/i.test(reason);
+}
 
 export const EXECUTION_ATTACK_DISPLAY = Object.freeze({
   'Athena Exclamation': Object.freeze({ name:'Athena Exclamation', legacy:'AE1 / Three Gold Saint Convergence' }),

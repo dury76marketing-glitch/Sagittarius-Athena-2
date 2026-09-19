@@ -19,6 +19,9 @@ import {
   RETIRED_FEEDER_CONCEPTS,
   GALACTIC_EXPLOSION,
   MEGA_WAVE,
+  STARLIGHT_EXTINCTION,
+  isStarlightParentStopLoss,
+  EXECUTABLE_HUNTER_CONCEPTS,
   COSMO_ROUTING,
   SCARLET_NEEDLE,
   CRYSTAL_WALL,
@@ -54,6 +57,12 @@ const slotsLeft = (entries, settings) => Math.max(
   settings.maxPositions - entries.filter((e) => PORTFOLIO_CONCEPTS.has(e.conceptName) && openLike(e.status)).length,
 );
 const FINAL_MARKET_STATUSES = new Set(['determined', 'finalized', 'settled']);
+
+export function attackInfinityNetTargetCents(settings={}, concept=''){
+  if(concept==='Scarlet Needle')return Number(settings?.scarletNeedleInfinityNetPerOriginalContractCents??SCARLET_NEEDLE.defaultInfinityNetPerOriginalContractCents);
+  if(concept===STARLIGHT_EXTINCTION.conceptName)return Number(settings?.crashRecoveryInfinityNetPerOriginalContractCents??STARLIGHT_EXTINCTION.defaultInfinityNetPerOriginalContractCents);
+  return Number(settings?.infinityBreakMinNetPerOriginalContractCents??INFINITY_BREAK.defaultMinimumNetPerOriginalContractCents);
+}
 
 function crashStructureAtQuote(signal, q, settings) {
   if (!signal?.episodeId || !q) return { ok:false, reason:'missing_signal_or_quote' };
@@ -193,9 +202,7 @@ export function validateAthenaFireCommand(command,{concept,q,settings,now=Date.n
   const configuredPolicy=attackProfitAuthoritySnapshot(settings||{},concept);
   const configuredTarget=Number(configuredPolicy.pri1Enabled
     ? configuredPolicy.triggerNetPerOriginalContractCents
-    : concept==='Scarlet Needle'
-      ? settings?.scarletNeedleInfinityNetPerOriginalContractCents??SCARLET_NEEDLE.defaultInfinityNetPerOriginalContractCents
-      : settings?.infinityBreakMinNetPerOriginalContractCents??INFINITY_BREAK.defaultMinimumNetPerOriginalContractCents);
+    : attackInfinityNetTargetCents(settings,concept));
   if(!(commandedTarget>0)||!Number.isFinite(commandedTarget))return{ok:false,reason:'athena_economic_target_missing'};
   if(Math.abs(commandedTarget-configuredTarget)>1e-9)return{ok:false,reason:'athena_economic_target_changed',commandedTargetNetPerOriginalContractCents:commandedTarget,configuredTargetNetPerOriginalContractCents:configuredTarget};
   if(Number(command?.economicTarget?.requiredTargetBidCents)>99)return{ok:false,reason:'athena_economic_target_unreachable'};
@@ -223,10 +230,34 @@ export function validateMegaWaveSaintFireCommand(command,{concept,q,settings,aut
   const ask=Number(q?.yesAsk||0),bid=Number(q?.yesBid||0);if(!(ask>0)||!(bid>0)||bid>ask)return{ok:false,reason:'invalid_quote'};
   if(ask<Number(envelope.minEntryCents)||ask>Number(envelope.maxEntryCents))return{ok:false,reason:'entry_band'};
   if(ask-bid>Number(settings?.maxSpreadCents??3))return{ok:false,reason:'shared_spread_safety'};
-  const policy=attackProfitAuthoritySnapshot(settings,concept);const expectedTarget=Number(policy.pri1Enabled?policy.triggerNetPerOriginalContractCents:(concept==='Scarlet Needle'?settings?.scarletNeedleInfinityNetPerOriginalContractCents:settings?.infinityBreakMinNetPerOriginalContractCents));
+  const policy=attackProfitAuthoritySnapshot(settings,concept);const expectedTarget=Number(policy.pri1Enabled?policy.triggerNetPerOriginalContractCents:attackInfinityNetTargetCents(settings,concept));
   if(!(Number(command?.economicTarget?.netPerOriginalContractCents)>0)||Math.abs(Number(command.economicTarget.netPerOriginalContractCents)-expectedTarget)>1e-9)return{ok:false,reason:'mega_wave_economic_target_changed'};
   if(Number(command?.economicTarget?.requiredTargetBidCents)>99)return{ok:false,reason:'mega_wave_economic_target_unreachable'};
   return{ok:true,reason:'mega_wave_fire_valid',envelope,stakeCents:stake};
+}
+
+export function validateStarlightFireCommand(command,{concept,q,settings,authorization}={}){
+  if(!command||!authorization||typeof command!=='object'||typeof authorization!=='object')return{ok:false,reason:'starlight_authority_required'};
+  if(!verifyAthenaFireCommandHash(command))return{ok:false,reason:'starlight_fire_hash_invalid'};
+  if(String(command.version)!==String(ATHENA_COMMANDER.version)||String(command.systemName||'')!==String(settings?.systemName||''))return{ok:false,reason:'starlight_fire_identity_invalid'};
+  if(String(concept||'')!==STARLIGHT_EXTINCTION.conceptName)return{ok:false,reason:'starlight_concept_mismatch'};
+  if(String(command.selectedAttack||'')!==STARLIGHT_EXTINCTION.conceptName||String(command.ticker||'')!==String(q?.ticker||''))return{ok:false,reason:'starlight_fire_attack_or_ticker_mismatch'};
+  if(String(authorization.version||'')!==STARLIGHT_EXTINCTION.version||String(authorization.policyRevision||'')!==STARLIGHT_EXTINCTION.policyRevision)return{ok:false,reason:'starlight_lineage_invalid'};
+  if(String(authorization.ticker||'')!==String(q?.ticker||'')||String(authorization.saintConcept||'')!==STARLIGHT_EXTINCTION.conceptName||!authorization.parentEntryId)return{ok:false,reason:'starlight_reservation_invalid'};
+  if(String(authorization.parentConcept||'')===STARLIGHT_EXTINCTION.conceptName)return{ok:false,reason:'starlight_self_chain_forbidden'};
+  if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(authorization.parentConcept||'')))return{ok:false,reason:'starlight_parent_not_executable'};
+  if(!isStarlightParentStopLoss(authorization.parentCloseReason))return{ok:false,reason:'starlight_parent_not_stop_loss'};
+  const marketFamilyExclusion=executionMarketFamilyExclusion(q?.ticker,settings);
+  if(marketFamilyExclusion.blocked)return{ok:false,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,marketFamilyExclusion};
+  const envelope=hunterEntryEnvelope(settings,concept);if(!envelope)return{ok:false,reason:'unknown_attack'};
+  const stake=attackConfiguredStakeCents(settings,concept);if(!(stake>0)||Math.abs(Number(command.stakeCents||0)-stake)>1e-9)return{ok:false,reason:'starlight_stake_changed'};
+  const ask=Number(q?.yesAsk||0),bid=Number(q?.yesBid||0);if(!(ask>0)||!(bid>0)||bid>ask)return{ok:false,reason:'invalid_quote'};
+  if(ask<Number(envelope.minEntryCents)||ask>Number(envelope.maxEntryCents))return{ok:false,reason:'entry_band'};
+  if(ask-bid>Number(settings?.maxSpreadCents??3))return{ok:false,reason:'shared_spread_safety'};
+  const policy=attackProfitAuthoritySnapshot(settings,concept);const expectedTarget=Number(policy.pri1Enabled?policy.triggerNetPerOriginalContractCents:attackInfinityNetTargetCents(settings,concept));
+  if(!(Number(command?.economicTarget?.netPerOriginalContractCents)>0)||Math.abs(Number(command.economicTarget.netPerOriginalContractCents)-expectedTarget)>1e-9)return{ok:false,reason:'starlight_economic_target_changed'};
+  if(Number(command?.economicTarget?.requiredTargetBidCents)>99)return{ok:false,reason:'starlight_economic_target_unreachable'};
+  return{ok:true,reason:'starlight_fire_valid',envelope,stakeCents:stake};
 }
 
 export function recoverySignalState(loss, q, observation, settings, runtimeTroughCents = null) {
@@ -394,7 +425,7 @@ export function entryConfigSnapshot(settings, conceptName, sourceFeeder = null, 
     'Momentum Hunter':{stake:Number(settings.momentumStakeCents),min:Number(settings.momentumMinEntryCents),max:Number(settings.momentumMaxEntryCents),minCrashCents:Number(settings.momentumMinCrashCents??15),minReboundCents:Number(settings.momentumMinReboundCents??5),minUpwardTicks:Number(settings.momentumMinUpwardTicks??2)},
     'Wave Surfer':{stake:Number(settings.waveStakeCents),min:Number(settings.waveMinEntryCents),max:Number(settings.waveMaxEntryCents),minCrashCents:Number(settings.waveMinCrashCents??15),minReboundCents:Number(settings.waveMinReboundCents??5),minUpwardTicks:Number(settings.waveMinUpwardTicks??2)},
     'Recovery Hunter':{stake:Number(settings.recoveryStakeCents),min:Number(settings.recoveryMinEntryCents),max:Number(settings.recoveryMaxEntryCents),structuralRole:'INDEPENDENT_CRASH_REBOUND_ONLY',minCrashCents:Number(settings.crystalWallMinCrashCents??CRYSTAL_WALL.defaultMinCrashCents),minReboundCents:Number(settings.crystalWallMinReboundCents??CRYSTAL_WALL.defaultMinReboundCents),minUpwardTicks:Number(settings.crystalWallMinUpwardTicks??CRYSTAL_WALL.defaultMinUpwardTicks),fixedStakeOnly:true,stakeMultiplier:1,oneEntryPerCrashEpisode:true},
-    'Crash Recovery Hunter':{stake:Number(settings.crashRecoveryStakeCents),min:Number(settings.crashRecoveryMinEntryCents),max:Number(settings.crashRecoveryMaxEntryCents),minCrashCents:Number(settings.crashRecoveryMinCrashCents??15),minReboundCents:Number(settings.crashRecoveryMinReboundCents??5),minUpwardTicks:Number(settings.crashRecoveryMinUpwardTicks??settings.crashRecoveryUpwardTicks??2)},
+    'Crash Recovery Hunter':{stake:Number(settings.crashRecoveryStakeCents),min:Number(settings.crashRecoveryMinEntryCents),max:Number(settings.crashRecoveryMaxEntryCents),structuralRole:'STARLIGHT_STOP_LOSS_SAME_COSMOS_REENTRY',minCrashCents:Number(settings.crashRecoveryMinCrashCents??15),minReboundCents:Number(settings.crashRecoveryMinReboundCents??5),minUpwardTicks:Number(settings.crashRecoveryMinUpwardTicks??settings.crashRecoveryUpwardTicks??2),profitTargetNetPerOriginalContractCents:Number(settings.crashRecoveryInfinityNetPerOriginalContractCents??STARLIGHT_EXTINCTION.defaultInfinityNetPerOriginalContractCents)},
     'Scarlet Needle':{stake:Number(settings.scarletNeedleStakeCents),min:Number(settings.scarletNeedleMinEntryCents),max:Number(settings.scarletNeedleMaxEntryCents),structuralRole:'MEGA_WAVE_POST_PROFITABLE_ATHENA_DIRECT_CONTINUATION',minCrashCents:Number(settings.scarletNeedleMinCrashCents??15),minReboundCents:Number(settings.scarletNeedleMinReboundCents??5),minUpwardTicks:Number(settings.scarletNeedleMinUpwardTicks??2),profitTargetNetPerOriginalContractCents:Number(settings.scarletNeedleInfinityNetPerOriginalContractCents??SCARLET_NEEDLE.defaultInfinityNetPerOriginalContractCents),maxRepeats:Math.max(0,Math.min(SCARLET_NEEDLE.maximumConfigurableRepeats,Math.floor(Number(settings.scarletNeedleMaxRepeats??SCARLET_NEEDLE.defaultMaxRepeats))))},
     'Sagittarius Justice Arrow':{stake:Number(settings.justiceArrowStakeCents),min:Number(settings.justiceArrowMinEntryCents),max:Number(settings.justiceArrowMaxEntryCents),structuralRole:'MEGA_WAVE_POST_PROFITABLE_ATHENA_OWN_CONFIRMATION',minCrashCents:Number(settings.justiceArrowMinCrashCents??SAGITTARIUS_JUSTICE_ARROW.defaultMinCrashCents),minReboundCents:Number(settings.justiceArrowMinReboundCents??SAGITTARIUS_JUSTICE_ARROW.defaultMinReboundCents),minUpwardTicks:Number(settings.justiceArrowMinUpwardTicks??SAGITTARIUS_JUSTICE_ARROW.defaultMinUpwardTicks),fixedStakeOnly:true,stakeMultiplier:1,oneEntryPerCrashEpisode:false},
     'Athena Exclamation':{stake:Number(settings.athenaExclamationStakeCents),min:Number(settings.athenaExclamationMinEntryCents),max:Number(settings.athenaExclamationMaxEntryCents),structuralRole:'MEGA_WAVE_SUPREME_FIRST_REAL_ATTACK_AFTER_TRIPLE_CRYSTAL',minCrashCents:Number(settings.athenaExclamationMinCrashCents??15),minReboundCents:Number(settings.athenaExclamationMinReboundCents??5),minUpwardTicks:Number(settings.athenaExclamationMinUpwardTicks??2)},
@@ -408,8 +439,8 @@ export function entryConfigSnapshot(settings, conceptName, sourceFeeder = null, 
   const profitPolicy=attackProfitAuthoritySnapshot(settings,conceptName);
   return {
     release:RELEASE,
-    authorityChain:conceptName==='Athena Exclamation'?'CONFIGURED_1_5_CRYSTAL_WALL_PROOFS->ATHENA_EXCLAMATION->ENTRY_FROZEN_INFINITY_OR_PRI1_R2/AURORA':MEGA_WAVE.downstreamSaints.includes(conceptName)?'ATHENA_EXCLAMATION_PROFIT->SAINT_OWN_DOCTRINE->ENTRY_FROZEN_INFINITY_OR_PRI1_R2/AURORA':crystalWallContinuation?'CI1_CRASH->CRYSTAL_WALL->TROUGH->REBOUND->HARD_EXECUTION_SAFETY->INFINITY_BREAK/AURORA':'LEGACY_OR_REFERENCE_ONLY',
-    strategicEntryAuthority:conceptName==='Athena Exclamation'?ATHENA_EXCLAMATION_DOCTRINE.strategicEntryAuthority:MEGA_WAVE.downstreamSaints.includes(conceptName)?MEGA_WAVE.downstreamAuthority:crystalWallContinuation?CRYSTAL_WALL.strategicEntryAuthority:ATHENA_COMMANDER.version,
+    authorityChain:conceptName==='Athena Exclamation'?'CONFIGURED_1_5_CRYSTAL_WALL_PROOFS->ATHENA_EXCLAMATION->ENTRY_FROZEN_INFINITY_OR_PRI1_R2/AURORA':conceptName===STARLIGHT_EXTINCTION.conceptName?'SAME_COSMOS_STOP_LOSS->STARLIGHT_OWN_CRASH_REBOUND_TICKS->OWN_INFINITY_OR_PRI1_R2/AURORA':MEGA_WAVE.downstreamSaints.includes(conceptName)?'ATHENA_EXCLAMATION_PROFIT->SAINT_OWN_DOCTRINE->ENTRY_FROZEN_INFINITY_OR_PRI1_R2/AURORA':crystalWallContinuation?'CI1_CRASH->CRYSTAL_WALL->TROUGH->REBOUND->HARD_EXECUTION_SAFETY->INFINITY_BREAK/AURORA':'LEGACY_OR_REFERENCE_ONLY',
+    strategicEntryAuthority:conceptName==='Athena Exclamation'?ATHENA_EXCLAMATION_DOCTRINE.strategicEntryAuthority:conceptName===STARLIGHT_EXTINCTION.conceptName?STARLIGHT_EXTINCTION.strategicEntryAuthority:MEGA_WAVE.downstreamSaints.includes(conceptName)?MEGA_WAVE.downstreamAuthority:crystalWallContinuation?CRYSTAL_WALL.strategicEntryAuthority:ATHENA_COMMANDER.version,
     profitAuthority:profitPolicy.authority,
     profitAuthorityRevision:profitPolicy.revision,
     pri1R2:profitPolicy.authority===PROTECTED_RUNNER_INTELLIGENCE.version?{version:PROTECTED_RUNNER_INTELLIGENCE.version,policyRevision:PROTECTED_RUNNER_INTELLIGENCE.policyRevision,enabledAtEntry:true,triggerNetPerOriginalContractCents:profitPolicy.triggerNetPerOriginalContractCents,fullPositionOnly:true,lossAuthority:'U-SG1'}:null,
@@ -586,7 +617,7 @@ function athenaR2ModelSettings(settings={},concept=''){
 function executionAttackEconomicTarget(concept,{askCents=0,stakeCents=0,settings={}}={}) {
   const ask=Math.max(1,Number(askCents)||0),stake=Math.max(1,Number(stakeCents)||0);
   const policy=attackProfitAuthoritySnapshot(settings,concept);
-  const target=Math.max(0.01,Number(policy.pri1Enabled?policy.triggerNetPerOriginalContractCents:(concept==='Scarlet Needle'?settings.scarletNeedleInfinityNetPerOriginalContractCents:settings.infinityBreakMinNetPerOriginalContractCents))||INFINITY_BREAK.defaultMinimumNetPerOriginalContractCents);
+  const target=Math.max(0.01,Number(policy.pri1Enabled?policy.triggerNetPerOriginalContractCents:attackInfinityNetTargetCents(settings,concept))||INFINITY_BREAK.defaultMinimumNetPerOriginalContractCents);
   const count=Math.max(1,Math.floor(stake/ask));
   let entryFeePerContract=0,exitFeePerContract=0,targetBid=ask+target;
   if(String(settings.mode||'SIMULATION').toUpperCase()==='LIVE'){
@@ -1579,7 +1610,7 @@ export class StrategyEngine {
     return {restored};
   }
 
-  async hunterEntryPolicyDecision(concept, q, { requireClock = true, includeCooldown = true, stage = 'policy', crystalWallOverlay = false, megaWaveAuthorized = false } = {}) {
+  async hunterEntryPolicyDecision(concept, q, { requireClock = true, includeCooldown = true, stage = 'policy', crystalWallOverlay = false, megaWaveAuthorized = false, starlightReentry = false } = {}) {
     const s = this.getSettings();
     if (requireClock && crystalWallOverlay!==true) {
       const minGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 20));
@@ -1608,15 +1639,16 @@ export class StrategyEngine {
     // Real Athena and Mega Wave Saints use the operator cap and cooldown.
     // Only Crystal Wall paper proofs stay exempt.
     const galacticSaintCapBypass=megaWaveAuthorized===true&&s.galacticExplosionEnabled===true&&MEGA_WAVE.downstreamSaints.includes(String(concept||''));
-    if (eventState.eventCapBlocked && crystalWallOverlay!==true && !galacticSaintCapBypass) {
+    const starlightCapBypass=starlightReentry===true&&concept===STARLIGHT_EXTINCTION.conceptName;
+    if (eventState.eventCapBlocked && crystalWallOverlay!==true && !galacticSaintCapBypass && !starlightCapBypass) {
       await this.audit('hunter_entry_trade_cap_blocked', { concept, ticker:q.ticker, eventTicker:event, activeEntries:eventState.activeEntries, maxEntriesPerTrade:eventState.maxEntriesPerTrade, stage, megaWaveAuthorized:megaWaveAuthorized===true });
       return {ok:false,reason:'event_entry_cap',...eventState};
     }
-    if (includeCooldown && crystalWallOverlay!==true && eventState.cooldownBlocked) {
+    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && eventState.cooldownBlocked) {
       await this.audit('hunter_entry_cooldown_blocked', { concept, ticker:q.ticker, eventTicker:event, hunterCooldownMinutes:eventState.hunterCooldownMinutes, cooldownScope:eventState.cooldownScope, latestHunterEntryMs:eventState.latestHunterEntryMs, attackLatestEntryMs:eventState.attackLatestEntryMs, stage, megaWaveAuthorized:megaWaveAuthorized===true });
       return {ok:false,reason:'hunter_cooldown',...eventState};
     }
-    return {ok:true,reason:'qualified',...eventState,cooldownApplied:includeCooldown&&crystalWallOverlay!==true,eventCapBypassed:(crystalWallOverlay===true||galacticSaintCapBypass===true)&&eventState.eventCapBlocked,crystalWallOverlay:crystalWallOverlay===true,megaWaveAuthorized:megaWaveAuthorized===true,galacticSaintCapBypass:galacticSaintCapBypass===true};
+    return {ok:true,reason:'qualified',...eventState,cooldownApplied:includeCooldown&&crystalWallOverlay!==true&&starlightCapBypass!==true,eventCapBypassed:(crystalWallOverlay===true||galacticSaintCapBypass===true||starlightCapBypass===true)&&eventState.eventCapBlocked,crystalWallOverlay:crystalWallOverlay===true,megaWaveAuthorized:megaWaveAuthorized===true,galacticSaintCapBypass:galacticSaintCapBypass===true,starlightReentry:starlightCapBypass===true};
   }
 
   async hunterEntryPolicy(concept, q, { requireClock = true } = {}) {
@@ -1725,7 +1757,7 @@ export class StrategyEngine {
     return { ...boundary, ok:false, reason:'unknown_hunter_concept' };
   }
 
-  async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, megaWaveAuthorization = null, legacyCompatibility = false } = {}) {
+  async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, megaWaveAuthorization = null, starlightAuthorization = null, legacyCompatibility = false } = {}) {
     const s = this.getSettings();
     const simulationMutationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
     const exactTicker = String(q?.ticker || '');
@@ -1737,7 +1769,8 @@ export class StrategyEngine {
     const independentCrashRecoveryEntry=crystalWallIndependentEntry||justiceArrowIndependentEntry;
     const scarletContinuationEntry=legacyCompatibility!==true&&concept==='Scarlet Needle'&&String(athenaFireCommand?.authorityMode||'')===SCARLET_NEEDLE.strategicEntryAuthority;
     const megaWaveAthenaEntry=legacyCompatibility!==true&&concept==='Athena Exclamation'&&String(athenaFireCommand?.authorityMode||'')===String(ATHENA_EXCLAMATION_DOCTRINE.strategicEntryAuthority);
-    const megaWaveSaintEntry=legacyCompatibility!==true&&megaWaveAuthorization?.version===MEGA_WAVE.version&&String(megaWaveAuthorization?.parentConcept||'')==='Athena Exclamation';
+    const megaWaveSaintEntry=legacyCompatibility!==true&&megaWaveAuthorization?.version===MEGA_WAVE.version&&String(megaWaveAuthorization?.parentConcept||'')==='Athena Exclamation'&&concept!==STARLIGHT_EXTINCTION.conceptName;
+    const starlightReentry=legacyCompatibility!==true&&concept===STARLIGHT_EXTINCTION.conceptName&&String(starlightAuthorization?.version||'')===STARLIGHT_EXTINCTION.version;
     const megaWaveClockBypass=megaWaveSaintEntry===true;
     const strategicClockBypass=independentCrashRecoveryEntry||megaWaveClockBypass;
     const fullConfiguredSizeRequired=independentCrashRecoveryEntry||scarletContinuationEntry||megaWaveAthenaEntry||megaWaveSaintEntry;
@@ -1824,6 +1857,11 @@ export class StrategyEngine {
         await this.audit('mega_wave_retired_saint_entry_blocked',{concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker});
         return null;
       }
+      if(concept===STARLIGHT_EXTINCTION.conceptName&&!starlightReentry){
+        trace('STARLIGHT_AUTHORITY','BLOCKED','starlight_stop_loss_reentry_required');
+        await this.audit('starlight_regular_entry_blocked',{concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker});
+        return null;
+      }
       let fireValidation=null;
       if(newGenerationEntry){
         if(concept==='Recovery Hunter'&&!crystalWallIndependentEntry){
@@ -1840,11 +1878,13 @@ export class StrategyEngine {
           ? validateCrystalWallFireCommand(crystalWallFireCommand,{q,settings:s,now:Date.now()})
           : justiceArrowIndependentEntry
             ? validateJusticeArrowFireCommand(justiceArrowFireCommand,{q,settings:s,now:Date.now()})
+            : starlightReentry
+              ? validateStarlightFireCommand(athenaFireCommand,{concept,q,settings:s,authorization:starlightAuthorization})
             : megaWaveSaintEntry
               ? validateMegaWaveSaintFireCommand(athenaFireCommand,{concept,q,settings:s,authorization:megaWaveAuthorization})
               : validateAthenaFireCommand(athenaFireCommand,{concept,q,settings:s,now:Date.now()});
-        const fireStage=crystalWallIndependentEntry?'CRYSTAL_WALL_FIRE':justiceArrowIndependentEntry?'JUSTICE_ARROW_FIRE':megaWaveSaintEntry?'MEGA_WAVE_FIRE':'ATHENA_FIRE';
-        const independentAudit=crystalWallIndependentEntry?'crystal_wall_v3_execution_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_execution_blocked':megaWaveSaintEntry?'mega_wave_saint_execution_blocked':'athena_fire_execution_blocked';
+        const fireStage=crystalWallIndependentEntry?'CRYSTAL_WALL_FIRE':justiceArrowIndependentEntry?'JUSTICE_ARROW_FIRE':starlightReentry?'STARLIGHT_FIRE':megaWaveSaintEntry?'MEGA_WAVE_FIRE':'ATHENA_FIRE';
+        const independentAudit=crystalWallIndependentEntry?'crystal_wall_v3_execution_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_execution_blocked':starlightReentry?'starlight_reentry_execution_blocked':megaWaveSaintEntry?'mega_wave_saint_execution_blocked':'athena_fire_execution_blocked';
         if(!fireValidation.ok){
           trace(fireStage,'BLOCKED',fireValidation.reason,fireValidation);
           await this.audit(independentAudit,{concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,reason:fireValidation.reason,authorizationId:executionAuthorityCommand?.authorizationId||null,boltId:athenaFireCommand?.boltId||null});
@@ -1866,14 +1906,14 @@ export class StrategyEngine {
       // hard exposure topology, but never by the old shared strategic cooldown.
       // Legacy paths keep the historical policy. Exact subreasons are surfaced
       // so a future choke cannot hide behind generic STATIC_POLICY telemetry.
-      if(independentCrashRecoveryEntry||megaWaveAthenaEntry||megaWaveSaintEntry){
+      if(independentCrashRecoveryEntry||megaWaveAthenaEntry||megaWaveSaintEntry||starlightReentry){
         const capacity=await this.portfolioCapacityState();
-        const event=crystalWallIndependentEntry?'crystal_wall_v3_capacity_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_capacity_blocked':megaWaveAthenaEntry?'mega_wave_athena_capacity_blocked':'mega_wave_saint_capacity_blocked';
+        const event=crystalWallIndependentEntry?'crystal_wall_v3_capacity_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_capacity_blocked':starlightReentry?'starlight_capacity_blocked':megaWaveAthenaEntry?'mega_wave_athena_capacity_blocked':'mega_wave_saint_capacity_blocked';
         if(capacity.blocked){trace('PORTFOLIO_CAPACITY','BLOCKED','max_positions',capacity);await this.audit(event,{ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,...capacity});return null;}
         trace('PORTFOLIO_CAPACITY','PASS',null,capacity);
       }
       const specialistStage=crystalWallIndependentEntry?'crystal_wall_preflight':justiceArrowIndependentEntry?'justice_arrow_preflight':newGenerationEntry?'post_fire_preflight':'legacy_preflight';
-      const preExecutionPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:specialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry});
+      const preExecutionPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:specialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry,starlightReentry});
       if(!preExecutionPolicy.ok){trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','BLOCKED',preExecutionPolicy.reason,preExecutionPolicy);return null;}
       trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','PASS',preExecutionPolicy.reason,preExecutionPolicy);
 
@@ -2173,7 +2213,7 @@ export class StrategyEngine {
       // Wall's overlay exemption applies only to the parent/other Attack; a
       // second Crystal Wall on the same ticker remains blocked.
       const finalSpecialistStage=crystalWallIndependentEntry?'crystal_wall_commit':justiceArrowIndependentEntry?'justice_arrow_commit':newGenerationEntry?'post_fire_commit':'legacy_commit';
-      const finalEntryPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:finalSpecialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry});
+      const finalEntryPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:finalSpecialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry,starlightReentry});
       if(!finalEntryPolicy.ok){trace('FINAL_ENTRY_POLICY','BLOCKED',finalEntryPolicy.reason,finalEntryPolicy);return null;}
       trace('FINAL_ENTRY_POLICY','PASS',finalEntryPolicy.reason,finalEntryPolicy);
 
@@ -2452,6 +2492,40 @@ export class StrategyEngine {
     const core={version:ATHENA_COMMANDER.version,policyRevision:ATHENA_COMMANDER.policyRevision,authorityMode:galacticOpenGrant?MEGA_WAVE.galacticOpenAuthority:MEGA_WAVE.downstreamAuthority,authoritySource:galacticOpenGrant?'GALACTIC_ATHENA_OPEN':'PROFITABLE_ATHENA_EXCLAMATION_CLOSE',strategicSelectionBypassed:true,boltId:String(authorization.reservationId),boltFingerprint:null,systemName:s.systemName,sourceRelease:RELEASE,decidedAtMs:at,expiresAtMs:at+5_000,ticker,eventTicker:String(q?.eventTicker||parentEntry?.eventTicker||ticker),side:'YES',selectedAttack:concept,selectedAttackDisplay:EXECUTION_ATTACK_DISPLAY[concept]?.name||concept,stakeCents,fieldBudgetCents:null,maxRays:null,operatorMinEntryCents:Number(envelope.minEntryCents),operatorMaxEntryCents:Number(envelope.maxEntryCents),entryPriceCents:Number(q.yesAsk),authorizedMaxEntryCents:Number(envelope.maxEntryCents),maxSpreadCents:Number(s.maxSpreadCents??3),auroraDamageControlPercent:Number(s.auroraDamageControlPercent??45),infinityBreakPolicyVersion:INFINITY_BREAK.version,economicTarget:target,survivalCertificate:null,ranking:[{concept,displayName:EXECUTION_ATTACK_DISPLAY[concept]?.name||concept,score:100,authorityMode:MEGA_WAVE.downstreamAuthority,targetFeasible:true,requiredTargetBidCents:target.requiredTargetBidCents}],decisionEvidence:{megaWaveAuthorization:lineage,configuredTargetNetPerOriginalContractCents:target.netPerOriginalContractCents,normalStrategicDiscoveryBypassed:true,saintDoctrinePreserved:true,hardExecutionSafetyStillRequired:true}};
     const command=sealAthenaFireCommand(core),snapshot={version:'MEGA-WAVE-SAINT-Q1',policyRevision:MEGA_WAVE.policyRevision,megaWaveAuthorization:structuredClone(lineage),qualification:structuredClone(signal.watch),observedAtMs:at};
     return this.createHunter(concept,q,stakeCents,0,{sourceTradeId:String(parentEntry.id),entryQualificationSnapshot:snapshot,athenaFireCommand:command,megaWaveAuthorization:lineage,legacyCompatibility:false});
+  }
+
+  async executeStarlightExtinction(q,parentEntry,authorization,watch={}){
+    const s=this.getSettings(),ticker=String(q?.ticker||''),concept=STARLIGHT_EXTINCTION.conceptName;
+    if(String(parentEntry?.ticker||'')!==ticker||String(authorization?.ticker||'')!==ticker)return null;
+    if(String(parentEntry?.id||'')!==String(authorization?.parentEntryId||''))return null;
+    if(String(parentEntry?.systemName||'')!==String(s.systemName||''))return null;
+    if(String(parentEntry?.conceptName||'')===concept)return null;
+    if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(parentEntry?.conceptName||'')))return null;
+    if(typeof this.db?.entryById!=='function')return null;
+    const durableParent=await this.db.entryById(String(authorization.parentEntryId)).catch(()=>null);
+    const parentOk=String(durableParent?.id||'')===String(authorization.parentEntryId)
+      &&String(durableParent?.systemName||'')===String(s.systemName)
+      &&String(durableParent?.ownerId||'')===String(s.ownerId)
+      &&String(durableParent?.mode||'')===String(s.mode||'')
+      &&String(durableParent?.ticker||'')===ticker
+      &&String(durableParent?.status||'')==='closed'
+      &&Number(durableParent?.remainingCount||0)<=1e-9
+      &&EXECUTABLE_HUNTER_CONCEPTS.has(String(durableParent?.conceptName||''))
+      &&String(durableParent?.conceptName||'')!==concept
+      &&isStarlightParentStopLoss(durableParent?.closeReason);
+    if(!parentOk)return null;
+    const existing=typeof this.db.entriesByConceptTicker==='function'
+      ? await this.db.entriesByConceptTicker(s.systemName,concept,ticker).catch(()=>[])
+      : [];
+    if((existing||[]).some((row)=>String(row?.sourceTradeId||'')===String(durableParent.id)))return null;
+    const signal=megaWaveSaintSignalState(concept,watch,q,s,Date.now());if(!signal.qualified)return null;
+    const stakeCents=attackConfiguredStakeCents(s,concept),envelope=hunterEntryEnvelope(s,concept);if(!(stakeCents>0)||!envelope)return null;
+    const target=executionAttackEconomicTarget(concept,{askCents:Number(q.yesAsk),stakeCents,settings:s});if(!target.targetFeasible)return null;
+    const at=Date.now();
+    const lineage={...structuredClone(authorization),parentConcept:String(durableParent.conceptName),parentCloseReason:String(durableParent.closeReason||''),parentSystemName:String(durableParent.systemName||s.systemName),qualification:structuredClone(signal.watch),qualifiedAtMs:at,profitAuthorityAtAttempt:attackProfitAuthoritySnapshot(s,concept)};
+    const core={version:ATHENA_COMMANDER.version,policyRevision:ATHENA_COMMANDER.policyRevision,authorityMode:STARLIGHT_EXTINCTION.strategicEntryAuthority,authoritySource:'SAME_COSMOS_STOP_LOSS',strategicSelectionBypassed:true,boltId:String(authorization.grantId||durableParent.id),boltFingerprint:null,systemName:s.systemName,sourceRelease:RELEASE,decidedAtMs:at,expiresAtMs:at+5_000,ticker,eventTicker:String(q?.eventTicker||parentEntry?.eventTicker||ticker),side:'YES',selectedAttack:concept,selectedAttackDisplay:EXECUTION_ATTACK_DISPLAY[concept]?.name||concept,stakeCents,fieldBudgetCents:null,maxRays:null,operatorMinEntryCents:Number(envelope.minEntryCents),operatorMaxEntryCents:Number(envelope.maxEntryCents),entryPriceCents:Number(q.yesAsk),authorizedMaxEntryCents:Number(envelope.maxEntryCents),maxSpreadCents:Number(s.maxSpreadCents??3),auroraDamageControlPercent:Number(s.auroraDamageControlPercent??45),infinityBreakPolicyVersion:INFINITY_BREAK.version,economicTarget:target,survivalCertificate:null,ranking:[{concept,displayName:EXECUTION_ATTACK_DISPLAY[concept]?.name||concept,score:100,authorityMode:STARLIGHT_EXTINCTION.strategicEntryAuthority,targetFeasible:true,requiredTargetBidCents:target.requiredTargetBidCents}],decisionEvidence:{starlightAuthorization:lineage,configuredTargetNetPerOriginalContractCents:target.netPerOriginalContractCents,normalStrategicDiscoveryBypassed:true,saintDoctrinePreserved:true,hardExecutionSafetyStillRequired:true}};
+    const command=sealAthenaFireCommand(core),snapshot={version:'STARLIGHT-Q1',policyRevision:STARLIGHT_EXTINCTION.policyRevision,starlightAuthorization:structuredClone(lineage),qualification:structuredClone(signal.watch),observedAtMs:at};
+    return this.createHunter(concept,q,stakeCents,0,{sourceTradeId:String(durableParent.id),entryQualificationSnapshot:snapshot,athenaFireCommand:command,starlightAuthorization:lineage,legacyCompatibility:false});
   }
 
   async executeMegaWaveAthenaContinuation(q, parentEntry, { authorizationId, thirdProof=null, authorizedAtMs=Date.now() } = {}) {
@@ -3162,68 +3236,10 @@ export class StrategyEngine {
     return [];
   }
 
-  async evaluateCrashRecovery(marketMap, { onlyTicker = null, legacyCompatibility=false } = {}) {
-    if (legacyCompatibility !== true) return [];
-    const s = this.getSettings();
-    if (!isModelEnabled(s, 'Crash Recovery Hunter')) return [];
-    const entries = await this.db.entries(s.systemName, { limit:5000 });
-    const open = entries.filter((e) => openLike(e.status));
-    let capacity = slotsLeft(open, s);
-
-    const created = [];
-    const tickers = onlyTicker ? [onlyTicker] : [...marketMap.keys()];
-    const existingEpisodes = new Set(entries
-      .filter((e) => e.conceptName === 'Crash Recovery Hunter')
-      .map((e) => String(e.entryConfig?.crashRecoverySource?.episodeId || e.sourceTradeId || ''))
-      .filter(Boolean));
-
-    for (const ticker of tickers) {
-      const q=marketMap.get(ticker);
-      if(!q||typeof this.learning?.crashEntrySignal!=='function') continue;
-      const signal=this.learning.crashEntrySignal(ticker);
-      const episodeId=String(signal?.episodeId||'');
-      if(!signal||!episodeId||existingEpisodes.has(episodeId))continue;
-
-      // HF2: Starlight no longer requires a Dragon approval. Any currently
-      // active Cosmo on the exact ticker may nominate the opportunity. The
-      // crash episode itself is still independently proven by Starlight below
-      // and again at the force-fresh execution boundary in createHunter().
-      const cosmoSource=selectCrashRecoveryCosmoSource(open,s,ticker,episodeId);
-      if(!cosmoSource)continue;
-      const validation=crashSignalQualifiedAtQuote(signal,q,s);
-      if(!validation.ok) continue;
-
-      const dragonSource=cosmoSource.conceptName==='Dragon'?(cosmoSource.entryConfig?.dragonSource||{}):{};
-      const exactDragonEpisode=cosmoSource.conceptName==='Dragon'&&String(cosmoSource.sourceTradeId||'')===episodeId;
-      const crashSourceSnapshot={
-        ...crashSourceSnapshotFromSignal(signal,validation),
-        huntingGround:'active_cosmo_plus_independent_crash_episode',
-        cosmoRouteVersion:COSMO_ROUTING.version,
-        cosmoSourceId:cosmoSource.id||null,
-        cosmoSourceConcept:cosmoSource.conceptName||null,
-        cosmoSourceOpenedAtMs:Number(cosmoSource.openedAtMs||0)||null,
-        cosmoSourceTradeId:cosmoSource.sourceTradeId||null,
-        dragonSignalId:exactDragonEpisode?(cosmoSource.id||null):null,
-        dragonEpisodeId:exactDragonEpisode?episodeId:null,
-        dragonSignalAtMs:exactDragonEpisode?(Number(dragonSource.signalAtMs||cosmoSource.openedAtMs||0)||null):null,
-        dragonSignalPriceCents:exactDragonEpisode?(Number(dragonSource.signalPriceCents||0)||null):null,
-      };
-      const crashQualification={version:'CRASH-RECOVERY-Q1',episodeId,cosmoSourceId:cosmoSource.id||null,sourceFeeder:cosmoSource.conceptName,crashDepthCents:Number(signal.crashDepthCents||0),reboundCents:Number(validation.reboundCents||0),reclaimRate:Number(validation.reclaimRate||0),observedAtMs:Date.now()};
-      const ae=await this.observeGoldSaintQualification('Crash Recovery Hunter',q,{sourceFeeder:cosmoSource.conceptName,sourceTradeId:episodeId,qualificationSnapshot:crashQualification,legacyCompatibility:true});
-      if(ae.entry){created.push(ae.entry);capacity=Math.max(0,capacity-1);existingEpisodes.add(episodeId);continue;}
-      if(capacity<=0)continue;
-      const e=await this.createHunter('Crash Recovery Hunter',q,Number(s.crashRecoveryStakeCents||20000),0,{
-        sourceFeeder:cosmoSource.conceptName,sourceTradeId:episodeId,sourceEntryConfig:cosmoSource.entryConfig||null,crashSourceSnapshot,legacyCompatibility:true,
-      });
-      if(!e)continue;
-      created.push(e);capacity-=1;existingEpisodes.add(episodeId);
-      await this.audit('crash_recovery_hunter_created',{
-        id:e.id,ticker:e.ticker,eventTicker:e.eventTicker,episodeId,sourceFeeder:cosmoSource.conceptName,
-        cosmoRouteVersion:COSMO_ROUTING.version,cosmoSourceId:cosmoSource.id||null,
-        dragonSignalId:exactDragonEpisode?(cosmoSource.id||null):null,entryPriceCents:e.entryPriceCents,count:e.count,
-        crashDepthCents:signal.crashDepthCents,troughCents:signal.troughCents,reboundCents:validation.reboundCents,reclaimRate:validation.reclaimRate,
-      });
-    }
-    return created;
+  async evaluateCrashRecovery(_marketMap, { onlyTicker = null, legacyCompatibility=false } = {}) {
+    // SE1: Starlight Extinction is no longer a Cosmo/Mega Wave first attack.
+    // The only live path is same-cosmos stop-loss re-entry.
+    void onlyTicker; void legacyCompatibility;
+    return [];
   }
 }

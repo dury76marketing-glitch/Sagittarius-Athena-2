@@ -102,6 +102,7 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'crashRecoveryStakeCents',
   'crashRecoveryMinEntryCents',
   'crashRecoveryMaxEntryCents',
+  'crashRecoveryInfinityNetPerOriginalContractCents',
   'scarletNeedleStakeCents',
   'scarletNeedleMinEntryCents',
   'scarletNeedleMaxEntryCents',
@@ -292,6 +293,7 @@ export function originalSettings() {
     crashRecoveryStakeCents: 20000,
     crashRecoveryMinEntryCents: 50,
     crashRecoveryMaxEntryCents: 60,
+    crashRecoveryInfinityNetPerOriginalContractCents: 5,
     scarletNeedleStakeCents: 500,
     scarletNeedleMinEntryCents: 10,
     scarletNeedleMaxEntryCents: 50,
@@ -445,6 +447,7 @@ export function freshInstallSettings() {
     crashRecoveryStakeCents:500,
     crashRecoveryMinEntryCents:55,
     crashRecoveryMaxEntryCents:75,
+    crashRecoveryInfinityNetPerOriginalContractCents:5,
     scarletNeedleStakeCents:500,
     scarletNeedleMinEntryCents:10,
     scarletNeedleMaxEntryCents:50,
@@ -600,6 +603,7 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.infinityBreakConfirmationWindowMs = Math.max(250, Math.floor(Number(out.infinityBreakConfirmationWindowMs) || 250));
   out.auroraDamageControlPercent = Math.max(1, Math.min(95, Number(out.auroraDamageControlPercent) || 45));
   out.scarletNeedleInfinityNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.scarletNeedleInfinityNetPerOriginalContractCents) || 1));
+  out.crashRecoveryInfinityNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.crashRecoveryInfinityNetPerOriginalContractCents) || 5));
   out.scarletNeedleMaxRepeats = Math.max(0, Math.min(1, Math.floor(Number(out.scarletNeedleMaxRepeats) || 0)));
   out.lightningPlasmaMaxStrikes = Math.max(1, Math.floor(Number(out.lightningPlasmaMaxStrikes) || 1));
   out.crystalWallMinCrashCents = Math.max(1, Math.min(99, Math.floor(Number(out.crystalWallMinCrashCents) || 15)));

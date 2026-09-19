@@ -11,7 +11,7 @@ import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
 import { PhoenixCosmoEngine } from './phoenix.mjs';
-import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
+import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
 import { sealAthenaFireCommand } from './authority.mjs';
 import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
@@ -763,6 +763,140 @@ export class SagittariusEngine {
     if(!this.megaWaveStats.proofStageArmed||typeof this.megaWaveStats.proofStageArmed!=='object')this.megaWaveStats.proofStageArmed={};
     if(!Number.isFinite(Number(this.megaWaveStats.crystalProofCertified)))this.megaWaveStats.crystalProofCertified=0;
     return this.megaWaveStats;
+  }
+
+  starlightRuntime(){
+    if(!(this.starlightWatches instanceof Map))this.starlightWatches=new Map();
+    if(!this.starlightStats||typeof this.starlightStats!=='object')this.starlightStats={version:STARLIGHT_EXTINCTION.version,policyRevision:STARLIGHT_EXTINCTION.policyRevision,armed:0,attempted:0,opened:0,blocked:0,duplicateSuppressed:0,lastEvent:null};
+    return this.starlightStats;
+  }
+
+  queueStarlightStopLossReentry(entry){
+    const id=String(entry?.id||'');
+    if(!id)return false;
+    if(String(entry?.status||'')!=='closed')return false;
+    if(String(entry?.conceptName||'')===STARLIGHT_EXTINCTION.conceptName)return false;
+    if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(entry?.conceptName||'')))return false;
+    if(!isStarlightParentStopLoss(entry?.closeReason))return false;
+    return this.entryEvaluationQueue.enqueue(`starlight-parent:${id}`,()=>this.armStarlightStopLossWatch(entry));
+  }
+
+  async armStarlightStopLossWatch(entry){
+    const stats=this.starlightRuntime(),s=this.settings||{};
+    if(s.crashRecoveryHunterEnabled!==true)return{status:'IGNORED',reason:'starlight_disabled'};
+    const id=String(entry?.id||''),ticker=String(entry?.ticker||'');
+    if(!id||!ticker)return{status:'IGNORED'};
+    if(String(entry?.conceptName||'')===STARLIGHT_EXTINCTION.conceptName)return{status:'IGNORED',reason:'self_chain_forbidden'};
+    if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(entry?.conceptName||'')))return{status:'IGNORED',reason:'parent_not_executable'};
+    if(!isStarlightParentStopLoss(entry?.closeReason))return{status:'IGNORED',reason:'parent_not_stop_loss'};
+    if(executionMarketFamilyExclusion(ticker,s).blocked)return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode};
+    const durable=typeof this.db?.entryById==='function'?await this.db.entryById(id).catch(()=>null):entry;
+    const cosmos=normalizeCosmosId(durable?.systemName)||normalizeCosmosId(entry?.systemName)||normalizeCosmosId(s.systemName);
+    if(!cosmos)return{status:'BLOCKED',reason:'parent_cosmos_missing'};
+    if(String(durable?.status||entry?.status||'')!=='closed')return{status:'IGNORED'};
+    const key=`STARLIGHT:${id}`;
+    if(this.starlightWatches.has(key)){stats.duplicateSuppressed+=1;return{status:'DUPLICATE_SUPPRESSED'};}
+    const existing=typeof this.db?.entriesByConceptTicker==='function'?await this.db.entriesByConceptTicker(cosmos,STARLIGHT_EXTINCTION.conceptName,ticker).catch(()=>[]):[];
+    if((existing||[]).some((row)=>String(row?.sourceTradeId||'')===id)){stats.duplicateSuppressed+=1;return{status:'ALREADY_CONSUMED'};}
+    const seedExit=Number(durable?.exitPriceCents||entry?.exitPriceCents||0);
+    const seedEntry=Number(durable?.entryPriceCents||entry?.entryPriceCents||0);
+    const seedPeak=Math.max(seedEntry,seedExit,Number(durable?.peakPriceCents||entry?.peakPriceCents||0));
+    this.starlightWatches.set(key,{
+      grantId:key,
+      saintConcept:STARLIGHT_EXTINCTION.conceptName,
+      parentEntryId:id,
+      parentConcept:String(durable?.conceptName||entry?.conceptName||''),
+      parentCloseReason:String(durable?.closeReason||entry?.closeReason||''),
+      ticker,
+      eventTicker:String(durable?.eventTicker||entry?.eventTicker||ticker),
+      systemName:cosmos,
+      ownerId:String(durable?.ownerId||s.ownerId||''),
+      mode:String(durable?.mode||s.mode||''),
+      parentEntryPriceCents:seedEntry,
+      parentExitPriceCents:seedExit,
+      peakCents:seedPeak,
+      troughCents:seedExit||seedPeak,
+      lastBidCents:seedExit||seedPeak,
+      upwardTicks:0,
+      stableObservations:0,
+      crashArmed:false,
+      startedAtMs:Number(durable?.closedAtMs||entry?.closedAtMs||Date.now()),
+    });
+    stats.armed+=1;stats.lastEvent={status:'ARMED',atMs:Date.now(),parentEntryId:id,ticker,systemName:cosmos,parentConcept:String(durable?.conceptName||entry?.conceptName||'')};
+    await this.db?.audit?.('info','starlight_stop_loss_watch_armed',{parentEntryId:id,ticker,systemName:cosmos,parentConcept:String(durable?.conceptName||''),closeReason:String(durable?.closeReason||'')}).catch(()=>{});
+    return{status:'ARMED',grantId:key};
+  }
+
+  observeStarlightQuote(q){
+    if(!q?.ticker||!(this.starlightWatches instanceof Map)||!this.starlightWatches.size)return false;
+    const ticker=String(q.ticker);
+    const matches=[...this.starlightWatches.entries()].filter(([,w])=>String(w?.ticker||'')===ticker);
+    const final=Boolean(q?.result)||['closed','final','settled','determined'].includes(String(q?.status||'').toLowerCase());
+    if(final){for(const [key] of matches)this.starlightWatches.delete(key);return matches.length>0;}
+    for(const [key,prior] of matches){
+      const result=megaWaveSaintSignalState(STARLIGHT_EXTINCTION.conceptName,prior,q,this.settings,Date.now());
+      this.starlightWatches.set(key,result.watch);
+      if(result.qualified)this.queueStarlightAttempt(key);
+    }
+    return matches.length>0;
+  }
+
+  queueStarlightAttempt(grantId){
+    return this.entryEvaluationQueue.enqueue(`starlight-attempt:${grantId}`,()=>this.attemptStarlightExtinction(grantId));
+  }
+
+  async attemptStarlightExtinction(grantId){
+    const stats=this.starlightRuntime(),watch=this.starlightWatches.get(grantId);
+    if(!watch)return{status:'IGNORED'};
+    stats.attempted+=1;
+    const parent=typeof this.db?.entryById==='function'?await this.db.entryById(watch.parentEntryId).catch(()=>null):null;
+    const q=this.market?.getQuote?.(watch.ticker);
+    const authorization={
+      version:STARLIGHT_EXTINCTION.version,
+      policyRevision:STARLIGHT_EXTINCTION.policyRevision,
+      grantId,
+      parentEntryId:watch.parentEntryId,
+      parentConcept:watch.parentConcept,
+      parentCloseReason:watch.parentCloseReason,
+      saintConcept:STARLIGHT_EXTINCTION.conceptName,
+      ticker:watch.ticker,
+      eventTicker:watch.eventTicker,
+      systemName:watch.systemName,
+    };
+    let opened=null;
+    if(parent&&q){
+      const cosmosId=normalizeCosmosId(watch.systemName)||normalizeCosmosId(parent.systemName);
+      opened=cosmosId
+        ? await this.withCosmosSettings(cosmosId,()=>this.strategy.executeStarlightExtinction(q,parent,authorization,watch)).catch(()=>null)
+        : await this.strategy.executeStarlightExtinction(q,parent,authorization,watch).catch(()=>null);
+    }
+    if(opened){
+      this.starlightWatches.delete(grantId);
+      stats.opened+=1;stats.lastEvent={status:'OPENED',atMs:Date.now(),parentEntryId:watch.parentEntryId,ticker:watch.ticker,entryId:opened.id};
+      await this.db?.audit?.('info','starlight_reentry_opened',{parentEntryId:watch.parentEntryId,ticker:watch.ticker,entryId:opened.id,systemName:watch.systemName}).catch(()=>{});
+      return{status:'OPENED',entry:opened};
+    }
+    stats.blocked+=1;stats.lastEvent={status:'BLOCKED',atMs:Date.now(),parentEntryId:watch.parentEntryId,ticker:watch.ticker};
+    return{status:'BLOCKED'};
+  }
+
+  async recoverStarlightStopLossWatches(){
+    const s=this.settings||{};
+    if(s.crashRecoveryHunterEnabled!==true)return 0;
+    if(typeof this.db?.recentClosedHuntersFleet!=='function'&&typeof this.db?.recentClosedHunters!=='function')return 0;
+    const reset=Number(s.resetTimestampMs||0);
+    const rows=typeof this.db.recentClosedHuntersFleet==='function'
+      ? await this.db.recentClosedHuntersFleet({ownerId:s.ownerId,mode:s.mode,limit:500,resetTimestampMs:reset}).catch(()=>[])
+      : await this.db.recentClosedHunters(s.systemName,{limit:500,resetTimestampMs:reset}).catch(()=>[]);
+    let armed=0;
+    for(const row of rows||[]){
+      if(String(row?.conceptName||'')===STARLIGHT_EXTINCTION.conceptName)continue;
+      if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(row?.conceptName||'')))continue;
+      if(!isStarlightParentStopLoss(row?.closeReason))continue;
+      const out=await this.armStarlightStopLossWatch(row).catch(()=>null);
+      if(out?.status==='ARMED')armed+=1;
+    }
+    return armed;
   }
 
   queueMegaWaveAthenaContinuation(entry){
@@ -2052,6 +2186,9 @@ export class SagittariusEngine {
         try { this.observeMegaWaveQuote(q); } catch(error) {
           void this.db.audit('error','mega_wave_quote_observer',{ticker:q?.ticker||null,message:String(error?.message||error)}).catch(()=>{});
         }
+        try { this.observeStarlightQuote(q); } catch(error) {
+          void this.db.audit('error','starlight_quote_observer',{ticker:q?.ticker||null,message:String(error?.message||error)}).catch(()=>{});
+        }
         try { this.observeAthenaExclamationConfirmationQuote(q); } catch(error) {
           void this.db.audit('error','athena_exclamation_confirmation_quote_observer',{ticker:q?.ticker||null,message:String(error?.message||error)}).catch(()=>{});
         }
@@ -2090,6 +2227,7 @@ export class SagittariusEngine {
       onOpportunityCompleted: (episode) => this.athenaCommander?.learnEpisode?.(episode),
       onPositionClosed: (entry) => {
         if(String(entry?.conceptName||'')==='Athena Exclamation')this.queueMegaWaveAthenaClose(entry);
+        this.queueStarlightStopLossReentry(entry);
       },
     });
     this.goldenEye = new GoldenEye({
@@ -2178,6 +2316,7 @@ export class SagittariusEngine {
     // rebuild the missing idempotent grant from the current cohort on restart.
     await this.recoverMegaWaveAthenaCloseHandoffs();
     await this.recoverMegaWaveAthenaOpenHandoffs();
+    await this.recoverStarlightStopLossWatches();
     await this.hydrateAnotherDimension();
     await this.hydrateCrystalWallShadow();
     await this.strategy.hydrateEventClockAnchors().catch(()=>({restored:0}));
@@ -4556,7 +4695,6 @@ export class SagittariusEngine {
       this.settings.justiceArrowEnabled===true?'Sagittarius Justice Arrow':null,
       this.settings.momentumHunterEnabled===true?'Momentum Hunter':null,
       this.settings.waveSurferEnabled===true?'Wave Surfer':null,
-      this.settings.crashRecoveryHunterEnabled===true?'Crash Recovery Hunter':null,
       this.settings.lightningPlasmaEnabled===true?'Lightning Plasma':null,
     ].filter(Boolean);
     const executionGate = this.entryExecutionGate();

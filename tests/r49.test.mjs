@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot } from '../src/strategy.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents } from '../src/strategy.mjs';
 import { SagittariusEngine } from '../src/engine.mjs';
-import { MEGA_WAVE, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 
-const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Crash Recovery Hunter','Lightning Plasma'];
+const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma'];
 const q=(ticker='MW-T',bid=55,ask=56)=>({ticker,eventTicker:ticker,title:ticker,sport:'Tennis',yesBid:bid,yesAsk:ask,volume24h:10000,status:'active',result:'',updatedAtMs:Date.now(),closeTimeMs:Date.now()+60*60_000});
 const settings=(overrides={})=>({...originalSettings(),systemName:'SAGITTARIUS',ownerId:'mw-test',mode:'SIMULATION',liveArmed:false,engineActive:true,startingCapitalCents:1_000_000,maxPositions:20,maxEntriesPerTrade:20,maxSpreadCents:3,galacticExplosionEnabled:true,athenaExclamationEnabled:true,athenaExclamationFollowUpAttacks:6,scarletNeedleEnabled:true,justiceArrowEnabled:true,momentumHunterEnabled:true,waveSurferEnabled:true,crashRecoveryHunterEnabled:true,lightningPlasmaEnabled:true,momentumMinEntryCents:10,momentumMaxEntryCents:89,waveMinEntryCents:10,waveMaxEntryCents:89,crashRecoveryMinEntryCents:10,crashRecoveryMaxEntryCents:89,scarletNeedleMinEntryCents:10,scarletNeedleMaxEntryCents:89,justiceArrowMinEntryCents:10,justiceArrowMaxEntryCents:89,lightningPlasmaMinEntryCents:10,lightningPlasmaMaxEntryCents:89,athenaExclamationMinEntryCents:10,athenaExclamationMaxEntryCents:89,waveMinFeederFavorableMoveCents:0,momentumMinRiseCents:2,momentumMinPullbackCents:1,momentumMaxPullbackCents:12,momentumMinTimeLeftMinutes:0,crashRecoveryMinCrashCents:15,crashRecoveryMinReboundCents:5,crashRecoveryMinReclaimRate:.33,crashRecoveryStableObservations:2,crashRecoveryUpwardTicks:2,justiceArrowMinCrashCents:15,justiceArrowMinReboundCents:5,justiceArrowMinUpwardTicks:2,athenaExclamationMinCrashCents:15,athenaExclamationMinReboundCents:5,athenaExclamationMinUpwardTicks:2,scarletNeedleMinCrashCents:15,scarletNeedleMinReboundCents:5,scarletNeedleMinUpwardTicks:2,waveMinCrashCents:15,waveMinReboundCents:5,waveMinUpwardTicks:2,lightningPlasmaMinCrashCents:15,lightningPlasmaMinReboundCents:5,lightningPlasmaMinUpwardTicks:2,momentumMinCrashCents:15,momentumMinReboundCents:5,momentumMinUpwardTicks:2,crashRecoveryMinUpwardTicks:2,...overrides});
 
@@ -130,7 +130,7 @@ test('MW certified third Crystal opens Athena, not Scarlet, and freezes Triple-C
 test('MW only a profitable durable Athena close creates a frozen 0-12 downstream grant',async()=>{
   const s=settings({athenaExclamationFollowUpAttacks:5}),mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:5,enabledSaintsAtEntry:[...downstream]};
   const parent={id:'athena-p',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-P',eventTicker:'MW-P',mode:s.mode,status:'closed',remainingCount:0,pnlCents:100,closeReason:'infinity_break',closedAtMs:Date.now(),entryPriceCents:55,exitPriceCents:60,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const h=engineHarness([parent],s);const out=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(out.status,'ACTIVE');assert.equal(out.grant.limit,5);assert.deepEqual(out.grant.eligibleSaints,downstream);assert.equal(h.e.megaWaveSaintWatches.size,6);
+  const h=engineHarness([parent],s);const out=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(out.status,'ACTIVE');assert.equal(out.grant.limit,5);assert.deepEqual(out.grant.eligibleSaints,downstream);assert.equal(h.e.megaWaveSaintWatches.size,5);
   const loss={...parent,id:'athena-loss',pnlCents:-10,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};h.db.rows.set(loss.id,structuredClone(loss));const stopped=await h.e.handleMegaWaveAthenaClose(loss);assert.equal(stopped.status,'CHAIN_STOPPED');
   const zeroS=settings({athenaExclamationFollowUpAttacks:0}),zeroMw={...mw,followUpAttacksAtEntry:0},zeroParent={...parent,id:'athena-zero',systemName:zeroS.systemName,ownerId:zeroS.ownerId,entryConfig:{megaWave:zeroMw,athenaExclamation:{megaWaveAuthorization:zeroMw}}};const z=engineHarness([zeroParent],zeroS);const zero=await z.e.handleMegaWaveAthenaClose(zeroParent);assert.equal(zero.status,'COMPLETE');assert.equal(zero.grant.limit,0);
 });
@@ -349,7 +349,7 @@ test('GE-R2 Galactic ON grants follow-up Saints when Athena opens; OFF still req
   assert.equal(opened.grant.source,'ATHENA_OPEN_GALACTIC');
   assert.equal(opened.grant.limit,6);
   assert.equal(opened.grant.systemName,sOn.systemName);
-  assert.equal(onH.e.megaWaveSaintWatches.size,6);
+  assert.equal(onH.e.megaWaveSaintWatches.size,5);
   const again=await onH.e.handleMegaWaveAthenaOpen(openParent);
   assert.equal(again.status,'ACTIVE');
   assert.equal(onH.db.episodes.size,1,'open grant is idempotent');
@@ -425,3 +425,60 @@ test('GE-R2 Athena loss after an open grant stops new Saints and does not invent
   assert.equal(h.e.megaWaveSaintWatches.size,0);
   assert.equal(h.db.episodes.size,1);
 });
+
+test('SE1 Starlight is removed from Mega Wave saints and keeps its own Infinity target',()=>{
+  assert.equal(MEGA_WAVE.downstreamSaints.includes('Crash Recovery Hunter'),false);
+  assert.equal(STARLIGHT_EXTINCTION.conceptName,'Crash Recovery Hunter');
+  assert.equal(isStarlightParentStopLoss('hard_stop_loss'),true);
+  assert.equal(isStarlightParentStopLoss('infinity_break'),false);
+  const s=settings({crashRecoveryInfinityNetPerOriginalContractCents:12,infinityBreakMinNetPerOriginalContractCents:5,scarletNeedleInfinityNetPerOriginalContractCents:8});
+  assert.equal(attackInfinityNetTargetCents(s,'Crash Recovery Hunter'),12);
+  assert.equal(attackInfinityNetTargetCents(s,'Athena Exclamation'),5);
+  const snap=entryConfigSnapshot(s,'Crash Recovery Hunter');
+  assert.equal(snap.strategicEntryAuthority,STARLIGHT_EXTINCTION.strategicEntryAuthority);
+  assert.equal(snap.model.profitTargetNetPerOriginalContractCents,12);
+});
+
+test('SE1 createHunter blocks regular Starlight entry without a stop-loss parent',async()=>{
+  const s=settings();
+  const db=memoryDb();
+  const strategy=new StrategyEngine({db,kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const missed=await strategy.createHunter('Crash Recovery Hunter',q('SE1-T',55,56),500,0,{legacyCompatibility:false});
+  assert.equal(missed,null);
+  assert.ok(db.audits.some((row)=>row.event==='starlight_regular_entry_blocked'));
+});
+
+test('SE1 same-cosmos stop-loss arms Starlight; own stop and Crystal Wall paper do not',async()=>{
+  const s=settings({crashRecoveryHunterEnabled:true});
+  const parent={id:'athena-stop',systemName:'LIBRA',ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'SE1-ARM',eventTicker:'SE1-ARM',mode:s.mode,status:'closed',remainingCount:0,pnlCents:-40,closeReason:'hard_stop_loss',entryPriceCents:58,exitPriceCents:40,openedAtMs:1,closedAtMs:2};
+  const h=engineHarness([parent],s);
+  h.e.settings=s;
+  const armed=await h.e.armStarlightStopLossWatch(parent);
+  assert.equal(armed.status,'ARMED',armed.reason);
+  assert.equal(h.e.starlightWatches.size,1);
+  const self={...parent,id:'starlight-stop',conceptName:'Crash Recovery Hunter'};
+  h.db.rows.set(self.id,structuredClone(self));
+  assert.equal((await h.e.armStarlightStopLossWatch(self)).status,'IGNORED');
+  const paper={...parent,id:'wall-stop',conceptName:'Recovery Hunter'};
+  assert.equal((await h.e.armStarlightStopLossWatch(paper)).reason,'parent_not_executable');
+});
+
+test('SE1 Starlight executes after parent stop when crash/rebound/ticks qualify and does not self-chain',async()=>{
+  const s=settings({crashRecoveryHunterEnabled:true,crashRecoveryMinCrashCents:15,crashRecoveryMinReboundCents:5,crashRecoveryMinUpwardTicks:2,crashRecoveryMinEntryCents:10,crashRecoveryMaxEntryCents:89,crashRecoveryInfinityNetPerOriginalContractCents:7});
+  const parent={id:'horn-stop',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Momentum Hunter',ticker:'SE1-FIRE',eventTicker:'SE1-FIRE',mode:s.mode,status:'closed',remainingCount:0,pnlCents:-55,closeReason:'hard_stop_loss',entryPriceCents:70,exitPriceCents:40,peakPriceCents:70,openedAtMs:1,closedAtMs:2};
+  const db=memoryDb([parent]);
+  const strategy=new StrategyEngine({db,kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  let creates=0;strategy.createHunter=async(concept,quote,stake, _sl, opts)=>{creates+=1;assert.equal(concept,'Crash Recovery Hunter');assert.equal(opts.starlightAuthorization.parentEntryId,parent.id);assert.equal(opts.starlightAuthorization.parentCloseReason,'hard_stop_loss');return{id:'starlight-1',conceptName:concept,ticker:quote.ticker,status:'open',sourceTradeId:parent.id,entryPriceCents:quote.yesAsk};};
+  let watch={parentEntryPriceCents:70,parentExitPriceCents:70,peakCents:70,lastBidCents:70,ticker:parent.ticker};
+  watch=megaWaveSaintSignalState('Crash Recovery Hunter',watch,q(parent.ticker,40,41),s).watch;
+  watch=megaWaveSaintSignalState('Crash Recovery Hunter',watch,q(parent.ticker,46,47),s).watch;
+  const rise=megaWaveSaintSignalState('Crash Recovery Hunter',watch,q(parent.ticker,48,49),s);
+  assert.equal(rise.qualified,true,rise.reason);
+  const authorization={version:STARLIGHT_EXTINCTION.version,policyRevision:STARLIGHT_EXTINCTION.policyRevision,grantId:`STARLIGHT:${parent.id}`,parentEntryId:parent.id,parentConcept:parent.conceptName,parentCloseReason:parent.closeReason,saintConcept:'Crash Recovery Hunter',ticker:parent.ticker,eventTicker:parent.eventTicker,systemName:s.systemName};
+  const opened=await strategy.executeStarlightExtinction(q(parent.ticker,48,49),parent,authorization,watch);
+  assert.ok(opened);assert.equal(creates,1);
+  db.rows.set('starlight-1',{id:'starlight-1',conceptName:'Crash Recovery Hunter',ticker:parent.ticker,sourceTradeId:parent.id,status:'open'});
+  const second=await strategy.executeStarlightExtinction(q(parent.ticker,46,47),parent,authorization,watch);
+  assert.equal(second,null);
+});
+
