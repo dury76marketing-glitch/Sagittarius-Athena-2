@@ -783,6 +783,27 @@ export function crystalWallStageGeometry(settings={}, stage=1){
   return {proofStage:n,minCrashCents:crash,minReboundCents:rebound,minUpwardTicks:ticks,sharedMinCrashCents:sharedCrash,sharedMinReboundCents:sharedRebound,sharedMinUpwardTicks:sharedTicks};
 }
 
+export function crystalWallProofIdentitiesValid(ids=[], crashes=[], required=1){
+  const need=Math.max(1,Math.floor(Number(required)||0));
+  const idList=(ids||[]).map((x)=>String(x||'')).filter(Boolean);
+  const crashList=(crashes||[]).map((x)=>String(x||'')).filter(Boolean);
+  if(idList.length!==need||new Set(idList).size!==need)return{ok:false,reason:'duplicate_crystal_wall_proof_identity'};
+  if(crashList.length!==need||new Set(crashList).size!==need)return{ok:false,reason:'duplicate_crystal_wall_proof_identity'};
+  return{ok:true,reason:'distinct_proofs'};
+}
+
+export function crystalWallProofsBelongToResetEpoch(rows=[], resetTimestampMs=0){
+  const reset=Math.max(0,Number(resetTimestampMs)||0);
+  if(!(reset>0))return{ok:true,reason:'no_reset_epoch'};
+  for(const row of rows||[]){
+    const closed=Math.max(0,Number(row?.closedAtMs||row?.finalProofClosedAtMs||0));
+    const opened=Math.max(0,Number(row?.openedAtMs||0));
+    if(closed>0&&closed<reset)return{ok:false,reason:'stale_pre_reset_authority'};
+    if(opened>0&&opened<reset&&!(closed>=reset))return{ok:false,reason:'stale_pre_reset_authority'};
+  }
+  return{ok:true,reason:'current_reset_epoch'};
+}
+
 export function crystalWallNextProofStage({completedConsecutive=0,required=3}={}){
   const need=Math.max(1,Math.min(5,Math.floor(Number(required)||3)));
   const done=Math.max(0,Math.floor(Number(completedConsecutive)||0));
@@ -1594,14 +1615,32 @@ export class StrategyEngine {
     return{eventTicker:event,activeEntries,maxEntriesPerTrade,eventCapBlocked:activeEntries>=maxEntriesPerTrade,latestHunterEntryMs,latestByConcept,hunterCooldownMinutes,cooldownScope,sharedCooldownBlocked,attackLatestEntryMs,attackCooldownBlocked,cooldownBlockedConcepts,cooldownBlocked};
   }
 
+  eventClockResetEpoch(){
+    return Math.max(0,Number(this.getSettings?.()?.resetTimestampMs||0));
+  }
+
   eventClockRecord(eventTicker){
     const event=String(eventTicker||'');
-    return event?this.eventClockByEvent.get(event)||null:null;
+    if(!event)return null;
+    const record=this.eventClockByEvent.get(event)||null;
+    if(!record)return null;
+    const epoch=this.eventClockResetEpoch();
+    if(epoch>0){
+      const recordEpoch=Math.max(0,Number(record.resetEpoch||record.resetTimestampMs||0));
+      if(recordEpoch!==epoch)return null;
+    }
+    return record;
   }
 
   leadingEventElapsedMinutes(eventTicker, now=Date.now()){
-    const projected=projectEventClock(this.eventClockRecord(eventTicker), now);
+    const projected=projectEventClock(this.eventClockRecord(eventTicker), now, {resetTimestampMs:this.eventClockResetEpoch()||null});
     return projected.ok?projected.elapsedMinutes:null;
+  }
+
+  invalidateEventClockExecutableAuthority(resetTimestampMs=this.eventClockResetEpoch()){
+    const dropped=Number(this.eventClockByEvent?.size||0);
+    this.eventClockByEvent?.clear?.();
+    return {dropped,resetTimestampMs:Math.max(0,Number(resetTimestampMs)||0),reason:'stale_pre_reset_game_clock_authority'};
   }
 
   resolveRealAttackElapsedMinutes(q, now=Date.now()){
@@ -1628,6 +1667,7 @@ export class StrategyEngine {
       nowMs:now,
       source:live!=null?'confirmed_clock_at_crystal_wall':fallback!=null?'quote_game_minutes_at_crystal_wall':'start_time_at_crystal_wall',
       prior:this.eventClockRecord(event),
+      resetTimestampMs:this.eventClockResetEpoch(),
     });
     if(!stamped.record)return stamped;
     this.eventClockByEvent.set(event, stamped.record);
@@ -1654,6 +1694,10 @@ export class StrategyEngine {
       const record=row?.athenaDecision?.eventClockAnchor;
       const event=String(record?.eventTicker||row?.eventTicker||'');
       if(!event||record?.leading!==true)continue;
+      if(record?.executableAuthority===false)continue;
+      const epoch=this.eventClockResetEpoch();
+      const recordEpoch=Math.max(0,Number(record.resetEpoch||record.resetTimestampMs||0));
+      if(epoch>0&&recordEpoch!==epoch)continue;
       if(!this.eventClockByEvent.has(event)){this.eventClockByEvent.set(event,record);restored+=1;}
     }
     return {restored};
@@ -2602,6 +2646,10 @@ export class StrategyEngine {
     }
     const ids=proofRows.map(x=>String(x?.entryId||'')),crashes=proofRows.map(x=>String(x?.crashEpisodeId||''));
     if(ids.length!==required||ids.some(x=>!x)||new Set(ids).size!==required||crashes.some(x=>!x)||new Set(crashes).size!==required)return null;
+    const identity=crystalWallProofIdentitiesValid(ids,crashes,required);if(!identity.ok)return null;
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    const epoch=crystalWallProofsBelongToResetEpoch([{openedAtMs:parentEntry?.openedAtMs,closedAtMs:parentEntry?.closedAtMs},...proofRows],resetAt);
+    if(!epoch.ok)return null;
     const finalProofEntryId=String(crystalProof?.finalProofEntryId||ids.at(-1)||'');
     if(finalProofEntryId!==String(parentEntry?.id||'')||String(crystalProof?.ticker||'')!==ticker||crystalProof?.independentCrashEpisodes!==true||crystalProof?.sameExactTicker!==true)return null;
     if(Array.isArray(crystalProof?.proofEntryIds)&&crystalProof.proofEntryIds.map(String).join('|')!==ids.join('|'))return null;
@@ -2610,7 +2658,8 @@ export class StrategyEngine {
     const durable=await Promise.all(ids.map(id=>this.db.entryById(id).catch(()=>null)));
     for(let i=0;i<durable.length;i++){
       const row=durable[i],cw=row?.entryConfig?.crystalWall||{},expected=proofRows[i];
-      if(String(row?.id||'')!==ids[i]||String(row?.ownerId||'')!==String(s.ownerId)||String(row?.mode||'')!==String(s.mode||'')||String(row?.conceptName||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentConcept)||String(row?.ticker||'')!==ticker||String(row?.status||'')!=='closed'||Number(row?.remainingCount||0)>1e-9||String(row?.closeReason||'')!==String(CRYSTAL_WALL.profitableCloseReason)||!(Number(row?.pnlCents||0)>0)||String(cw?.version||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentVersion)||String(cw?.policyRevision||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentPolicyRevision)||String(cw?.crashEpisodeId||'')!==crashes[i])return null;
+      if(String(row?.id||'')!==ids[i]||row?.archived===true||String(row?.ownerId||'')!==String(s.ownerId)||String(row?.mode||'')!==String(s.mode||'')||String(row?.conceptName||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentConcept)||String(row?.ticker||'')!==ticker||String(row?.status||'')!=='closed'||Number(row?.remainingCount||0)>1e-9||String(row?.closeReason||'')!==String(CRYSTAL_WALL.profitableCloseReason)||!(Number(row?.pnlCents||0)>0)||String(cw?.version||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentVersion)||String(cw?.policyRevision||'')!==String(ATHENA_EXCLAMATION_DOCTRINE.requiredParentPolicyRevision)||String(cw?.crashEpisodeId||'')!==crashes[i])return null;
+      if(resetAt>0&&(Number(row?.openedAtMs||0)<resetAt||Number(row?.closedAtMs||0)<resetAt))return null;
       if(Number(expected?.openedAtMs||0)>0&&Number(row?.openedAtMs||0)!==Number(expected.openedAtMs))return null;
       if(Number(expected?.closedAtMs||0)>0&&Number(row?.closedAtMs||0)!==Number(expected.closedAtMs))return null;
       if(i>0&&Number(durable[i-1]?.closedAtMs||0)>Number(row?.openedAtMs||0))return null;

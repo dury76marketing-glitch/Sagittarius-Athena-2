@@ -1135,6 +1135,16 @@ export class Database {
     await this.pool.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms) values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update set state=excluded.state,last_updated_ms=excluded.last_updated_ms`,[systemName,eventTicker,state||{},Date.now()]);
   }
   async pruneGameClockStates(systemName,beforeMs){await this.pool.query('delete from sag_game_clock_authority where system_name=$1 and last_updated_ms<$2',[systemName,Number(beforeMs)||0]);}
+  async clearGameClockAuthority(systemName){
+    const r=await this.pool.query('delete from sag_game_clock_authority where system_name=$1',[systemName]);
+    return r.rowCount||0;
+  }
+  async clearGameClockAuthorityFleet(systemNames=[]){
+    const names=[...new Set((systemNames||[]).map(String).filter(Boolean))];
+    if(!names.length)return 0;
+    const r=await this.pool.query('delete from sag_game_clock_authority where system_name = any($1::text[])',[names]);
+    return r.rowCount||0;
+  }
 
   async createRecoveryObservation(o){await this.pool.query(`insert into sag_recovery_observations_v2(id,system_name,original_entry_id,ticker,concept_name,sport,entry_price_cents,exit_price_cents,drop_cents,game_minutes_at_entry,exit_at_ms,prices,trough_cents,rebound_cents,recovered,recovery_at_ms,time_to_recover_ms,tracking_complete,settled,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do nothing`,[o.id,o.systemName,o.originalEntryId,o.ticker,o.conceptName,o.sport,o.entryPriceCents,o.exitPriceCents,o.dropCents,o.gameMinutesAtEntry||0,o.exitAtMs,JSON.stringify(o.prices||[]),o.troughCents,o.reboundCents||0,Boolean(o.recovered),o.recoveryAtMs||null,o.timeToRecoverMs||0,Boolean(o.trackingComplete),Boolean(o.settled),o.finalResult||null,o.updatedAtMs||Date.now()]);}
   async recoveryObservations(systemName,{complete=null,limit=5000}={}){const cond=complete===null?'':'and tracking_complete=$3';const args=complete===null?[systemName,limit]:[systemName,limit,complete];const r=await this.pool.query(`select * from sag_recovery_observations_v2 where system_name=$1 ${cond} order by updated_at_ms desc limit $2`,args);return r.rows;}

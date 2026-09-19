@@ -8,8 +8,13 @@ export function eventClockEpisodeId(eventTicker) {
   return `${EVENT_CLOCK_ANCHOR.episodePrefix}${String(eventTicker || '')}`;
 }
 
-export function projectEventClock(record, nowMs = Date.now()) {
+export function projectEventClock(record, nowMs = Date.now(), { resetTimestampMs = null } = {}) {
   if (!record || record.leading !== true) return { ok: false, reason: 'no_event_clock', elapsedMinutes: null };
+  const expected = resetTimestampMs == null ? null : Math.max(0, Number(resetTimestampMs) || 0);
+  if (expected != null && expected > 0) {
+    const recordEpoch = Math.max(0, Number(record.resetEpoch || record.resetTimestampMs || 0));
+    if (recordEpoch !== expected) return { ok: false, reason: 'stale_pre_reset_game_clock_authority', elapsedMinutes: null, record, historical: true, executableAuthority: false };
+  }
   if (String(record.phase || '') === 'FINAL') {
     return { ok: false, reason: 'game_final', elapsedMinutes: Number(record.anchoredElapsedMinutes || 0), record };
   }
@@ -38,16 +43,20 @@ export function stampEventClockRecord({
   source = 'crystal_wall_open',
   phase = 'CONFIRMED',
   prior = null,
+  resetTimestampMs = 0,
 } = {}) {
   const event = String(eventTicker || '');
   const minutes = Number(elapsedMinutes);
+  const epoch = Math.max(0, Number(resetTimestampMs) || 0);
   if (!event) return { ok: false, reason: 'missing_event_ticker' };
   if (!Number.isFinite(minutes) || minutes < 0) return { ok: false, reason: 'invalid_elapsed_minutes' };
-  if (prior?.leading === true && String(prior.phase || '') === 'FINAL') {
+  const priorEpoch = Math.max(0, Number(prior?.resetEpoch || prior?.resetTimestampMs || 0));
+  const priorUsable = prior?.leading === true && (epoch <= 0 || priorEpoch === epoch);
+  if (priorUsable && String(prior.phase || '') === 'FINAL') {
     return { ok: false, reason: 'game_final', record: prior };
   }
-  if (prior?.leading === true && String(phase) !== 'FINAL') {
-    return { ok: true, reason: 'already_anchored', record: prior, projected: projectEventClock(prior, nowMs) };
+  if (priorUsable && String(phase) !== 'FINAL') {
+    return { ok: true, reason: 'already_anchored', record: prior, projected: projectEventClock(prior, nowMs, { resetTimestampMs: epoch || null }) };
   }
   const record = {
     version: EVENT_CLOCK_ANCHOR.version,
@@ -60,6 +69,9 @@ export function stampEventClockRecord({
     source: String(source || 'crystal_wall_open'),
     phase: String(phase || 'CONFIRMED'),
     leading: true,
+    resetEpoch: epoch,
+    resetTimestampMs: epoch,
+    executableAuthority: true,
   };
   return { ok: String(phase) !== 'FINAL', reason: String(phase) === 'FINAL' ? 'game_final' : 'anchored', record };
 }

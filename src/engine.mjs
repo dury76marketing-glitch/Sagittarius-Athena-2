@@ -6,7 +6,7 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
+import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled } from './strategy.mjs';
 import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
@@ -917,6 +917,8 @@ export class SagittariusEngine {
       ),
     );
     if(!parentId||!ticker)return{ok:false,status:'BLOCKED',reason:'third_proof_parent_identity_missing'};
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    if(resetAt>0&&(Number(parentEntry?.closedAtMs||0)<resetAt||Number(parentEntry?.openedAtMs||0)<resetAt||parentEntry?.archived===true))return{ok:false,status:'BLOCKED',reason:'stale_pre_reset_authority'};
     if(String(parentCrystalWall?.policyRevision||'')!==String(ATHENA_EXCLAMATION.requiredParentPolicyRevision))return{ok:false,status:'IGNORED',reason:'parent_crystal_wall_policy_not_third_proof_capable'};
     let rows=[],athenaRows=[],authorizationEpisodes=[];
     try{
@@ -940,6 +942,9 @@ export class SagittariusEngine {
       if(String(row?.entryConfig?.virtualInfinity?.version||'')!==String(INFINITY_BREAK.version))return false;
       const opened=Math.max(0,Number(row?.openedAtMs||0)),closed=Math.max(0,Number(row?.closedAtMs||0));
       if(!(opened>0&&closed>=opened))return false;
+      const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+      if(resetAt>0&&(opened<resetAt||closed<resetAt))return false;
+      if(row?.archived===true)return false;
       if(String(row?.id||'')!==parentId&&(opened>currentOpenedAt||closed>currentClosedAt))return false;
       return true;
     };
@@ -1032,7 +1037,12 @@ export class SagittariusEngine {
       proof[prefix+'EntryId']=row.entryId;proof[prefix+'CrashEpisodeId']=row.crashEpisodeId;proof[prefix+'OpenedAtMs']=row.openedAtMs;proof[prefix+'ClosedAtMs']=row.closedAtMs;proof[prefix+'ExitPriceCents']=row.exitPriceCents;proof[prefix+'RealizedPnlCents']=row.realizedPnlCents;
     }
     if(proofStage<required)return{ok:false,status:'ARMED',reason:`mega_wave_crystal_profit_armed_${proofStage}_of_${required}`,proof};
+    const identity=crystalWallProofIdentitiesValid(ids,crashes,required);
+    if(!identity.ok)return{ok:false,status:'BLOCKED',reason:identity.reason};
+    const epoch=crystalWallProofsBelongToResetEpoch(groupRows,resetAt);
+    if(!epoch.ok)return{ok:false,status:'BLOCKED',reason:epoch.reason};
     if(String(groupRows.at(-1)?.id||'')!==parentId)return{ok:false,status:'BLOCKED',reason:'third_proof_parent_mismatch'};
+    proof.resetTimestampMs=resetAt;proof.resetEpoch=resetAt;proof.currentEpochMatch=true;proof.distinctProofIds=true;proof.distinctCrashEpisodes=true;
     return{ok:true,status:'CERTIFIED',reason:`mega_wave_${required}_crystal_profits_certified_athena`,firstProof:groupRows[0]||null,secondProof:groupRows[1]||null,thirdProof:groupRows[2]||null,finalProof:groupRows.at(-1)||null,proof};
   }
 
@@ -1057,6 +1067,9 @@ export class SagittariusEngine {
       if(String(row?.entryConfig?.virtualInfinity?.version||'')!==String(INFINITY_BREAK.version))return false;
       const opened=Math.max(0,Number(row?.openedAtMs||0)),closed=Math.max(0,Number(row?.closedAtMs||0));
       if(!(opened>0&&closed>=opened))return false;
+      const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+      if(resetAt>0&&(opened<resetAt||closed<resetAt))return false;
+      if(row?.archived===true)return false;
       if(String(row?.id||'')!==parentId&&(opened>currentOpenedAt||closed>currentClosedAt))return false;
       return true;
     };
@@ -1104,6 +1117,8 @@ export class SagittariusEngine {
     if(parentEntry?.status!=='closed'||Number(parentEntry?.remainingCount||0)>1e-9)return{status:'IGNORED',reason:'parent_not_fully_closed'};
     if(String(parentEntry?.closeReason||'')!==String(CRYSTAL_WALL.profitableCloseReason)||!(Number(parentEntry?.pnlCents||0)>0))return{status:'IGNORED',reason:'not_profitable_crystal_wall'};
     if(s.athenaExclamationEnabled!==true)return{status:'IGNORED',reason:'athena_exclamation_disabled'};
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    if(resetAt>0&&(Number(parentEntry?.closedAtMs||0)<resetAt||Number(parentEntry?.openedAtMs||0)<resetAt||parentEntry?.archived===true))return{status:'BLOCKED',reason:'stale_pre_reset_authority'};
     if(String(parentEntry?.ownerId||'')!==String(s.ownerId)||String(parentEntry?.mode||'')!==String(s.mode||''))return{status:'BLOCKED',reason:'parent_identity_or_mode_mismatch'};
     const marketFamilyExclusion=executionMarketFamilyExclusion(ticker,this.settings);
     if(marketFamilyExclusion.blocked){
@@ -1136,7 +1151,7 @@ export class SagittariusEngine {
       return{status:'BLOCKED',reason:'crystal_proof_authorization_persistence_failed'};
     }
     const seedExit=Math.max(1,Number(parentEntry.exitPriceCents||parentEntry.entryPriceCents||0));
-    const watch={authorizationId,ticker,eventTicker:String(parentEntry.eventTicker||ticker),parentEntryId:parentId,parentEntry:structuredClone(parentEntry),crystalProof:structuredClone(proof),parentEntryPriceCents:Number(parentEntry.entryPriceCents||0),parentExitPriceCents:seedExit,peakCents:seedExit,troughCents:seedExit,lastBidCents:seedExit,upwardTicks:0,crashArmed:false,startedAtMs:Date.now()};
+    const watch={authorizationId,ticker,eventTicker:String(parentEntry.eventTicker||ticker),parentEntryId:parentId,parentEntry:structuredClone(parentEntry),crystalProof:structuredClone(proof),resetTimestampMs:Number(s.resetTimestampMs||0),resetEpoch:Number(s.resetTimestampMs||0),parentEntryPriceCents:Number(parentEntry.entryPriceCents||0),parentExitPriceCents:seedExit,peakCents:seedExit,troughCents:seedExit,lastBidCents:seedExit,upwardTicks:0,crashArmed:false,startedAtMs:Date.now()};
     if(!(this.athenaExclamationConfirmationWatches instanceof Map))this.athenaExclamationConfirmationWatches=new Map();
     this.athenaExclamationConfirmationWatches.set(authorizationId,watch);
     const observing={...baseEpisode,athenaDecision:{decision:'OBSERVING',reason:'waiting_own_crash_rebound_ticks',megaWave:{version:MEGA_WAVE.version,crystalProof:proof,thirdProof:proof},athenaExclamationConfirmation:watch},trackingComplete:false,updatedAtMs:Date.now()};
@@ -1176,6 +1191,12 @@ export class SagittariusEngine {
       this.athenaExclamationConfirmationWatches.delete(id);
       return{status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode};
     }
+    const resetAtEarly=Math.max(0,Number(s.resetTimestampMs||0));
+    const watchEpochEarly=Math.max(0,Number(watch.resetEpoch||watch.resetTimestampMs||watch.crystalProof?.resetEpoch||watch.crystalProof?.resetTimestampMs||0));
+    if(resetAtEarly>0&&((watchEpochEarly>0&&watchEpochEarly!==resetAtEarly)||crystalWallProofsBelongToResetEpoch([watch.parentEntry,{closedAtMs:watch.parentEntry?.closedAtMs,...(watch.crystalProof||{})},...(Array.isArray(watch.crystalProof?.proofs)?watch.crystalProof.proofs:[])],resetAtEarly).ok===false)){
+      this.athenaExclamationConfirmationWatches.delete(id);
+      return{status:'BLOCKED',reason:'stale_pre_reset_authority'};
+    }
     const q=this.market?.getQuote?.(ticker);if(!q)return{status:'BLOCKED',reason:'fresh_quote_missing'};
     const fresh=megaWaveSaintSignalState('Athena Exclamation',watch,q,s,Date.now());
     this.athenaExclamationConfirmationWatches.set(id,{...watch,...fresh.watch});
@@ -1183,6 +1204,17 @@ export class SagittariusEngine {
     const parentEntry=watch.parentEntry||await this.db?.entryById?.(watch.parentEntryId).catch(()=>null);
     const proof=watch.crystalProof;
     if(!parentEntry||!proof){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:'confirmation_lineage_missing'};}
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    const watchEpoch=Math.max(0,Number(watch.resetEpoch||watch.resetTimestampMs||proof.resetEpoch||proof.resetTimestampMs||0));
+    if(resetAt>0&&watchEpoch>0&&watchEpoch!==resetAt){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:'stale_pre_reset_authority'};}
+    const proofRows=Array.isArray(proof.proofs)?proof.proofs:(Array.isArray(proof.proofEntryIds)?proof.proofEntryIds.map((entryId,i)=>({entryId,crashEpisodeId:proof.proofCrashEpisodeIds?.[i],closedAtMs:proof.proofs?.[i]?.closedAtMs||proof[`${['first','second','third','fourth','fifth'][i]}ProofClosedAtMs`]})):[]);
+    const epoch=crystalWallProofsBelongToResetEpoch([{...parentEntry},...proofRows],resetAt);
+    if(!epoch.ok){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:epoch.reason};}
+    const required=Number(proof.requiredProofCount||proof.requiredConsecutiveProfitableShadowProofs||crystalWallRequiredProofCount(s));
+    const ids=Array.isArray(proof.proofEntryIds)?proof.proofEntryIds:proofRows.map((r)=>r.entryId);
+    const crashes=Array.isArray(proof.proofCrashEpisodeIds)?proof.proofCrashEpisodeIds:proofRows.map((r)=>r.crashEpisodeId);
+    const identity=crystalWallProofIdentitiesValid(ids,crashes,required);
+    if(!identity.ok){this.athenaExclamationConfirmationWatches.delete(id);return{status:'BLOCKED',reason:identity.reason};}
     const cosmosId=this.pickCosmosForRealHunter(ticker);
     const opened=await this.withCosmosSettings(cosmosId,()=>this.strategy.executeMegaWaveAthenaContinuation(q,parentEntry,{authorizationId:id,thirdProof:proof,authorizedAtMs:Date.now()}));
     if(opened){
@@ -2424,6 +2456,7 @@ export class SagittariusEngine {
     await this.recoverStarlightStopLossWatches();
     await this.hydrateAnotherDimension();
     await this.hydrateCrystalWallShadow();
+    if(this.gameClock)this.gameClock.resetTimestampMs=Math.max(0,Number(this.settings.resetTimestampMs||0));
     await this.strategy.hydrateEventClockAnchors().catch(()=>({restored:0}));
     await this.hydrateCrystalWallV3();
     await this.hydrateCrystalWallProofStages();
@@ -3874,6 +3907,26 @@ export class SagittariusEngine {
     return this.settings;
   }
 
+  invalidateSimulationExecutableAuthority(reason='simulation_reset', resetTimestampMs=Number(this.settings?.resetTimestampMs||0)){
+    const stats=this.megaWaveRuntime();
+    const droppedWatches=this.athenaExclamationConfirmationWatches?.size||0;
+    this.athenaExclamationConfirmationWatches?.clear?.();
+    this.megaWaveAthenaInFlight?.clear?.();
+    this.megaWaveGrants?.clear?.();
+    this.megaWaveSaintWatches?.clear?.();
+    this.starlightWatches?.clear?.();
+    this.crystalWallWatches?.clear?.();
+    this.crystalWallProofStages?.clear?.();
+    this.crystalWallConsumedEpisodeIds?.clear?.();
+    this.justiceArrowWatches?.clear?.();
+    this.lightningPlasmaWatches?.clear?.();
+    this.entryAdmissionProbeAt?.clear?.();
+    const clock=this.strategy?.invalidateEventClockExecutableAuthority?.(resetTimestampMs)||{dropped:0};
+    const gameClock=this.gameClock?.invalidateSimulationEpoch?.(resetTimestampMs)||null;
+    stats.lastEvent={status:'RESET_EPOCH_INVALIDATED',atMs:Date.now(),reason,droppedAthenaWatches:droppedWatches,droppedEventClocks:Number(clock.dropped||0),gameClockGeneration:gameClock?.requestGeneration||null,resetTimestampMs:Number(resetTimestampMs||0)};
+    return {droppedAthenaWatches:droppedWatches,droppedEventClocks:Number(clock.dropped||0),reason,resetTimestampMs:Number(resetTimestampMs||0)};
+  }
+
   async resetSimulation() {
     if (this.settings.mode !== 'SIMULATION') throw new Error('Simulation reset is only allowed in SIMULATION mode');
     if(this.simulationResetPromise)return this.simulationResetPromise;
@@ -3898,9 +3951,15 @@ export class SagittariusEngine {
         this.activeCosmosByTicker?.clear?.();
         this.excaliburGrants?.clear?.();
         this.cosmosBooks = emptyCosmosBooks();
-        this.refreshCrashPriorityTickers();
         const resetAt=Date.now();
         this.settings = { ...this.settings, resetTimestampMs: resetAt };
+        this.invalidateSimulationExecutableAuthority('simulation_reset', resetAt);
+        if(typeof this.db.clearGameClockAuthorityFleet==='function'){
+          await this.db.clearGameClockAuthorityFleet([this.settings.systemName,...COSMOS_IDS]).catch(()=>0);
+        }else if(typeof this.db.clearGameClockAuthority==='function'){
+          await this.db.clearGameClockAuthority(this.settings.systemName).catch(()=>0);
+        }
+        this.refreshCrashPriorityTickers();
         await this.db.saveSettings(this.settings);
         if(typeof this.db.loadCosmosSettings==='function' && typeof this.db.saveCosmosSettings==='function'){
           for(const id of COSMOS_IDS){
@@ -4089,6 +4148,13 @@ export class SagittariusEngine {
     // the lighter milestone + live-data path. Endpoint calls are cached and
     // bounded in KalshiClient, so optional enrichment cannot dominate a scan.
     const gameStatsEventTickers = new Set(selected.filter((q) => entered.has(q.ticker)).map((q) => q.eventTicker || q.ticker));
+    const resetAt=Math.max(0,Number(this.settings.resetTimestampMs||0));
+    if(resetAt>0){
+      for(const [event,state] of [...priorClockStates.entries()]){
+        const epoch=Math.max(0,Number(state?.resetEpoch||state?.resetTimestampMs||0));
+        if(epoch!==resetAt)priorClockStates.delete(event);
+      }
+    }
     const resolvedClockStates = await this.gameClock.resolveBatch(selected, priorClockStates, now, {
       gameStatsEventTickers,
       allowObservedActivityClock: true,
@@ -4174,7 +4240,14 @@ export class SagittariusEngine {
     const priorMap = typeof this.db.gameClockStates === 'function'
       ? await this.db.gameClockStates(this.settings.systemName, [eventTicker])
       : new Map();
-    const prior = priorMap.get(eventTicker) || candidate?.gameClockState || null;
+    const resetAt=Math.max(0,Number(this.settings.resetTimestampMs||0));
+    const usablePrior=(state)=>{
+      if(!state||typeof state!=='object')return null;
+      if(!(resetAt>0))return state;
+      const epoch=Math.max(0,Number(state.resetEpoch||state.resetTimestampMs||0));
+      return epoch===resetAt?state:null;
+    };
+    const prior = usablePrior(priorMap.get(eventTicker) || candidate?.gameClockState || null);
     const state = await this.gameClock.resolveEvent({
       eventTicker,
       quotes: siblings,
@@ -5396,7 +5469,7 @@ export class SagittariusEngine {
         feederUnrealizedCents: p.feederUnrealizedCents,
         simulationCashCents: p.simulationCashCents,
       },
-      conceptStats, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-R1-CRYSTAL-WALL-LEADING-EVENT-CLOCK',anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.([...(p.open||[]),...(p.closed||[])])||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
+      conceptStats, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-R1-CRYSTAL-WALL-LEADING-EVENT-CLOCK',resetTimestampMs:Number(this.settings.resetTimestampMs||0),gameClockEpoch:Number(this.gameClock?.resetTimestampMs||this.settings.resetTimestampMs||0),gameClockGeneration:Number(this.gameClock?.requestGeneration||0),priorEpochClockInvalidated:true,anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());const epoch=Number(row.resetEpoch||row.resetTimestampMs||0);return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase,resetEpoch:epoch,eventClockEpoch:epoch,clockConfirmed:row.leading===true,executableAuthority:epoch===Number(this.settings.resetTimestampMs||0)};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.([...(p.open||[]),...(p.closed||[])])||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
       trackedMarkets: trackers, trackerSummary, patterns, recoveryTracking, sports,
       crashLearning, crashEpisodes, profitLearning, stopGuardRecoveryLearning, athena, atomicThunderBolt, infinityBreak, legacyAtomicThunder:{ version:ATOMIC_THUNDER.version, policyRevision:ATOMIC_THUNDER.policyRevision, legacyCompatibilityOnly:true, ...atomicThunder }, goldenEye:this.goldenEye?.summary?.() || {version:GOLDEN_EYE.version,ready:false,enabled:false},
       liveMarkets: scanned,

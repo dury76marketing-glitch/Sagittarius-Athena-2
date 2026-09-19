@@ -417,6 +417,39 @@ export class GameClockAuthority {
     this.statsCache = new Map();
     this.livePromises = new Map();
     this.statsPromises = new Map();
+    this.requestGeneration = 0;
+    this.resetTimestampMs = 0;
+  }
+
+  invalidateSimulationEpoch(resetTimestampMs = 0) {
+    this.requestGeneration = Math.max(0, Number(this.requestGeneration) || 0) + 1;
+    this.resetTimestampMs = Math.max(0, Number(resetTimestampMs) || 0);
+    for (const cache of [this.milestoneCache, this.seriesMilestoneCache, this.liveCache, this.statsCache]) cache.clear();
+    for (const inflight of [this.milestonePromises, this.seriesMilestonePromises, this.livePromises, this.statsPromises]) inflight.clear();
+    return { requestGeneration: this.requestGeneration, resetTimestampMs: this.resetTimestampMs, reason: 'stale_pre_reset_game_clock_authority' };
+  }
+
+  sealClockState(state, requestGeneration) {
+    const current = Number(this.requestGeneration) || 0;
+    const epoch = Math.max(0, Number(this.resetTimestampMs) || 0);
+    const requested = Number(requestGeneration);
+    if (Number.isFinite(requested) && requested !== current) {
+      return {
+        ...(state && typeof state === 'object' ? state : {}),
+        phase: 'UNKNOWN',
+        confirmed: false,
+        entryAuthorized: false,
+        discarded: true,
+        reason: 'stale_pre_reset_game_clock_authority',
+        resetEpoch: epoch,
+        resetTimestampMs: epoch,
+        requestGeneration: requested,
+        currentGeneration: current,
+        executableAuthority: false,
+      };
+    }
+    if (!state || typeof state !== 'object') return state;
+    return { ...state, resetEpoch: epoch, resetTimestampMs: epoch, requestGeneration: current, executableAuthority: true };
   }
 
   setBoundedCache(cache, key, record) {
@@ -447,6 +480,7 @@ export class GameClockAuthority {
   }
 
   async cached(cache, key, ttlMs, fn, { forceFresh = false, inFlight = null } = {}) {
+    const requestGeneration = Number(this.requestGeneration) || 0;
     const checkAtMs = Number(this.now());
     const hit = cache.get(key);
     if (!forceFresh && hit && checkAtMs - hit.observedAtMs <= ttlMs) {
@@ -459,6 +493,9 @@ export class GameClockAuthority {
       try { value = await fn(); } catch (e) { error = cleanString(e?.message || e, 240); }
       const observedAtMs = Number(this.now());
       const record = { value, error, observedAtMs, fromCache: false };
+      if ((Number(this.requestGeneration) || 0) !== requestGeneration) {
+        return { ...record, discarded: true, reason: 'stale_pre_reset_game_clock_authority', value: null };
+      }
       this.setBoundedCache(cache, key, record);
       return record;
     })().finally(() => inFlight?.delete(key));
@@ -468,6 +505,7 @@ export class GameClockAuthority {
 
   async seriesMilestonesForSeries(seriesTicker, { forceFresh = false } = {}) {
     const series = String(seriesTicker || '');
+    const requestGeneration = Number(this.requestGeneration) || 0;
     if (!series || typeof this.kalshi?.getMilestonesForSeries !== 'function') return { rows: [], error: null, observedAtMs: Number(this.now()) };
     const now = Number(this.now());
     const hit = this.seriesMilestoneCache.get(series);
@@ -480,6 +518,7 @@ export class GameClockAuthority {
       try { rows = await this.kalshi.getMilestonesForSeries(series) || []; }
       catch (e) { error = cleanString(e?.message || e, 240); }
       const record = { rows, error, observedAtMs: Number(this.now()) };
+      if ((Number(this.requestGeneration) || 0) !== requestGeneration) return { ...record, rows: [], discarded: true, reason: 'stale_pre_reset_game_clock_authority' };
       this.setBoundedCache(this.seriesMilestoneCache, series, record);
       return record;
     })().finally(() => this.seriesMilestonePromises.delete(series));
@@ -491,6 +530,7 @@ export class GameClockAuthority {
     const event = String(eventTicker || '');
     const series = String(seriesTicker || '');
     const cacheKey = `${event}|${series}`;
+    const requestGeneration = Number(this.requestGeneration) || 0;
     const now = Number(this.now());
     const hit = this.milestoneCache.get(cacheKey);
     if (hit) {
@@ -518,6 +558,7 @@ export class GameClockAuthority {
         const seriesSelection = selectEventMilestone(seriesRows, event);
         if (seriesSelection.milestone) {
           const value = { ...seriesSelection, discoverySource:'series_events_with_milestones', directReason:null, directError:null, seriesError };
+          if ((Number(this.requestGeneration) || 0) !== requestGeneration) return { ...value, discarded: true, reason: 'stale_pre_reset_game_clock_authority', milestone: null };
           this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
           return value;
         }
@@ -527,6 +568,7 @@ export class GameClockAuthority {
         // lookup after the negative-cache interval.
         if (!forceFresh && !seriesError) {
           const value = { ...seriesSelection, discoverySource:'series_events_with_milestones', directReason:null, directError:null, seriesError:null };
+          if ((Number(this.requestGeneration) || 0) !== requestGeneration) return { ...value, discarded: true, reason: 'stale_pre_reset_game_clock_authority', milestone: null };
           this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
           return value;
         }
@@ -539,6 +581,7 @@ export class GameClockAuthority {
       const directSelection = selectEventMilestone(direct, event);
       if (directSelection.milestone) {
         const value = { ...directSelection, discoverySource:'related_event_ticker', directError, seriesError };
+        if ((Number(this.requestGeneration) || 0) !== requestGeneration) return { ...value, discarded: true, reason: 'stale_pre_reset_game_clock_authority', milestone: null };
         this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
         return value;
       }
@@ -565,6 +608,7 @@ export class GameClockAuthority {
       if (!combinedSelection.milestone && directError && (!viaSeries.length || seriesError)) {
         value = { ...value, reason:'milestone_lookup_failed', error:`related=${directError}${seriesError ? `; series=${seriesError}` : ''}` };
       }
+      if ((Number(this.requestGeneration) || 0) !== requestGeneration) return { ...value, discarded: true, reason: 'stale_pre_reset_game_clock_authority', milestone: null };
       this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
       return value;
     })().finally(() => this.milestonePromises.delete(cacheKey));
@@ -592,7 +636,19 @@ export class GameClockAuthority {
     );
   }
 
-  async resolveEvent({
+  async resolveEvent(opts = {}) {
+    const requestGeneration = Number(this.requestGeneration) || 0;
+    const epoch = Math.max(0, Number(this.resetTimestampMs) || 0);
+    let priorState = opts.priorState;
+    if (epoch > 0) {
+      const priorEpoch = Math.max(0, Number(priorState?.resetEpoch || priorState?.resetTimestampMs || 0));
+      if (priorEpoch !== epoch) priorState = null;
+    }
+    const state = await this._resolveEventUnsealed({ ...opts, priorState });
+    return this.sealClockState(state, requestGeneration);
+  }
+
+  async _resolveEventUnsealed({
     eventTicker,
     quotes = [],
     priorState = null,

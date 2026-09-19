@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, snapshotEventClockMinutes } from '../src/strategy.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes } from '../src/strategy.mjs';
 import { SagittariusEngine } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
-import { stampEventClockRecord } from '../src/eventClockAnchor.mjs';
+import { stampEventClockRecord, projectEventClock } from '../src/eventClockAnchor.mjs';
+import { GameClockAuthority } from '../src/gameClock.mjs';
 
 const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma'];
 const q=(ticker='MW-T',bid=55,ask=56)=>({ticker,eventTicker:ticker,title:ticker,sport:'Tennis',yesBid:bid,yesAsk:ask,volume24h:10000,status:'active',result:'',updatedAtMs:Date.now(),closeTimeMs:Date.now()+60*60_000});
@@ -562,5 +563,144 @@ test('CW ladder engine advances stage on profit and resets on loss',()=>{
   assert.equal(afterLoss.completedProofCount,0);
   assert.equal(afterLoss.currentProofStage,1);
 });
+
+test('reset epoch rejects pre-reset Crystal Wall proofs and proofA:proofA two-proof certificates',async()=>{
+  const reset=1_000_000;
+  const s=settings({crystalWallWinsToTriggerAthena:2,resetTimestampMs:reset});
+  const pre=crystalProof('a477bdf3-cf88-41b1-8ca6-26967c364447','ep-pre',reset-20_000,reset-10_000);
+  const h=engineHarness([pre],s);
+  const stale=await h.e.megaWaveThirdProofDecision(pre);
+  assert.equal(stale.status,'BLOCKED');
+  assert.equal(stale.reason,'stale_pre_reset_authority');
+  const identities=crystalWallProofIdentitiesValid(['a477','a477'],['ep1','ep1'],2);
+  assert.equal(identities.ok,false);
+  assert.equal(identities.reason,'duplicate_crystal_wall_proof_identity');
+  const epoch=crystalWallProofsBelongToResetEpoch([{closedAtMs:reset-1}],reset);
+  assert.equal(epoch.ok,false);
+  assert.equal(epoch.reason,'stale_pre_reset_authority');
+});
+
+test('reset invalidates armed Athena confirmation watches and post-reset proofs can certify',async()=>{
+  const s=settings({crystalWallWinsToTriggerAthena:2,resetTimestampMs:0});
+  const now=2_000_000;
+  const p1=crystalProof('cw-a','ep-a',now-40_000,now-30_000);
+  const p2=crystalProof('cw-b','ep-b',now-20_000,now-10_000);
+  const h=engineHarness([p1,p2],s);
+  h.e.megaWaveRuntime();
+  h.e.crystalWallProofStages=new Map();
+  h.e.athenaExclamationConfirmationWatches.set('MEGA-WAVE:ATHENA:cw-a:cw-a',{authorizationId:'MEGA-WAVE:ATHENA:cw-a:cw-a',ticker:'MW-T',parentEntryId:'cw-a',crystalProof:{requiredProofCount:1,proofEntryIds:['cw-a'],proofCrashEpisodeIds:['ep-a']},resetEpoch:0});
+  h.e.crystalWallProofStages.set('SAGITTARIUS|MW-T',{completedProofCount:1,currentProofStage:2});
+  const dropped=h.e.invalidateSimulationExecutableAuthority('simulation_reset');
+  assert.equal(dropped.droppedAthenaWatches,1);
+  assert.equal(h.e.athenaExclamationConfirmationWatches.size,0);
+  assert.equal(h.e.crystalWallProofStages.size,0);
+  h.e.settings={...s,resetTimestampMs:now-5_000};
+  const post1=crystalProof('cw-c','ep-c',now-4_000,now-3_000);
+  const post2=crystalProof('cw-d','ep-d',now-2_000,now-1_000);
+  const h2=engineHarness([post1,post2],h.e.settings);
+  const armed=await h2.e.megaWaveThirdProofDecision(post1);
+  assert.equal(armed.status,'ARMED');
+  const certified=await h2.e.megaWaveThirdProofDecision(post2);
+  assert.equal(certified.status,'CERTIFIED');
+  assert.equal(certified.proof.distinctProofIds,true);
+  assert.deepEqual(certified.proof.proofEntryIds,['cw-c','cw-d']);
+});
+
+test('attemptAthenaExclamationConfirmation drops a pre-reset watch instead of firing',async()=>{
+  const reset=3_000_000;
+  const s=settings({crystalWallWinsToTriggerAthena:2,resetTimestampMs:reset,athenaExclamationEnabled:true});
+  const parent=crystalProof('e3542c5c-9ad2-4428-8fd4-5396e7892608','ep-ajax',reset-20_000,reset-10_000,'AJA');
+  const h=engineHarness([parent],s);
+  h.e.megaWaveRuntime();
+  h.e.market={getQuote:()=>q('AJA',55,56)};
+  h.e.athenaExclamationConfirmationWatches.set('MEGA-WAVE:ATHENA:e354:e354',{
+    authorizationId:'MEGA-WAVE:ATHENA:e354:e354',ticker:'AJA',parentEntryId:parent.id,parentEntry:parent,
+    crystalProof:{requiredProofCount:1,proofEntryIds:[parent.id],proofCrashEpisodeIds:['ep-ajax'],proofs:[{entryId:parent.id,crashEpisodeId:'ep-ajax',closedAtMs:parent.closedAtMs}]},
+    resetEpoch:reset-50_000,lastBidCents:64,peakCents:64,troughCents:64,crashArmed:true,
+  });
+  const out=await h.e.attemptAthenaExclamationConfirmation('MEGA-WAVE:ATHENA:e354:e354');
+  assert.equal(out.status,'BLOCKED');
+  assert.equal(out.reason,'stale_pre_reset_authority');
+  assert.equal(h.e.athenaExclamationConfirmationWatches.size,0);
+});
+
+test('reset Simulation invalidates Game Clock anchors without rewinding real minute 57 to zero',async()=>{
+  const epoch1=1_000_000,epoch2=2_000_000;
+  const first=stampEventClockRecord({eventTicker:'EV-57',ticker:'EV-57',elapsedMinutes:40,nowMs:epoch1,resetTimestampMs:epoch1});
+  assert.equal(first.ok,true);assert.equal(first.record.anchoredElapsedMinutes,40);
+  const inherited=projectEventClock(first.record,epoch1+17*60000,{resetTimestampMs:epoch1});
+  assert.equal(inherited.ok,true);assert.ok(Math.abs(inherited.elapsedMinutes-57)<1e-6);
+  const stale=projectEventClock(first.record,epoch2,{resetTimestampMs:epoch2});
+  assert.equal(stale.ok,false);assert.equal(stale.reason,'stale_pre_reset_game_clock_authority');
+  const fresh=stampEventClockRecord({eventTicker:'EV-57',ticker:'EV-57',elapsedMinutes:57,nowMs:epoch2,resetTimestampMs:epoch2,prior:first.record});
+  assert.equal(fresh.ok,true);assert.equal(fresh.reason,'anchored');
+  assert.equal(fresh.record.anchoredElapsedMinutes,57);
+  assert.equal(fresh.record.resetEpoch,epoch2);
+});
+
+test('post-reset Proof 1 and Proof 2 share one new Event Clock and Proof 2 cannot rewrite it',async()=>{
+  const reset=4_000_000;
+  const s=settings({resetTimestampMs:reset,minGameMinutes:10,maxGameMinutes:90});
+  const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const t0=reset+1_000;
+  const a=await st.stampCrystalWallEventClock({id:'p1',ticker:'EV-NEW',eventTicker:'EV-NEW'},{...q('EV-NEW'),gameMinutes:22},t0);
+  assert.equal(a.ok,true);assert.equal(a.record.resetEpoch,reset);assert.equal(a.record.anchoredElapsedMinutes,22);
+  const b=await st.stampCrystalWallEventClock({id:'p2',ticker:'EV-NEW',eventTicker:'EV-NEW'},{...q('EV-NEW'),gameMinutes:80},t0+8*60000);
+  assert.equal(b.reason,'already_anchored');
+  assert.equal(b.record.crystalWallEntryId,'p1');
+  assert.ok(Math.abs(st.leadingEventElapsedMinutes('EV-NEW',t0+8*60000)-30)<1e-6);
+});
+
+test('pre-reset Event Clock cannot authorize Athena after reset; 10-90 still holds on the new clock',async()=>{
+  const now=Date.now();
+  let s=settings({resetTimestampMs:now-60_000,minGameMinutes:10,maxGameMinutes:90,hunterCooldownMinutes:0});
+  const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  await st.stampCrystalWallEventClock({id:'old',ticker:'EV-ATH',eventTicker:'EV-ATH'},{...q('EV-ATH'),gameMinutes:20},now-60_000);
+  s.resetTimestampMs=now;
+  st.invalidateEventClockExecutableAuthority(now);
+  const blocked=await st.hunterEntryPolicyDecision('Athena Exclamation',{...q('EV-ATH'),gameMinutes:20},{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(blocked.ok,false);assert.equal(blocked.reason,'game_clock_unknown');
+  await st.stampCrystalWallEventClock({id:'new',ticker:'EV-ATH',eventTicker:'EV-ATH'},{...q('EV-ATH'),gameMinutes:69},now);
+  const pass=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EV-ATH'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(pass.ok,true,pass.reason);
+  const inherited=st.leadingEventElapsedMinutes('EV-ATH',now);
+  assert.ok(inherited>=68 && inherited<=71,String(inherited));
+  const lateStore=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  await lateStore.stampCrystalWallEventClock({id:'late',ticker:'EV-90',eventTicker:'EV-90'},{...q('EV-90'),gameMinutes:91},now);
+  const late=await lateStore.hunterEntryPolicyDecision('Athena Exclamation',q('EV-90'),{requireClock:true,includeCooldown:false,stage:'test',megaWaveAuthorized:true});
+  assert.equal(late.ok,false);assert.equal(late.reason,'maximum_game_time');
+});
+
+test('stale async Game Clock and milestone results after reset are discarded',async()=>{
+  let release;
+  const pending=new Promise((resolve)=>{release=resolve;});
+  const clock=new GameClockAuthority({
+    kalshi:{getLiveData:async()=>{await pending;return {status:'live'};}},
+    now:()=>7_000_000,
+  });
+  const first=clock.cached(clock.liveCache,'K',1000,()=>clock.kalshi.getLiveData());
+  clock.invalidateSimulationEpoch(7_100_000);
+  release({status:'live'});
+  const result=await first;
+  assert.equal(result.discarded,true);
+  assert.equal(result.reason,'stale_pre_reset_game_clock_authority');
+  assert.equal(clock.liveCache.size,0);
+  const sealed=clock.sealClockState({phase:'CONFIRMED',confirmed:true,entryAuthorized:true},0);
+  assert.equal(sealed.reason,'stale_pre_reset_game_clock_authority');
+  assert.equal(sealed.entryAuthorized,false);
+});
+
+test('hydrateEventClockAnchors skips previous-epoch executable clocks',async()=>{
+  const oldEpoch=8_000_000,newEpoch=9_000_000;
+  const db=memoryDb();
+  const old=stampEventClockRecord({eventTicker:'EV-HYD',ticker:'EV-HYD',elapsedMinutes:33,nowMs:oldEpoch,resetTimestampMs:oldEpoch});
+  await db.upsertOpportunityEpisode({id:'EVENT-CLOCK:EV-HYD',eventTicker:'EV-HYD',athenaDecision:{eventClockAnchor:old.record}});
+  const st=new StrategyEngine({db,kalshi:{},market:{},learning:{},getSettings:()=>({resetTimestampMs:newEpoch,systemName:'SAGITTARIUS'}),getLiveReady:()=>false,random:()=>0});
+  const restored=await st.hydrateEventClockAnchors();
+  assert.equal(restored.restored,0);
+  assert.equal(st.eventClockRecord('EV-HYD'),null);
+});
+
+
 
 
