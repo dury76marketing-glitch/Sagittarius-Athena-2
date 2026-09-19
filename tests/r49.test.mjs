@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes } from '../src/strategy.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
@@ -779,9 +779,9 @@ test('inprogress without elapsed stays unresolved instead of start=now',async()=
   assert.equal(state.startTimeMs,null);
 });
 
-test('Game Clock no longer vetoes Athena at former 4, 35, or 95 minutes',async()=>{
+test('Game Clock no longer vetoes Athena at former 4, 35, 95, 177.58, or 200 minutes',async()=>{
   const s=settings({minGameMinutes:10,maxGameMinutes:90,hunterCooldownMinutes:0,resetTimestampMs:Date.now()});
-  for(const minutes of [4,35,95]){
+  for(const minutes of [4,35,95,177.58,200]){
     const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
     const t=Date.now();
     await st.stampCrystalWallEventClock({id:`cw-${minutes}`,ticker:`EV-${minutes}`,eventTicker:`EV-${minutes}`},confirmedClockQuote(`EV-${minutes}`,minutes,t),t);
@@ -803,6 +803,17 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:unknown}).reason,'clock_authority_retired');
   assert.equal(entryChainAdmissionDecision({quote:young,minGameMinutes:10,maxGameMinutes:90}).action,'ALLOW');
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
+});
+
+test('full-size rejection reasons follow the executing concept, not Scarlet fallback',()=>{
+  assert.equal(fullConfiguredSizeClassification('Athena Exclamation',{megaWaveAthenaEntry:true}).reason,'athena_full_configured_size_unavailable');
+  assert.equal(fullConfiguredSizeClassification('Athena Exclamation',{megaWaveAthenaEntry:true}).event,'mega_wave_athena_full_size_blocked');
+  assert.equal(fullConfiguredSizeClassification('Scarlet Needle',{scarletContinuationEntry:true}).reason,'scarlet_needle_full_configured_size_unavailable');
+  assert.equal(fullConfiguredSizeClassification('Sagittarius Justice Arrow',{justiceArrowIndependentEntry:true}).reason,'justice_arrow_full_configured_size_unavailable');
+  assert.equal(fullConfiguredSizeClassification('Recovery Hunter',{crystalWallIndependentEntry:true}).reason,'crystal_wall_full_configured_size_unavailable');
+  assert.equal(fullConfiguredSizeClassification('Starlight Extinction',{starlightReentry:true}).reason,'starlight_full_configured_size_unavailable');
+  assert.equal(fullConfiguredSizeClassification('Wave Surfer',{megaWaveSaintEntry:true}).reason,'wave_surfer_full_configured_size_unavailable');
+  assert.notEqual(fullConfiguredSizeClassification('Athena Exclamation',{megaWaveAthenaEntry:true}).reason,'scarlet_needle_full_configured_size_unavailable');
 });
 
 test('createHunter source has no Game Clock execution vetoes',async()=>{

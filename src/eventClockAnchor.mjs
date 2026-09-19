@@ -1,6 +1,6 @@
 export const EVENT_CLOCK_ANCHOR = Object.freeze({
   version: 'ECA1',
-  policyRevision: 'ECA1-R2-CONFIRMED-GCA-EXECUTABLE-LEADER',
+  policyRevision: 'ECA1-RETIRED-TELEMETRY-ONLY',
   episodePrefix: 'EVENT-CLOCK:',
   approvedExecutableSources: Object.freeze([
     'confirmed_clock_at_crystal_wall',

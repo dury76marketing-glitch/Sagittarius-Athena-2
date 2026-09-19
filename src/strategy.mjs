@@ -51,6 +51,31 @@ import { authorityHash, sealAthenaFireCommand, verifyAthenaFireCommandHash } fro
 import { phoenixSignalActive, revalidatePhoenixQualification } from './phoenix.mjs';
 
 const nowId = () => randomUUID();
+
+export function fullConfiguredSizeClassification(concept, flags = {}) {
+  const name = String(concept || '');
+  if (flags.crystalWallIndependentEntry === true) {
+    return { reason: 'crystal_wall_full_configured_size_unavailable', event: 'crystal_wall_v3_full_size_blocked' };
+  }
+  if (flags.justiceArrowIndependentEntry === true || name === 'Sagittarius Justice Arrow') {
+    return { reason: 'justice_arrow_full_configured_size_unavailable', event: 'justice_arrow_v3_full_size_blocked' };
+  }
+  if (flags.starlightReentry === true || name === STARLIGHT_EXTINCTION.conceptName) {
+    return { reason: 'starlight_full_configured_size_unavailable', event: 'starlight_full_size_blocked' };
+  }
+  if (flags.megaWaveAthenaEntry === true || name === 'Athena Exclamation') {
+    return { reason: 'athena_full_configured_size_unavailable', event: 'mega_wave_athena_full_size_blocked' };
+  }
+  if (flags.scarletContinuationEntry === true || name === 'Scarlet Needle') {
+    return { reason: 'scarlet_needle_full_configured_size_unavailable', event: 'scarlet_needle_v3_full_size_blocked' };
+  }
+  if (flags.megaWaveSaintEntry === true || MEGA_WAVE.downstreamSaints.includes(name)) {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'saint';
+    return { reason: `${slug}_full_configured_size_unavailable`, event: `mega_wave_${slug}_full_size_blocked` };
+  }
+  return { reason: 'configured_full_size_unavailable', event: 'configured_full_size_blocked' };
+}
+
 const openLike = (s) => ['open', 'entry_pending', 'exit_pending', 'pending_recovery'].includes(s);
 const slotsLeft = (entries, settings) => Math.max(
   0,
@@ -2042,10 +2067,9 @@ export class StrategyEngine {
       }
       const requested=Math.max(1,Math.floor(Number(plan.requestedCount||initialRequested)));
       if(fullConfiguredSizeRequired&&Number(plan.count||0)!==requested){
-        const reason=crystalWallIndependentEntry?'crystal_wall_full_configured_size_unavailable':justiceArrowIndependentEntry?'justice_arrow_full_configured_size_unavailable':'scarlet_needle_full_configured_size_unavailable';
-        const event=crystalWallIndependentEntry?'crystal_wall_v3_full_size_blocked':justiceArrowIndependentEntry?'justice_arrow_v3_full_size_blocked':'scarlet_needle_v3_full_size_blocked';
-        trace('EXECUTABLE_BOOK','BLOCKED',reason,{requested,filledCount:Number(plan.count||0)});
-        await this.audit(event,{ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,requested,filledCount:Number(plan.count||0),stakeCents:Number(stakeCents)});
+        const classified=fullConfiguredSizeClassification(concept,{crystalWallIndependentEntry,justiceArrowIndependentEntry,megaWaveAthenaEntry,megaWaveSaintEntry,scarletContinuationEntry,starlightReentry});
+        trace('EXECUTABLE_BOOK','BLOCKED',classified.reason,{requested,filledCount:Number(plan.count||0),concept});
+        await this.audit(classified.event,{ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,requested,filledCount:Number(plan.count||0),stakeCents:Number(stakeCents),concept});
         return null;
       }
       trace('EXECUTABLE_BOOK','PASS',null,{requested,initialRequested,filledCount:Number(plan.count||0),freshAskCents:Number(plan.freshAskCents||0),executionLimitCents:Number(plan.executionLimitCents||executionLimitCents),averagePriceCents:Number(plan.averagePriceCents||0),fullConfiguredSizeRequired});
