@@ -483,6 +483,23 @@ test('SE1 Starlight executes after parent stop when crash/rebound/ticks qualify 
   assert.equal(second,null);
 });
 
+test('CW ladder Proof-stage settings beat the old shared Crystal Wall crash/rebound/ticks',()=>{
+  const s=settings({
+    recoveryMinEntryCents:10,recoveryMaxEntryCents:89,
+    crystalWallMinCrashCents:15,crystalWallMinReboundCents:5,crystalWallMinUpwardTicks:5,
+    crystalWallProof1MinCrashCents:8,crystalWallProof1MinReboundCents:4,crystalWallProof1MinUpwardTicks:2,
+  });
+  const g=crystalWallStageGeometry(s,1);
+  assert.equal(g.minCrashCents,8);
+  assert.equal(g.minReboundCents,4);
+  assert.equal(g.minUpwardTicks,2);
+  let watch=crystalWallSignalState({proofStage:1,preCrashPeakCents:80,troughCents:80,lastBidCents:80},q('CW-AUTH',71,72),s);
+  watch=crystalWallSignalState({...watch,proofStage:1},q('CW-AUTH',73,74),s);
+  watch=crystalWallSignalState({...watch,proofStage:1},q('CW-AUTH',75,76),s);
+  assert.equal(watch.minCrashCents,8);
+  assert.equal(watch.qualified,true,watch.reason);
+});
+
 test('CW ladder missing per-proof keys inherit shared Crystal Wall geometry',()=>{
   const migrated=sanitizeRuntimeSettings({crystalWallMinCrashCents:15,crystalWallMinReboundCents:5,crystalWallMinUpwardTicks:2,crystalWallWinsToTriggerAthena:3});
   assert.equal(crystalWallRequiredProofCount(migrated),3);
