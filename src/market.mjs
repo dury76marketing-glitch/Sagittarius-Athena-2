@@ -451,6 +451,14 @@ export class MarketHub {
     this.stopped = false;
     if (!this.connectLoopRunning) void this.connectLoop();
   }
+
+  kickStaleSocket(now = Date.now(), staleMs = 90_000) {
+    this.start();
+    if (this.lastMessageMs > 0 && now - this.lastMessageMs < staleMs) return false;
+    this.reconnectToken += 1;
+    try { this.ws?.terminate(); } catch {}
+    return true;
+  }
   stop() {
     this.stopped = true;
     this.ws?.close();

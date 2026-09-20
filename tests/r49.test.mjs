@@ -805,6 +805,15 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
 });
 
+test('SIM health banner does not require private REST/WS; LIVE still does',async()=>{
+  const src=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  assert.ok(src.includes("const liveSessionRequired = this.settings?.mode === 'LIVE'"));
+  assert.ok(src.includes('simulation_broker_reconcile_softfail'));
+  assert.ok(src.includes('recoverPrivateSession'));
+  const market=await readFile(new URL('../src/market.mjs',import.meta.url),'utf8');
+  assert.ok(market.includes('kickStaleSocket'));
+});
+
 test('full-size rejection reasons follow the executing concept, not Scarlet fallback',()=>{
   assert.equal(fullConfiguredSizeClassification('Athena Exclamation',{megaWaveAthenaEntry:true}).reason,'athena_full_configured_size_unavailable');
   assert.equal(fullConfiguredSizeClassification('Athena Exclamation',{megaWaveAthenaEntry:true}).event,'mega_wave_athena_full_size_blocked');

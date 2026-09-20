@@ -43,6 +43,10 @@ Event Clock records remain as timeline telemetry. Diagnostics report:
 
 Reset epoch identifies the cohort. It does not grant execution authority.
 
+## SIM vs LIVE health
+
+SIMULATION is HEALTHY when scanner + protection + Golden Eye are fresh. Stale private REST/WebSocket no longer keeps the SIM banner DEGRADED for hours. LIVE still requires restOk + websocketFresh + reconciliationOk before arming.
+
 ## What this ZIP is
 
 This is the complete application tree for Railway:

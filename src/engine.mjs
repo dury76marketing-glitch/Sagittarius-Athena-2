@@ -79,6 +79,7 @@ const QUOTE_PROTECTION_CONCURRENCY = DATABASE_PRESSURE_ISOLATION.quoteProtection
 const PROTECTION_FRESH_MS = 10_000;
 const WS_FRESH_MS = 70_000;
 const SCANNER_FRESH_MS = 7 * 60_000;
+const HEALTH_RECOVERY_MS = 30_000;
 const DISPLAY_QUOTE_FRESH_MS = 15_000;
 const LIVE_RESTART_REARM_RETRY_MS = 5_000;
 
@@ -454,6 +455,9 @@ export class SagittariusEngine {
       lastDiscoveryMs: 0,
       lastProtectionMs: 0,
       lastError: null,
+      lastRestError: null,
+      lastHealthRecoveryAtMs: 0,
+      healthFailReasons: [],
     };
     this.speed = {
       lastLoopMs: 0,
@@ -2443,6 +2447,8 @@ export class SagittariusEngine {
     this.market.start();
     await this.testConnection().catch((e) => this.recordError('kalshi_connection', e));
     await this.reconcileBroker().catch((e) => this.recordError('reconciliation', e));
+    this.healthRecoveryTimer=setInterval(()=>{void this.recoverPrivateSession().catch(()=>{});},HEALTH_RECOVERY_MS);
+    this.healthRecoveryTimer.unref?.();
     this.protectionLoopPromise = this.protectionLoop();
     this.cyclePromise = this.cycleLoop();
     this.startBackgroundIntelligenceHydration();
@@ -2476,15 +2482,19 @@ export class SagittariusEngine {
     this.health.goldenEyeLastError = this.goldenEye?.lastError || null;
     this.health.websocketFresh = this.health.websocketOk && this.health.lastWsMessageMs > 0 && now - this.health.lastWsMessageMs <= WS_FRESH_MS;
     this.health.scannerFresh = this.lastFullScanMs > 0 && now - this.lastFullScanMs <= SCANNER_FRESH_MS;
-    this.health.degraded = !(
-      this.health.restOk
-      && this.health.websocketFresh
-      && this.health.reconciliationOk
-      && this.health.protectionOk
-      && this.health.protectionFresh
-      && this.health.goldenEyeOk
-      && this.health.scannerFresh
-    );
+    const liveSessionRequired = this.settings?.mode === 'LIVE';
+    const reasons = [];
+    if (!this.health.protectionOk) reasons.push('protection');
+    if (!this.health.protectionFresh) reasons.push('protection_freshness');
+    if (!this.health.goldenEyeOk) reasons.push('golden_eye');
+    if (!this.health.scannerFresh) reasons.push('scanner_freshness');
+    if (!this.health.restOk) reasons.push('rest');
+    if (!this.health.websocketFresh) reasons.push('websocket');
+    if (!this.health.reconciliationOk) reasons.push('reconciliation');
+    this.health.healthFailReasons = reasons;
+    const runtimeHealthy = this.health.protectionOk && this.health.protectionFresh && this.health.goldenEyeOk && this.health.scannerFresh;
+    const liveSessionHealthy = this.health.restOk && this.health.websocketFresh && this.health.reconciliationOk;
+    this.health.degraded = liveSessionRequired ? !(runtimeHealthy && liveSessionHealthy) : !runtimeHealthy;
     this.health.lastError = this.lastError;
   }
 
@@ -3094,6 +3104,18 @@ export class SagittariusEngine {
     }, 150);
   }
 
+  async recoverPrivateSession() {
+    const now = Date.now();
+    this.health.lastHealthRecoveryAtMs = now;
+    try { this.market?.kickStaleSocket?.(now, 90_000); } catch {}
+    if (!this.health.restOk || !this.health.websocketFresh || (this.settings.mode === 'LIVE' && !this.health.reconciliationOk)) {
+      await this.testConnection().catch((e) => this.recordError('kalshi_connection_recovery', e));
+      if (this.settings.mode === 'LIVE') await this.reconcileBroker().catch((e) => this.recordError('reconciliation_recovery', e));
+    }
+    this.recomputeHealth();
+    return !this.health.degraded;
+  }
+
   async testConnection() {
     if (!this.credentials) {
       this.health.restOk = false;
@@ -3106,11 +3128,13 @@ export class SagittariusEngine {
       this.balance = r.balance;
       this.health.restOk = true;
       this.health.lastRestOkMs = Date.now();
+      this.health.lastRestError = null;
       this.lastError = null;
       this.recomputeHealth();
       return r;
     } catch (e) {
       this.health.restOk = false;
+      this.health.lastRestError = String(e?.message || e);
       this.recomputeHealth();
       throw e;
     }
@@ -4012,6 +4036,12 @@ export class SagittariusEngine {
       this.recomputeHealth();
       return summary.ok;
     } catch (e) {
+      if (this.settings.mode === 'SIMULATION') {
+        this.health.reconciliationOk = true;
+        await this.db.audit?.('warning','simulation_broker_reconcile_softfail',{message:String(e?.message||e)}).catch(()=>{});
+        this.recomputeHealth();
+        return true;
+      }
       this.health.reconciliationOk = false;
       this.recomputeHealth();
       throw e;
@@ -5770,6 +5800,7 @@ export class SagittariusEngine {
   async shutdown() {
     this.running = false;
     if(this.resourceGovernorTimer)clearInterval(this.resourceGovernorTimer);
+    if(this.healthRecoveryTimer)clearInterval(this.healthRecoveryTimer);
     this.resourceGovernorTimer=null;
     for (const timer of this.quoteProtectionTimers.values()) clearTimeout(timer);
     this.quoteProtectionTimers.clear();
