@@ -805,6 +805,38 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
 });
 
+test('fleet attack homepage totals use executable SIM/LIVE rows only',()=>{
+  const proto=SagittariusEngine.prototype;
+  const agg=proto.normalizeConceptAggregate.call({},{portfolio:[{concept_name:'Athena Exclamation',open:1,closed:2,wins:2,losses:0,pnl_cents:40,avg_entry_cents:60}],signals:[],linked:[]});
+  assert.equal(agg.portfolio[0].concept_name,'Athena Exclamation');
+  const stats=[{name:'Athena Exclamation',open:1,closed:2,wins:2,losses:0,pnlCents:40,avgEntryCents:60,total:3},{name:'Recovery Hunter',closed:9,pnlCents:-900}];
+  const far=proto.buildFleetAttackResults.call({},stats,'SIMULATION');
+  assert.equal(far.mode,'SIMULATION');
+  assert.equal(far.crystalWallShadowExcluded,true);
+  const athena=far.attacks.find((x)=>x.name==='Athena Exclamation');
+  const wall=far.attacks.find((x)=>x.name==='Recovery Hunter'||x.name==='Crystal Wall Shadow');
+  assert.equal(athena.closed,2);
+  assert.equal(athena.pnlCents,40);
+  assert.equal(wall,undefined);
+  const live=proto.buildFleetAttackResults.call({},stats,'LIVE');
+  assert.equal(live.mode,'LIVE');
+});
+
+test('fleet concept aggregate SQL excludes Crystal Wall paper and includes host room',async()=>{
+  const db=await readFile(new URL('../src/db.mjs',import.meta.url),'utf8');
+  const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
+  const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  assert.ok(db.includes('EXECUTABLE_HUNTER_CONCEPT_NAMES'));
+  assert.ok(db.includes('crystalWallShadowExcluded:true'));
+  assert.ok(db.includes('if(host && !ids.includes(host)) ids.push(host)'));
+  assert.ok(engine.includes('buildFleetAttackResults'));
+  assert.ok(engine.includes("excluded:'crystal_wall_shadow'"));
+  assert.ok(html.includes('attackBody'));
+  assert.ok(app.includes('fleetStatFor'));
+  assert.ok(!html.includes('fleetAttackResultsSection'));
+});
+
 test('SIM health banner does not require private REST/WS; LIVE still does',async()=>{
   const src=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
   assert.ok(src.includes("const liveSessionRequired = this.settings?.mode === 'LIVE'"));

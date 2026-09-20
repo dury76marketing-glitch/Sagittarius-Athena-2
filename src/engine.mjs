@@ -4588,7 +4588,7 @@ export class SagittariusEngine {
     }
 
     const reset = Number(this.settings.resetTimestampMs || 0);
-    const fleet={ownerId:this.settings.ownerId,mode:this.settings.mode,resetTimestampMs:reset};
+    const fleet={ownerId:this.settings.ownerId,mode:this.settings.mode,systemName:this.settings.systemName,resetTimestampMs:reset};
     const jobs = [
       () => typeof this.db.performanceAggregateFleet==='function' ? this.db.performanceAggregateFleet(fleet) : this.db.performanceAggregate(this.settings.systemName,{resetTimestampMs:reset}),
       () => dashboard && typeof this.db.dashboardOpenEntriesFleet==='function' ? this.db.dashboardOpenEntriesFleet(fleet) : typeof this.db.openEntriesFleet==='function' ? this.db.openEntriesFleet(fleet) : this.db.openEntries(this.settings.systemName),
@@ -4920,6 +4920,7 @@ export class SagittariusEngine {
       realHunterExecutionAuthorized:executionGate.allowed, executionGateReason:executionGate.reason,
     };
     const conceptStats = p.conceptAggregate ? this.buildConceptStatsFromAggregate(p.conceptAggregate) : this.buildConceptStats(entries);
+    const fleetAttackResults = this.buildFleetAttackResults(conceptStats, this.settings.mode);
     const auroraExecution = this.buildAuroraSummary(entries);
     const infinityBreak = this.buildInfinityBreakSummary(entries);
     const atomicThunderBolt={...this.atomicThunderBolt?.summary?.(),episodes:opportunitySummary};
@@ -5470,7 +5471,7 @@ export class SagittariusEngine {
         feederUnrealizedCents: p.feederUnrealizedCents,
         simulationCashCents: p.simulationCashCents,
       },
-      conceptStats, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-RETIRED-TELEMETRY-ONLY',eventClockTradingAuthority:false,eventClockRole:'HISTORICAL_TELEMETRY_ONLY',resetTimestampMs:Number(this.settings.resetTimestampMs||0),gameClockEpoch:Number(this.gameClock?.resetTimestampMs||this.settings.resetTimestampMs||0),gameClockGeneration:Number(this.gameClock?.requestGeneration||0),priorEpochClockInvalidated:true,anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());const epoch=Number(row.resetEpoch||row.resetTimestampMs||0);return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase,resetEpoch:epoch,eventClockEpoch:epoch,clockConfirmed:row.clockConfirmed===true,executableAuthority:false};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.([...(p.open||[]),...(p.closed||[])])||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
+      conceptStats, fleetAttackResults, feederSummary, entryPipeline, entryCandidateFunnel, entryPathConfiguration, auroraExecution, resourceUsage, openHunters, openFeeders, cosmoShadowTrades, gemini:geminiSummary, geminiTrades, anotherDimension:{...(this.anotherDimensionStats||{}),active:Number(this.anotherDimensionOpenByTicker?.size||0),recent:Number(this.anotherDimensionRecent?.size||0)}, crystalWallShadow:crystalWallShadowSummary, crystalWallTrades, eventClockAnchor:{version:'ECA1',policyRevision:'ECA1-RETIRED-TELEMETRY-ONLY',eventClockTradingAuthority:false,eventClockRole:'HISTORICAL_TELEMETRY_ONLY',resetTimestampMs:Number(this.settings.resetTimestampMs||0),gameClockEpoch:Number(this.gameClock?.resetTimestampMs||this.settings.resetTimestampMs||0),gameClockGeneration:Number(this.gameClock?.requestGeneration||0),priorEpochClockInvalidated:true,anchored:Number(this.strategy?.eventClockByEvent?.size||0),events:[...((this.strategy?.eventClockByEvent?.values&&this.strategy.eventClockByEvent.values())||[])].slice(0,40).map((row)=>{const elapsed=this.strategy.leadingEventElapsedMinutes(row.eventTicker,Date.now());const epoch=Number(row.resetEpoch||row.resetTimestampMs||0);return{eventTicker:row.eventTicker,ticker:row.ticker,crystalWallEntryId:row.crystalWallEntryId,anchoredElapsedMinutes:row.anchoredElapsedMinutes,projectedElapsedMinutes:elapsed,source:row.source,phase:row.phase,resetEpoch:epoch,eventClockEpoch:epoch,clockConfirmed:row.clockConfirmed===true,executableAuthority:false};})}, constellation:this.constellation?.snapshot?.(this.settings)||{version:CONSTELLATION.version,phase:CONSTELLATION.phase,tradingSplitEnabled:false}, constellationOverview:this.collectConstellationOverview?.([...(p.open||[]),...(p.closed||[])])||[], constellationScan:this.constellationScan||{discoverOnce:true,probeOwner:'host'}, justiceArrow:{...(this.justiceArrowStats||{})}, closedHunters,
       trackedMarkets: trackers, trackerSummary, patterns, recoveryTracking, sports,
       crashLearning, crashEpisodes, profitLearning, stopGuardRecoveryLearning, athena, atomicThunderBolt, infinityBreak, legacyAtomicThunder:{ version:ATOMIC_THUNDER.version, policyRevision:ATOMIC_THUNDER.policyRevision, legacyCompatibilityOnly:true, ...atomicThunder }, goldenEye:this.goldenEye?.summary?.() || {version:GOLDEN_EYE.version,ready:false,enabled:false},
       liveMarkets: scanned,
@@ -5559,9 +5560,52 @@ export class SagittariusEngine {
     };
   }
 
+  normalizeConceptAggregate(raw) {
+    if (Array.isArray(raw)) return { portfolio: raw, signals: [], linked: [] };
+    if (raw && typeof raw === 'object') {
+      return {
+        portfolio: Array.isArray(raw.portfolio) ? raw.portfolio : [],
+        signals: Array.isArray(raw.signals) ? raw.signals : [],
+        linked: Array.isArray(raw.linked) ? raw.linked : [],
+      };
+    }
+    return { portfolio: [], signals: [], linked: [] };
+  }
+
+  buildFleetAttackResults(conceptStats=[], mode='SIMULATION') {
+    const currentMode = String(mode || 'SIMULATION') === 'LIVE' ? 'LIVE' : 'SIMULATION';
+    const attacks = [...EXECUTABLE_HUNTER_CONCEPTS].map((name) => {
+      const st = (conceptStats || []).find((row) => String(row?.name || '') === name) || {};
+      const closed = Number(st.closed || 0);
+      const wins = Number(st.wins || 0);
+      const losses = Number(st.losses || 0);
+      return {
+        name,
+        displayName: EXECUTION_ATTACK_DISPLAY[name]?.name || name,
+        open: Number(st.open || 0),
+        closed,
+        wins,
+        losses,
+        winRate: closed ? wins / closed : 0,
+        pnlCents: Number(st.pnlCents || 0),
+        avgEntryCents: Number(st.avgEntryCents || 0),
+        total: Number(st.total || 0),
+      };
+    });
+    return {
+      version: 'FAR1',
+      mode: currentMode,
+      scope: 'twelve_cosmos_plus_host',
+      crystalWallShadowExcluded: true,
+      feederSignalsExcluded: true,
+      attacks,
+    };
+  }
+
   buildConceptStatsFromAggregate(aggregate={}) {
+    aggregate = this.normalizeConceptAggregate(aggregate);
     const names=['Athena Exclamation','Scarlet Needle','Sagittarius Justice Arrow','Wave Surfer','Crash Recovery Hunter','Recovery Hunter','Momentum Hunter','Lightning Plasma','Pegasus','Dragon','Phoenix'];
-    const portfolio=new Map((aggregate.portfolio||[]).map((r)=>[String(r.concept_name||''),r]));
+    const portfolio=new Map((aggregate.portfolio||[]).map((r)=>[String(r.concept_name||r.name||''),r]));
     const signals=new Map((aggregate.signals||[]).map((r)=>[String(r.concept_name||''),r]));
     const linked=new Map((aggregate.linked||[]).map((r)=>[String(r.source_feeder||''),r]));
     const out=[];
@@ -5570,8 +5614,12 @@ export class SagittariusEngine {
         const sig=signals.get(name)||{},link=linked.get(name)||{},closed=Number(link.closed||0),wins=Number(link.wins||0),losses=Number(link.losses||0);
         out.push({name,displayName:name,legacyName:null,total:Number(link.total||0),open:Number(link.open||0),closed,wins,losses,winRate:closed?wins/closed:0,pnlCents:Number(link.pnl_cents||0),avgEntryCents:Math.round(Number(sig.avg_entry_cents||0)),avgCurrentCents:Math.round(Number(sig.avg_current_cents||0)),avgLiquidity:Number(sig.avg_liquidity||0),fedHunters:Number(link.total||0),feederSignals:Number(sig.feeder_signals||0),statsBasis:'fed_hunters'});
       }else{
+        if(name==='Recovery Hunter' || SHADOW_ATTACK_CONCEPTS.has(name)){
+          out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:0,open:0,closed:0,wins:0,losses:0,winRate:0,pnlCents:0,avgEntryCents:0,avgCurrentCents:0,avgLiquidity:0,fedHunters:null,excluded:'crystal_wall_shadow'});
+          continue;
+        }
         const r=portfolio.get(name)||{},closed=Number(r.closed||0),wins=Number(r.wins||0),losses=Number(r.losses||0);
-        out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:Number(r.total||0),open:Number(r.open||0),closed,wins,losses,winRate:closed?wins/closed:0,pnlCents:Number(r.pnl_cents||0),avgEntryCents:Math.round(Number(r.avg_entry_cents||0)),avgCurrentCents:Math.round(Number(r.avg_current_cents||0)),avgLiquidity:Number(r.avg_liquidity||0),fedHunters:null});
+        out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:Number(r.total||0),open:Number(r.open||0),closed,wins,losses,winRate:closed?wins/closed:0,pnlCents:Number(r.pnl_cents||r.pnlCents||0),avgEntryCents:Math.round(Number(r.avg_entry_cents||r.avgEntryCents||0)),avgCurrentCents:Math.round(Number(r.avg_current_cents||0)),avgLiquidity:Number(r.avg_liquidity||0),fedHunters:null});
       }
     }
     return out.sort((a,b)=>b.pnlCents-a.pnlCents);
@@ -5613,7 +5661,11 @@ export class SagittariusEngine {
         });
         continue;
       }
-      const rows = entries.filter((e) => e.conceptName === name);
+      if(name==='Recovery Hunter' || SHADOW_ATTACK_CONCEPTS.has(name)){
+        out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:0,open:0,closed:0,wins:0,losses:0,winRate:0,pnlCents:0,avgEntryCents:0,avgCurrentCents:0,avgLiquidity:0,fedHunters:null,excluded:'crystal_wall_shadow'});
+        continue;
+      }
+      const rows = entries.filter((e) => e.conceptName === name && EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName) && String(e.mode||this.settings?.mode||'SIMULATION')===String(this.settings?.mode||'SIMULATION'));
       const closed = rows.filter((e) => e.status === 'closed');
       const wins = closed.filter((e) => e.pnlCents > 0).length;
       const losses = closed.filter((e) => e.pnlCents < 0).length;

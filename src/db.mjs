@@ -819,29 +819,32 @@ export class Database {
       'lossAvoidedNetCents',post_exit_state->'lossAvoidedNetCents',
       'researchComplete',post_exit_state->'researchComplete'
     ) as post_exit_state`; }
-  fleetBookFilter({ownerId,mode}={}){
+  fleetBookFilter({ownerId,mode,systemName}={}){
     const owner=String(ownerId||'');
     const currentMode=String(mode||'SIMULATION');
-    return {owner,mode:currentMode,ids:[...COSMOS_IDS]};
+    const ids=[...COSMOS_IDS];
+    const host=String(systemName||'').trim().toUpperCase();
+    if(host && !ids.includes(host)) ids.push(host);
+    return {owner,mode:currentMode,ids};
   }
-  async openEntriesFleet({ownerId,mode}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async openEntriesFleet({ownerId,mode,systemName}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const r=await this.pool.query("select * from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc",[f.owner,f.mode,f.ids]);
     return r.rows.map(rowEntry);
   }
-  async dashboardOpenEntriesFleet({ownerId,mode}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async dashboardOpenEntriesFleet({ownerId,mode,systemName}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc`,[f.owner,f.mode,f.ids]);
     return r.rows.map(rowEntry);
   }
-  async dashboardRecentClosedHuntersFleet({ownerId,mode,limit=100,resetTimestampMs=0}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async dashboardRecentClosedHuntersFleet({ownerId,mode,systemName,limit=100,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const lim=Math.max(1,Math.min(500,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0);
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
-  async recentClosedHuntersFleet({ownerId,mode,limit=150,resetTimestampMs=0}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async recentClosedHuntersFleet({ownerId,mode,systemName,limit=150,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const lim=Math.max(1,Math.min(500,Math.floor(Number(limit)||150))),reset=Math.max(0,Number(resetTimestampMs)||0);
     const r=await this.pool.query(`select id,system_name,owner_id,concept_name,source_feeder,source_trade_id,ticker,event_ticker,market_title,watchdog_model,mode,status,
       entry_price_cents,exit_price_cents,current_price_cents,peak_price_cents,stop_price_cents,stop_loss_cents,count,remaining_count,volume_24h,spread_at_entry_cents,pnl_cents,
@@ -851,8 +854,8 @@ export class Database {
       from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($4::text[]) and status='closed' and ($5::bigint=0 or closed_at_ms >= $5) order by closed_at_ms desc nulls last limit $6`,[f.owner,f.mode,f.ids,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,lim]);
     return r.rows.map(rowEntry);
   }
-  async performanceAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async performanceAggregateFleet({ownerId,mode,systemName,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const reset=Math.max(0,Number(resetTimestampMs)||0);
     const r=await this.pool.query(`with bounds as (
       select
@@ -884,8 +887,8 @@ export class Database {
       where archived=false and owner_id=$1 and mode=$4 and system_name = any($5::text[])`,[f.owner,EXECUTABLE_HUNTER_CONCEPT_NAMES,reset,f.mode,f.ids]);
     const x=r.rows[0]||{};return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,Number(v)||0]));
   }
-  async conceptStatsAggregateFleet({ownerId,mode,resetTimestampMs=0}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async conceptStatsAggregateFleet({ownerId,mode,resetTimestampMs=0,systemName}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const reset=Math.max(0,Number(resetTimestampMs)||0);
     const r=await this.pool.query(`with portfolio as (
       select concept_name,
@@ -899,11 +902,14 @@ export class Database {
         coalesce(avg(current_price_cents),0)::double precision as avg_current_cents,
         coalesce(avg(volume_24h),0)::double precision as avg_liquidity
       from sag_entries
-      where archived=false and owner_id=$1 and mode=$3 and system_name = any($5::text[]) and concept_name = any($2::text[])
-        and ($4::bigint=0 or opened_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery'))
+      where archived=false and owner_id=$1 and mode=$3 and system_name = any($5::text[])
+        and concept_name = any($2::text[])
+        and ($4::bigint=0 or status in ('open','entry_pending','exit_pending','pending_recovery') or coalesce(closed_at_ms,0) >= $4)
       group by concept_name
-    ) select * from portfolio`,[f.owner,PORTFOLIO_CONCEPT_NAMES,f.mode,reset,f.ids]);
-    return r.rows;
+    ) select coalesce((select jsonb_agg(to_jsonb(p)) from portfolio p),'[]'::jsonb) as portfolio`,
+    [f.owner,EXECUTABLE_HUNTER_CONCEPT_NAMES,f.mode,reset,f.ids]);
+    const x=r.rows[0]||{};
+    return {portfolio:Array.isArray(x.portfolio)?x.portfolio:[],signals:[],linked:[],mode:f.mode,scope:'fleet_executable_hunters',crystalWallShadowExcluded:true};
   }
     async dashboardOpenEntries(systemName){
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc`,[systemName]);
@@ -919,8 +925,8 @@ export class Database {
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false order by opened_at_ms desc limit $2`,[String(systemName),lim]);
     return r.rows.map(rowEntry);
   }
-  async tradingLogRowsFleet({ownerId,mode,limit=5000,resetTimestampMs=0}={}){
-    const f=this.fleetBookFilter({ownerId,mode});
+  async tradingLogRowsFleet({ownerId,mode,systemName,limit=5000,resetTimestampMs=0}={}){
+    const f=this.fleetBookFilter({ownerId,mode,systemName});
     const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||5000)));
     const reset=Math.max(0,Number(resetTimestampMs)||0);
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and ($4::bigint=0 or opened_at_ms >= $4 or closed_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery')) order by opened_at_ms desc limit $5`,[f.owner,f.mode,f.ids,reset,lim]);
