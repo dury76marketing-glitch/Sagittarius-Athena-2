@@ -962,7 +962,7 @@ export class Database {
     // Attacks may coexist; only the same Attack's cooldown remains relevant.
     // Keeping this in one query avoids multiplying hot-path DB fanout.
     const r=await this.pool.query(`with event_rows as (
-      select concept_name,status,opened_at_ms from sag_entries
+      select concept_name,status,opened_at_ms,closed_at_ms from sag_entries
       where system_name=$1 and archived=false and concept_name = any($2::text[])
         and coalesce(nullif(event_ticker,''),ticker)=$3
     ), by_concept as (
@@ -970,13 +970,15 @@ export class Database {
       from event_rows group by concept_name
     ), aggregate as (
       select count(*) filter(where status in ('open','entry_pending','exit_pending','pending_recovery'))::int as active_entries,
-        coalesce(max(opened_at_ms) filter(where status<>'rejected'),0)::bigint as latest_hunter_entry_ms
+        coalesce(max(opened_at_ms) filter(where status<>'rejected'),0)::bigint as latest_hunter_entry_ms,
+        count(*) filter(where concept_name = any($4::text[]) and concept_name <> 'Crash Recovery Hunter' and status in ('open','entry_pending','exit_pending','pending_recovery','closed'))::int as executable_repeat_entries,
+        coalesce(max(closed_at_ms) filter(where concept_name = any($4::text[]) and concept_name <> 'Crash Recovery Hunter' and status='closed'),0)::bigint as latest_executable_close_ms
       from event_rows
-    ) select aggregate.active_entries,aggregate.latest_hunter_entry_ms,
+    ) select aggregate.active_entries,aggregate.latest_hunter_entry_ms,aggregate.executable_repeat_entries,aggregate.latest_executable_close_ms,
       coalesce((select jsonb_object_agg(concept_name,latest_hunter_entry_ms) from by_concept),'{}'::jsonb) as latest_by_concept
-      from aggregate`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,event]);
+      from aggregate`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,event,EXECUTABLE_HUNTER_CONCEPT_NAMES]);
     const by=r.rows[0]?.latest_by_concept||{};
-    return{activeEntries:n(r.rows[0]?.active_entries),latestHunterEntryMs:n(r.rows[0]?.latest_hunter_entry_ms),latestByConcept:Object.fromEntries(Object.entries(by).map(([k,v])=>[k,n(v)]))};
+    return{activeEntries:n(r.rows[0]?.active_entries),latestHunterEntryMs:n(r.rows[0]?.latest_hunter_entry_ms),executableRepeatEntries:n(r.rows[0]?.executable_repeat_entries),latestExecutableCloseMs:n(r.rows[0]?.latest_executable_close_ms),latestByConcept:Object.fromEntries(Object.entries(by).map(([k,v])=>[k,n(v)]))};
   }
   async recoverySourceEntries(systemName,{sinceMs=0}={}){
     const since=Math.max(0,Number(sinceMs)||0);

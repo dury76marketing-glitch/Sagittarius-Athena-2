@@ -32,6 +32,8 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'maxPositions',
   'maxEntriesPerTrade',
   'hunterCooldownMinutes',
+  'maxRepeatsPerMarket',
+  'repeatCooldownMinutes',
   'minGameMinutes',
   'maxGameMinutes',
   'eventCooldownMinutes',
@@ -250,6 +252,8 @@ export function originalSettings() {
     maxPositions: 8,
     maxEntriesPerTrade: 8,
     hunterCooldownMinutes: 0,
+    maxRepeatsPerMarket: 0,
+    repeatCooldownMinutes: 0,
     minGameMinutes: 30,
     maxGameMinutes: 60,
     eventCooldownMinutes: 1,
@@ -424,6 +428,8 @@ export function freshInstallSettings() {
     maxPositions:20,
     maxEntriesPerTrade:1,
     hunterCooldownMinutes:45,
+    maxRepeatsPerMarket:0,
+    repeatCooldownMinutes:0,
     minGameMinutes:30,
     maxGameMinutes:55,
     eventCooldownMinutes:1,
@@ -652,6 +658,8 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   if (!Object.hasOwn(src, 'infinityBreakRequiredConfirmations') && Object.hasOwn(src, 'atomicThunderRequiredConfirmations')) out.infinityBreakRequiredConfirmations = Number(src.atomicThunderRequiredConfirmations);
   if (!Object.hasOwn(src, 'infinityBreakMaximumBookAgeMs') && Object.hasOwn(src, 'atomicThunderMaximumBookAgeMs')) out.infinityBreakMaximumBookAgeMs = Number(src.atomicThunderMaximumBookAgeMs);
   if (!Object.hasOwn(src, 'infinityBreakConfirmationWindowMs') && Object.hasOwn(src, 'atomicThunderConfirmationWindowMs')) out.infinityBreakConfirmationWindowMs = Number(src.atomicThunderConfirmationWindowMs);
+  out.maxRepeatsPerMarket = Math.max(0, Math.min(99, Math.floor(Number(out.maxRepeatsPerMarket) || 0)));
+  out.repeatCooldownMinutes = Math.max(0, Math.min(10080, Math.floor(Number(out.repeatCooldownMinutes) || 0)));
   out.atomicThunderGreenTriggerCents = Math.max(1, Math.min(99, Math.floor(Number(out.atomicThunderGreenTriggerCents) || 1)));
   out.infinityBreakMinNetPerOriginalContractCents = Math.max(0.01, Number(out.infinityBreakMinNetPerOriginalContractCents) || 0.01);
   out.infinityBreakRequiredConfirmations = Math.max(1, Math.floor(Number(out.infinityBreakRequiredConfirmations) || 1));

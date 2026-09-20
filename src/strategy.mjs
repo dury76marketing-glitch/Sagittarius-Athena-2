@@ -1610,19 +1610,25 @@ export class StrategyEngine {
 
   async hunterEventAdmissionState(q,{concept=null}={}){
     const s=this.getSettings(),event=q?.eventTicker||q?.ticker;
-    let activeEntries=0,latestHunterEntryMs=0,latestByConcept={};
+    let activeEntries=0,latestHunterEntryMs=0,latestByConcept={},executableRepeatEntries=0,latestExecutableCloseMs=0;
     if(typeof this.db?.hunterEventPolicySnapshot==='function'){
       const snap=await this.db.hunterEventPolicySnapshot(s.systemName,event);
       activeEntries=Number(snap?.activeEntries||0);latestHunterEntryMs=Number(snap?.latestHunterEntryMs||0);latestByConcept={...(snap?.latestByConcept||{})};
+      executableRepeatEntries=Number(snap?.executableRepeatEntries||0);latestExecutableCloseMs=Number(snap?.latestExecutableCloseMs||0);
     }else{
       const entries=await this.db.entries(s.systemName,{limit:5000});const hunters=entries.filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));
       const eventHunters=hunters.filter((e)=>(e.eventTicker||e.ticker)===event);
       activeEntries=eventHunters.filter((e)=>openLike(e.status)).length;
       for(const e of eventHunters){if(e.status==='rejected')continue;const name=String(e.conceptName||'');if(!name)continue;latestByConcept[name]=Math.max(Number(latestByConcept[name]||0),Number(e.openedAtMs||0));}
       latestHunterEntryMs=eventHunters.filter((e)=>e.status!=='rejected').reduce((m,e)=>Math.max(m,Number(e.openedAtMs||0)),0);
+      const repeatRows=eventHunters.filter((e)=>EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName)&&e.conceptName!==STARLIGHT_EXTINCTION.conceptName&&['open','entry_pending','exit_pending','pending_recovery','closed'].includes(String(e.status||'')));
+      executableRepeatEntries=repeatRows.length;
+      latestExecutableCloseMs=repeatRows.filter((e)=>e.status==='closed').reduce((m,e)=>Math.max(m,Number(e.closedAtMs||0)),0);
     }
     const maxEntriesPerTrade=Math.max(1,Math.floor(Number(s.maxEntriesPerTrade??s.maxPositions??1)));
     const hunterCooldownMinutes=Math.max(0,Number(s.hunterCooldownMinutes??0));
+    const maxRepeatsPerMarket=Math.max(0,Math.floor(Number(s.maxRepeatsPerMarket||0)));
+    const repeatCooldownMinutes=Math.max(0,Number(s.repeatCooldownMinutes||0));
     const cooldownCutoffMs=Date.now()-hunterCooldownMinutes*60_000;
     const sharedCooldownBlocked=hunterCooldownMinutes>0&&latestHunterEntryMs>=cooldownCutoffMs;
     const cooldownBlockedConcepts=Object.entries(latestByConcept).filter(([,at])=>hunterCooldownMinutes>0&&Number(at||0)>=cooldownCutoffMs).map(([name])=>String(name));
@@ -1630,7 +1636,10 @@ export class StrategyEngine {
     const attackCooldownBlocked=Boolean(concept)&&hunterCooldownMinutes>0&&attackLatestEntryMs>=cooldownCutoffMs;
     const cooldownScope=s.galacticExplosionEnabled===true?'attack':'event';
     const cooldownBlocked=cooldownScope==='attack'?(concept?attackCooldownBlocked:sharedCooldownBlocked):sharedCooldownBlocked;
-    return{eventTicker:event,activeEntries,maxEntriesPerTrade,eventCapBlocked:activeEntries>=maxEntriesPerTrade,latestHunterEntryMs,latestByConcept,hunterCooldownMinutes,cooldownScope,sharedCooldownBlocked,attackLatestEntryMs,attackCooldownBlocked,cooldownBlockedConcepts,cooldownBlocked};
+    const repeatCapBlocked=maxRepeatsPerMarket>0&&executableRepeatEntries>=maxRepeatsPerMarket;
+    const repeatCooldownCutoffMs=Date.now()-repeatCooldownMinutes*60_000;
+    const repeatCooldownBlocked=repeatCooldownMinutes>0&&latestExecutableCloseMs>0&&latestExecutableCloseMs>=repeatCooldownCutoffMs;
+    return{eventTicker:event,activeEntries,maxEntriesPerTrade,eventCapBlocked:activeEntries>=maxEntriesPerTrade,latestHunterEntryMs,latestByConcept,hunterCooldownMinutes,cooldownScope,sharedCooldownBlocked,attackLatestEntryMs,attackCooldownBlocked,cooldownBlockedConcepts,cooldownBlocked,executableRepeatEntries,latestExecutableCloseMs,maxRepeatsPerMarket,repeatCooldownMinutes,repeatCapBlocked,repeatCooldownBlocked};
   }
 
   eventClockResetEpoch(){
@@ -1776,6 +1785,14 @@ export class StrategyEngine {
     if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && eventState.cooldownBlocked) {
       await this.audit('hunter_entry_cooldown_blocked', { concept, ticker:q.ticker, eventTicker:event, hunterCooldownMinutes:eventState.hunterCooldownMinutes, cooldownScope:eventState.cooldownScope, latestHunterEntryMs:eventState.latestHunterEntryMs, attackLatestEntryMs:eventState.attackLatestEntryMs, stage, megaWaveAuthorized:megaWaveAuthorized===true });
       return {ok:false,reason:'hunter_cooldown',...eventState};
+    }
+    if (crystalWallOverlay!==true && !starlightCapBypass && eventState.repeatCapBlocked) {
+      await this.audit('hunter_entry_repeat_cap_blocked', { concept, ticker:q.ticker, eventTicker:event, executableRepeatEntries:eventState.executableRepeatEntries, maxRepeatsPerMarket:eventState.maxRepeatsPerMarket, stage });
+      return {ok:false,reason:'event_repeat_cap',...eventState};
+    }
+    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && eventState.repeatCooldownBlocked) {
+      await this.audit('hunter_entry_repeat_cooldown_blocked', { concept, ticker:q.ticker, eventTicker:event, repeatCooldownMinutes:eventState.repeatCooldownMinutes, latestExecutableCloseMs:eventState.latestExecutableCloseMs, stage });
+      return {ok:false,reason:'repeat_cooldown',...eventState};
     }
     return {ok:true,reason:'qualified',...eventState,cooldownApplied:includeCooldown&&crystalWallOverlay!==true&&starlightCapBypass!==true,eventCapBypassed:(crystalWallOverlay===true||galacticSaintCapBypass===true||starlightCapBypass===true)&&eventState.eventCapBlocked,crystalWallOverlay:crystalWallOverlay===true,megaWaveAuthorized:megaWaveAuthorized===true,galacticSaintCapBypass:galacticSaintCapBypass===true,starlightReentry:starlightCapBypass===true};
   }

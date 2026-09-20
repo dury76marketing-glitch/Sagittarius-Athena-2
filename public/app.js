@@ -38,7 +38,7 @@ const COSMOS=[
   {legacy:'Gemini',name:'Gemini',key:'geminiEnabled',desc:'Isolated shadow universe. Another Dimension is the full virtual Attack inside Gemini; it uses no broker money and no simulation portfolio money and no longer authorizes Sagittarius Justice Arrow.',fields:[['geminiReferenceStakeCents','Virtual stake','c'],['geminiMinPriceCents','Min price','c'],['geminiMaxPriceCents','Max price','c']]},
 ];
 const SHARED=[
- ['maxPositions','Max Attack Positions',''],['maxEntriesPerTrade','Max Entries / Event',''],['hunterCooldownMinutes','Shared Attack Cooldown','min'],['eventCooldownMinutes','Cosmo Event Cooldown','min'],['maxSpreadCents','Shared Max Spread','c'],['startingCapitalCents','Simulation Starting Capital','c'],['simFeeCents','Simulation Fee / Contract','c'],['recoveryTrackingHours','Recovery Research Tracking','h'],
+ ['maxPositions','Max Attack Positions',''],['maxEntriesPerTrade','Max Entries / Event',''],['hunterCooldownMinutes','Shared Attack Cooldown','min'],['maxRepeatsPerMarket','Max repeat per market',''],['repeatCooldownMinutes','Repeat cooldown after close','min'],['eventCooldownMinutes','Cosmo Event Cooldown','min'],['maxSpreadCents','Shared Max Spread','c'],['startingCapitalCents','Simulation Starting Capital','c'],['simFeeCents','Simulation Fee / Contract','c'],['recoveryTrackingHours','Recovery Research Tracking','h'],
 ];
 const drafts=new Map();
 function inputHtml(key,label,value,suffix='',step=1,min=null,max=null){const v=drafts.has(key)?drafts.get(key):value,bounds=`${min==null?'':` min=\"${esc(min)}\"`}${max==null?'':` max=\"${esc(max)}\"`}`;return `<label>${esc(label)}<span><input data-setting-key="${esc(key)}" type="number" step="${step}"${bounds} value="${esc(v??'')}"><em>${esc(suffix)}</em></span></label>`;}

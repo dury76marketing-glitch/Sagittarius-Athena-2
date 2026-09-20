@@ -326,6 +326,32 @@ test('RJA6 real Athena and Saints honor operator cap and cooldown; Crystal Wall 
   assert.equal(paper.ok,true,paper.reason);
 });
 
+test('repeat unit is independent of open-cap cooldown and ignores Crystal Wall paper',async()=>{
+  const now=Date.now();
+  const closed={id:'athena-closed',systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'RPT',eventTicker:'RPT',mode:'SIMULATION',status:'closed',openedAtMs:now-10*60_000,closedAtMs:now-30_000,pnlCents:12,entryPriceCents:56,exitPriceCents:60,remainingCount:0};
+  const paper={id:'cw-paper',systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Recovery Hunter',ticker:'RPT',eventTicker:'RPT',mode:'SIMULATION',status:'closed',openedAtMs:now-9*60_000,closedAtMs:now-20_000,pnlCents:8,entryPriceCents:40,exitPriceCents:48,remainingCount:0};
+  const s=settings({maxEntriesPerTrade:8,hunterCooldownMinutes:0,maxRepeatsPerMarket:1,repeatCooldownMinutes:5,galacticExplosionEnabled:true});
+  const st=new StrategyEngine({db:memoryDb([closed,paper]),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const quote=q('RPT',67,68);
+  const blocked=await st.hunterEntryPolicyDecision('Athena Exclamation',quote,{requireClock:false,includeCooldown:true,stage:'test',megaWaveAuthorized:true});
+  assert.equal(blocked.ok,false);
+  assert.equal(blocked.reason,'event_repeat_cap');
+  const wait=settings({maxEntriesPerTrade:8,hunterCooldownMinutes:0,maxRepeatsPerMarket:10,repeatCooldownMinutes:5,galacticExplosionEnabled:true});
+  const waiting=new StrategyEngine({db:memoryDb([closed,paper]),kalshi:{},market:{},learning:{},getSettings:()=>wait,getLiveReady:()=>false,random:()=>0});
+  const cool=await waiting.hunterEntryPolicyDecision('Athena Exclamation',quote,{requireClock:false,includeCooldown:true,stage:'test',megaWaveAuthorized:true});
+  assert.equal(cool.ok,false);
+  assert.equal(cool.reason,'repeat_cooldown');
+  const ready=settings({maxEntriesPerTrade:8,hunterCooldownMinutes:0,maxRepeatsPerMarket:10,repeatCooldownMinutes:0,galacticExplosionEnabled:true});
+  const open=new StrategyEngine({db:memoryDb([closed,paper]),kalshi:{},market:{},learning:{},getSettings:()=>ready,getLiveReady:()=>false,random:()=>0});
+  const ok=await open.hunterEntryPolicyDecision('Athena Exclamation',quote,{requireClock:false,includeCooldown:true,stage:'test',megaWaveAuthorized:true});
+  assert.equal(ok.ok,true,ok.reason);
+  assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('maxRepeatsPerMarket'));
+  assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('repeatCooldownMinutes'));
+  const fresh=sanitizeRuntimeSettings({});
+  assert.equal(fresh.maxRepeatsPerMarket,0);
+  assert.equal(fresh.repeatCooldownMinutes,0);
+});
+
 test('ECA1 Crystal Wall leading clock is inherited by Athena and Saints; a younger probe cannot rewrite it',async()=>{
   const s=settings({minGameMinutes:10,maxGameMinutes:45,hunterCooldownMinutes:0,maxEntriesPerTrade:20});
   const db=memoryDb();
