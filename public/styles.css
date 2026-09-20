@@ -21,6 +21,9 @@
 .nested-table-fold{margin-top:16px;border-top:1px solid #e2e8f0;padding-top:12px}
 .nested-table-fold>summary{padding:8px 2px}
 .nested-table-fold[open]>.table-wrap,.long-table-fold[open]>.table-wrap{margin-top:12px}
+.closed-trades-scroll{max-height:360px;overflow:auto;overscroll-behavior:contain}
+.closed-trades-scroll table{border-collapse:separate;border-spacing:0}
+.closed-trades-scroll thead th{position:sticky;top:0;z-index:1;background:#fff}
 .resource-section{margin-bottom:28px}
 .resource-grid{margin-bottom:14px}
 .resource-section .table-wrap{margin-top:6px}

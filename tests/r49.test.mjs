@@ -831,6 +831,16 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
 });
 
+test('homepage closed table shows latest 30 rows in a scroll box',async()=>{
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
+  const css=await readFile(new URL('../public/styles.css',import.meta.url),'utf8');
+  assert.ok(app.includes('const closedLimit=30'));
+  assert.ok(app.includes('closed.slice(0,closedLimit)'));
+  assert.ok(html.includes('closed-trades-scroll'));
+  assert.ok(css.includes('.closed-trades-scroll{max-height:360px'));
+});
+
 test('fleet attack homepage totals use executable SIM/LIVE rows only',()=>{
   const proto=SagittariusEngine.prototype;
   const agg=proto.normalizeConceptAggregate.call({},{portfolio:[{concept_name:'Athena Exclamation',open:1,closed:2,wins:2,losses:0,pnl_cents:40,avg_entry_cents:60}],signals:[],linked:[]});
