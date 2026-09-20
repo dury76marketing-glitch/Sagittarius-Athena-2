@@ -382,42 +382,21 @@ test('RJA5 Great Horn and Starlight use Athena-style crash/rebound/tick paramete
   assert.equal(horn.qualified,false);assert.equal(horn.watch.crashArmed,true);
 });
 
-test('GE-R2 Galactic ON grants follow-up Saints when Athena opens; OFF still requires a profitable close',async()=>{
-  const sOn=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:6});
-  const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:6,enabledSaintsAtEntry:[...downstream]};
-  const openParent={id:'athena-open-ge',systemName:sOn.systemName,ownerId:sOn.ownerId,conceptName:'Athena Exclamation',ticker:'MW-GE',eventTicker:'MW-GE',mode:sOn.mode,status:'open',remainingCount:1,openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const onH=engineHarness([openParent],sOn);
-  const opened=await onH.e.handleMegaWaveAthenaOpen(openParent);
-  assert.equal(opened.status,'ACTIVE');
-  assert.equal(opened.grant.source,'ATHENA_OPEN_GALACTIC');
-  assert.equal(opened.grant.limit,6);
-  assert.equal(opened.grant.systemName,sOn.systemName);
-  assert.equal(onH.e.megaWaveSaintWatches.size,5);
-  const again=await onH.e.handleMegaWaveAthenaOpen(openParent);
-  assert.equal(again.status,'ACTIVE');
-  assert.equal(onH.db.episodes.size,1,'open grant is idempotent');
-
-  const sOff=settings({galacticExplosionEnabled:false,athenaExclamationFollowUpAttacks:6});
-  const offH=engineHarness([{...openParent,id:'athena-open-off'}],sOff);
-  const ignored=await offH.e.handleMegaWaveAthenaOpen({...openParent,id:'athena-open-off'});
-  assert.equal(ignored.status,'IGNORED');
-  assert.equal(offH.e.megaWaveSaintWatches.size,0);
+test('Athena open never releases Saints; Galactic ON or OFF',async()=>{
+  for(const on of [true,false]){
+    const s=settings({galacticExplosionEnabled:on,athenaExclamationFollowUpAttacks:6});
+    const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:6,enabledSaintsAtEntry:[...downstream]};
+    const openParent={id:`athena-open-${on}`,systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-GE',eventTicker:'MW-GE',mode:s.mode,status:'open',remainingCount:1,openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
+    const h=engineHarness([openParent],s);
+    const opened=await h.e.handleMegaWaveAthenaOpen(openParent);
+    assert.equal(opened.status,'IGNORED');
+    assert.equal(opened.reason,'athena_must_close_profit_before_saints');
+    assert.equal(h.e.megaWaveSaintWatches.size,0);
+    assert.equal(h.db.episodes.size,0);
+  }
 });
 
-test('GE-R2 Galactic open grant lets a Saint execute while Athena is still open',async()=>{
-  const s=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:1,justiceArrowMinCrashCents:15,justiceArrowMinReboundCents:3,justiceArrowMinUpwardTicks:1,justiceArrowMinEntryCents:10,justiceArrowMaxEntryCents:89});
-  const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:1,enabledSaintsAtEntry:['Sagittarius Justice Arrow']};
-  const parent={id:'athena-live-ge',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-LIVE',eventTicker:'MW-LIVE',mode:s.mode,status:'open',remainingCount:1,pnlCents:0,openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{release:RELEASE,megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const h=engineHarness([parent],s);
-  const grantOut=await h.e.handleMegaWaveAthenaOpen(parent);
-  assert.equal(grantOut.status,'ACTIVE');
-  h.e.strategy.executeMegaWaveSaint=async(_q,_p,a)=>({id:`saint-${a.saintConcept}`,conceptName:a.saintConcept,ticker:a.ticker,status:'open',openedAtMs:Date.now()});
-  const opened=await h.e.attemptMegaWaveSaint(grantOut.grant.grantId,'Sagittarius Justice Arrow');
-  assert.equal(opened.status,'OPENED',opened.reason);
-  assert.equal(opened.entry.ticker,parent.ticker);
-});
-
-test('GE-R2 real executeMegaWaveSaint accepts an open Athena parent only on a Galactic open grant',async()=>{
+test('leftover Athena-open grant cannot execute a Saint while Athena is still open',async()=>{
   const s=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:1,justiceArrowMinCrashCents:15,justiceArrowMinReboundCents:3,justiceArrowMinUpwardTicks:1,justiceArrowMinEntryCents:10,justiceArrowMaxEntryCents:89});
   const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:1,enabledSaintsAtEntry:['Sagittarius Justice Arrow']};
   const parent={id:'athena-exec-open',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-EXEC-OPEN',eventTicker:'MW-EXEC-OPEN',mode:s.mode,status:'open',remainingCount:1,pnlCents:0,openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{release:RELEASE,megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
@@ -426,14 +405,51 @@ test('GE-R2 real executeMegaWaveSaint accepts an open Athena parent only on a Ga
   await db.upsertOpportunityEpisode({id:grantId,athenaDecision:{megaWaveGrant:grant},trackingComplete:false});
   const strategy=new StrategyEngine({db,kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
   let creates=0;
-  strategy.createHunter=async(concept,quote)=>{creates+=1;return{id:'saint-open-exec',conceptName:concept,ticker:quote.ticker,status:'open',entryPriceCents:quote.yesAsk};};
+  strategy.createHunter=async()=>{creates+=1;return{id:'saint-open-exec'};};
   const authorization={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,reservationId,parentEntryId:parent.id,parentConcept:'Athena Exclamation',saintConcept:'Sagittarius Justice Arrow',ticker:parent.ticker,eventTicker:parent.eventTicker,allocationDoctrine:MEGA_WAVE.allocationDoctrine,source:'ATHENA_OPEN_GALACTIC',authority:MEGA_WAVE.galacticOpenAuthority};
   let watch={parentEntryPriceCents:56,parentExitPriceCents:56,peakCents:56,lastBidCents:56};
   watch=megaWaveSaintSignalState('Sagittarius Justice Arrow',watch,q(parent.ticker,40,41),s).watch;
   const rebound=megaWaveSaintSignalState('Sagittarius Justice Arrow',watch,q(parent.ticker,44,45),s);
   assert.equal(rebound.qualified,true,rebound.reason);
   const opened=await strategy.executeMegaWaveSaint(q(parent.ticker,44,45),parent,authorization,watch);
-  assert.ok(opened);assert.equal(creates,1);assert.equal(opened.ticker,parent.ticker);
+  assert.equal(opened,null);
+  assert.equal(creates,0);
+});
+
+test('profitable Athena close still grants Saints in that cosmos',async()=>{
+  const s=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:3});
+  const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:3,enabledSaintsAtEntry:['Scarlet Needle','Sagittarius Justice Arrow','Wave Surfer']};
+  const parent={id:'athena-profit-ge',systemName:'ARIES',ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-WIN',eventTicker:'MW-WIN',mode:s.mode,status:'closed',remainingCount:0,pnlCents:40,openedAtMs:Date.now()-1000,closedAtMs:Date.now(),closeReason:'infinity_break',entryPriceCents:56,exitPriceCents:62,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
+  const h=engineHarness([parent],{...s,systemName:'ARIES'});
+  const out=await h.e.handleMegaWaveAthenaClose(parent);
+  assert.equal(out.status,'ACTIVE',out.reason);
+  assert.equal(out.grant.source,'ATHENA_PROFIT_CLOSE');
+  assert.equal(out.grant.systemName,'ARIES');
+  assert.equal(h.e.megaWaveSaintWatches.size,3);
+});
+
+test('Mega Wave grant cannot use an archived or pre-reset Athena as a live parent',async()=>{
+  const resetAt=Date.now()-60_000;
+  const s=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:6,resetTimestampMs:resetAt});
+  const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:6,enabledSaintsAtEntry:[...downstream]};
+  const archived={id:'217c7fe9-916e-4613-865a-4fb93c9591a2',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'SFLAD-LAD',eventTicker:'SFLAD',mode:s.mode,status:'open',archived:true,remainingCount:1,openedAtMs:resetAt-120_000,entryPriceCents:87,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
+  const h=engineHarness([archived],s);
+  const blocked=await h.e.handleMegaWaveAthenaOpen(archived);
+  assert.equal(blocked.status,'IGNORED');
+  assert.equal(blocked.reason,'athena_must_close_profit_before_saints');
+  const grantId=`MEGA-WAVE:GRANT:${archived.id}`;
+  await h.db.upsertOpportunityEpisode({id:grantId,athenaDecision:{megaWaveGrant:{version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,parentEntryId:archived.id,ticker:archived.ticker,status:'ACTIVE',eligibleSaints:['Scarlet Needle'],limit:6,source:'ATHENA_OPEN_GALACTIC'}},trackingComplete:false});
+  const n=await h.e.hydrateMegaWaveGrants();
+  assert.equal(n,0);
+  const stored=await h.db.opportunityEpisode(grantId);
+  assert.equal(stored.athenaDecision.megaWaveGrant.status,'COMPLETE');
+  assert.ok(['stale_pre_reset_mega_wave_grant','athena_open_grant_retired'].includes(stored.athenaDecision.megaWaveGrant.completedReason));
+  const strategy=new StrategyEngine({db:h.db,kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  strategy.createHunter=async()=>({id:'should-not-open'});
+  const reservationId=`${grantId}:SAINT:Scarlet Needle`;
+  await h.db.upsertOpportunityEpisode({id:grantId,athenaDecision:{megaWaveGrant:{version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,parentEntryId:archived.id,ticker:archived.ticker,eventTicker:archived.eventTicker,status:'ACTIVE',eligibleSaints:['Scarlet Needle'],reservations:{'Scarlet Needle':{status:'RESERVED',reservationId}},limit:6,source:'ATHENA_OPEN_GALACTIC',authority:MEGA_WAVE.galacticOpenAuthority}},trackingComplete:false});
+  const out=await strategy.executeMegaWaveSaint(q(archived.ticker,87,88),archived,{version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,grantId,reservationId,parentEntryId:archived.id,parentConcept:'Athena Exclamation',saintConcept:'Scarlet Needle',ticker:archived.ticker,eventTicker:archived.eventTicker,source:'ATHENA_OPEN_GALACTIC',authority:MEGA_WAVE.galacticOpenAuthority},{parentEntryPriceCents:87,peakCents:87,lastBidCents:87});
+  assert.equal(out,null);
 });
 
 test('GE-R2 Galactic OFF + open Athena cannot execute a Saint until the profitable close grant exists',async()=>{
@@ -452,21 +468,14 @@ test('GE-R2 Galactic OFF + open Athena cannot execute a Saint until the profitab
   assert.equal(creates,0);
 });
 
-test('GE-R2 Athena loss after an open grant stops new Saints and does not invent a second grant',async()=>{
+test('Athena loss does not grant Saints',async()=>{
   const s=settings({galacticExplosionEnabled:true,athenaExclamationFollowUpAttacks:2});
   const mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:2,enabledSaintsAtEntry:['Scarlet Needle','Sagittarius Justice Arrow']};
-  const openParent={id:'athena-loss-ge',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-LOSS',eventTicker:'MW-LOSS',mode:s.mode,status:'open',remainingCount:1,openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const h=engineHarness([openParent],s);
-  await h.e.handleMegaWaveAthenaOpen(openParent);
-  assert.equal(h.e.megaWaveSaintWatches.size,2);
-  const closed={...openParent,status:'closed',remainingCount:0,pnlCents:-40,closedAtMs:Date.now(),closeReason:'hard_stop'};
-  h.db.rows.set(closed.id,structuredClone(closed));
+  const closed={id:'athena-loss-ge',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-LOSS',eventTicker:'MW-LOSS',mode:s.mode,status:'closed',remainingCount:0,pnlCents:-40,openedAtMs:Date.now()-1000,closedAtMs:Date.now(),closeReason:'hard_stop',entryPriceCents:56,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
+  const h=engineHarness([closed],s);
   const stopped=await h.e.handleMegaWaveAthenaClose(closed);
   assert.equal(stopped.status,'CHAIN_STOPPED');
-  const ep=await h.db.opportunityEpisode(`MEGA-WAVE:GRANT:${closed.id}`);
-  assert.equal(ep.athenaDecision.megaWaveGrant.status,'COMPLETE');
   assert.equal(h.e.megaWaveSaintWatches.size,0);
-  assert.equal(h.db.episodes.size,1);
 });
 
 test('SE1 Starlight is removed from Mega Wave saints and keeps its own Infinity target',()=>{

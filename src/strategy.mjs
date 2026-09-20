@@ -2569,9 +2569,10 @@ export class StrategyEngine {
     const durableParent=await this.db.entryById(String(authorization.parentEntryId)).catch(()=>null),parentMw=durableParent?.entryConfig?.megaWave||{};
     const grantEpisode=await this.db.opportunityEpisode(String(authorization.grantId||'')).catch(()=>null),grant=grantEpisode?.athenaDecision?.megaWaveGrant,reservation=grant?.reservations?.[concept];
     const parentClosedProfit=String(durableParent?.status||'')==='closed'&&Number(durableParent?.remainingCount||0)<=1e-9&&Number(durableParent?.pnlCents||0)>0;
-    const parentOpenLive=['open','entry_pending'].includes(String(durableParent?.status||''));
-    const galacticOpenGrant=s.galacticExplosionEnabled===true&&(String(grant?.source||authorization?.source||'')==='ATHENA_OPEN_GALACTIC'||String(grant?.authority||'')===String(MEGA_WAVE.galacticOpenAuthority));
-    const parentOk=String(durableParent?.id||'')===String(authorization.parentEntryId)&&String(durableParent?.systemName||'')===String(s.systemName)&&String(durableParent?.ownerId||'')===String(s.ownerId)&&String(durableParent?.mode||'')===String(s.mode||'')&&String(durableParent?.conceptName||'')==='Athena Exclamation'&&String(durableParent?.ticker||'')===ticker&&(parentClosedProfit||(parentOpenLive&&galacticOpenGrant))&&String(parentMw?.version||'')===MEGA_WAVE.version&&String(parentMw?.policyRevision||'')===MEGA_WAVE.policyRevision;
+    const galacticOpenGrant=false;
+    const resetAt=Math.max(0,Number(s.resetTimestampMs||0));
+    const parentCurrentEpoch=durableParent?.archived!==true&&(resetAt<=0||Number(durableParent?.openedAtMs||0)>=resetAt);
+    const parentOk=parentCurrentEpoch&&String(durableParent?.id||'')===String(authorization.parentEntryId)&&String(durableParent?.systemName||'')===String(s.systemName)&&String(durableParent?.ownerId||'')===String(s.ownerId)&&String(durableParent?.mode||'')===String(s.mode||'')&&String(durableParent?.conceptName||'')==='Athena Exclamation'&&String(durableParent?.ticker||'')===ticker&&parentClosedProfit&&String(parentMw?.version||'')===MEGA_WAVE.version&&String(parentMw?.policyRevision||'')===MEGA_WAVE.policyRevision;
     if(!parentOk)return null;
     if(String(grant?.version||'')!==MEGA_WAVE.version||String(grant?.policyRevision||'')!==MEGA_WAVE.policyRevision||String(grant?.status||'')!=='ACTIVE'||String(grant?.parentEntryId||'')!==String(authorization.parentEntryId)||String(grant?.ticker||'')!==ticker||!Array.isArray(grant?.eligibleSaints)||!grant.eligibleSaints.includes(concept)||String(reservation?.status||'')!=='RESERVED'||String(reservation?.reservationId||'')!==String(authorization.reservationId||''))return null;
     const signal=megaWaveSaintSignalState(concept,watch,q,s,Date.now());if(!signal.qualified)return null;
