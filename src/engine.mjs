@@ -411,6 +411,7 @@ export class SagittariusEngine {
     // events wake Recovery Hunter instead of waiting for the next 5-minute
     // full scan. The set contains only still-eligible hard-stop sources.
     this.recoveryPriorityTickers = new Set();
+    this.postExitWatchTickers = new Set();
     this.recoveryEvaluationTimers = new Map();
     // R45 keeps existing active reference-feeder tickers hot so ordinary
     // active Cosmo -> Athena candidates are
@@ -4328,7 +4329,7 @@ export class SagittariusEngine {
         : await this.db.openEntries(this.settings.systemName);
       await this.refreshRecoveryPriorityTickers();
       this.refreshCrashPriorityTickers();
-      const priority = [...new Set([...open.map((x) => x.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers])];
+      const priority = [...new Set([...open.map((x) => x.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers, ...(this.postExitWatchTickers||[])])];
       const markets = await this.market.discover(priority);
       this.lastScanMarkets = markets;
       this.observeConstellationScan(markets);
@@ -4410,7 +4411,7 @@ export class SagittariusEngine {
           const openEntries = await this.db.openEntries(this.settings.systemName);
           await this.refreshRecoveryPriorityTickers();
           this.refreshCrashPriorityTickers();
-          const requiredTickers = new Set([...openEntries.map((e) => e.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers]);
+          const requiredTickers = new Set([...openEntries.map((e) => e.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers, ...(this.postExitWatchTickers||[])]);
           const requiredTrackers = trackers.filter((tr) => requiredTickers.has(tr.ticker));
           const optionalTrackers = trackers.filter((tr) => !requiredTickers.has(tr.ticker)).slice(0, Math.max(0, 50 - requiredTrackers.length));
           const activeTrackers = [...requiredTrackers, ...optionalTrackers];
@@ -4490,6 +4491,40 @@ export class SagittariusEngine {
     }
   }
 
+  refreshPostExitWatchTickers(closedRows=[]){
+    const hours=Math.max(1,Number(this.settings?.recoveryTrackingHours||24));
+    const cut=Date.now()-hours*3600000;
+    const next=new Set();
+    for(const e of closedRows||[]){
+      if(String(e?.status||'')!=='closed')continue;
+      if(!EXECUTABLE_HUNTER_CONCEPTS.has(String(e?.conceptName||'')))continue;
+      if(Number(e?.closedAtMs||0)<cut)continue;
+      const ticker=String(e?.ticker||'');
+      if(ticker)next.add(ticker);
+    }
+    this.postExitWatchTickers=next;
+    if(this.market?.setWanted){
+      const wanted=new Set(this.market.wanted||[]);
+      let changed=false;
+      for(const ticker of next){if(!wanted.has(ticker)){wanted.add(ticker);changed=true;}}
+      if(changed)this.market.setWanted([...wanted]);
+    }
+    return next;
+  }
+
+  livePostExitMark(entry,view){
+    const q=view?.q||this.market?.getQuote?.(entry?.ticker)||null;
+    if(view?.dataState==='FINALIZED'&&Number.isFinite(Number(view.priceCents)))return{priceCents:Number(view.priceCents),dataState:'FINALIZED',observedAtMs:Number(q?.updatedAtMs||Date.now())};
+    if(q&&Number(q.yesBid)>0){
+      const mid=Number(q.yesAsk)>0?(Number(q.yesBid)+Number(q.yesAsk))/2:Number(q.yesBid);
+      const live=Number(q.yesBid);
+      const age=this.market?.quoteAgeMs?.(entry.ticker);
+      const fresh=Number.isFinite(age)&&age<=Math.max(DISPLAY_QUOTE_FRESH_MS,60_000);
+      return{priceCents:live,midCents:mid,dataState:fresh?'LIVE':'STALE',observedAtMs:Number(q.updatedAtMs||Date.now()),quoteAgeMs:age};
+    }
+    return null;
+  }
+
   quoteView(entry) {
     const q = this.market?.getQuote(entry.ticker);
     const age = q ? this.market.quoteAgeMs(entry.ticker) : Infinity;
@@ -4564,6 +4599,7 @@ export class SagittariusEngine {
       const active = entries.filter((e) => !e.archived);
       const hunters = active.filter((e) => EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
       const closed = hunters.filter((e) => e.status === 'closed' && (!reset || e.closedAtMs >= reset));
+      this.refreshPostExitWatchTickers(closed);
       const open = hunters.filter((e) => openLike(e.status));
       const wins = closed.filter((e) => e.pnlCents > 0).length;
       const losses = closed.filter((e) => e.pnlCents < 0).length;
@@ -4594,6 +4630,7 @@ export class SagittariusEngine {
     const open = (openEntries||[]).filter((e)=>EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
     const ghosts = (openEntries||[]).filter((e)=>FEEDER_CONCEPTS.has(e.conceptName));
     const closed = (recentClosed||[]).filter((e)=>EXECUTABLE_HUNTER_CONCEPTS.has(e.conceptName));
+    this.refreshPostExitWatchTickers(closed);
     const active = [...(openEntries||[]),...closed];
     const hunters = [...open,...closed];
     const unrealized = open.reduce((sum,e)=>{const v=this.quoteView(e);return sum+this.openUnrealized(e,v.priceCents);},0);
@@ -4671,7 +4708,7 @@ export class SagittariusEngine {
   resourceProtectedCrashTickers(){
     return new Set([
       ...(this.market?.wanted||[]),...(this.protectedTickers||[]),...(this.recoveryPriorityTickers||[]),
-      ...(this.crashPriorityTickers||[]),...(this.feederPriorityTickers||[]),
+      ...(this.crashPriorityTickers||[]),...(this.feederPriorityTickers||[]),...(this.postExitWatchTickers||[]),
     ].filter(Boolean).map(String));
   }
 
@@ -4813,7 +4850,7 @@ export class SagittariusEngine {
       lowestPriceAfterEntryCents:x.lowestPriceAfterEntryCents??null,maeCents:x.maeCents??null,maeAfterEntryMs:x.maeAfterEntryMs??null,recoveryToEntryMs:x.recoveryToEntryMs??null,recoveryToGreenMs:x.recoveryToGreenMs??null,closeReason:x.closeReason||null,openedAtMs:x.openedAtMs??null,closedAtMs:x.closedAtMs??null,updatedAtMs:x.updatedAtMs??null,dataState:x.dataState||null,quoteAgeMs:x.quoteAgeMs??null,gameMinutes:x.gameMinutes??null,liveStatus:x.liveStatus||null,
       aurora:a?{version:a.version||null,frozen:a.frozen===true,damageControlPercent:a.damageControlPercent??null,maximumEconomicLossRatio:a.maximumEconomicLossRatio??null,dangerPriceCents:a.dangerPriceCents??a.dangerLineCents??null,dangerLineCents:a.dangerLineCents??a.dangerPriceCents??null}:null,
       entryConfig:{profitAuthority,infinityBreak:x.entryConfig?.infinityBreak?{version:x.entryConfig.infinityBreak.version||null,minimumNetPerOriginalContractCents:x.entryConfig.infinityBreak.minimumNetPerOriginalContractCents??null}:null,virtualInfinity:x.entryConfig?.virtualInfinity?{version:x.entryConfig.virtualInfinity.version||null,minimumNetPerOriginalContractCents:x.entryConfig.virtualInfinity.minimumNetPerOriginalContractCents??null,requiredFreshConfirmations:x.entryConfig.virtualInfinity.requiredFreshConfirmations??null}:null},
-      postExitCurrentPriceCents:x.postExitCurrentPriceCents??null,postExitDeltaFromExitCents:x.postExitDeltaFromExitCents??null,postExitBestPriceCents:x.postExitBestPriceCents??null,postExitBestDeltaCents:x.postExitBestDeltaCents??null,postExitMissedUpsideCents:x.postExitMissedUpsideCents??null,postExitWorstPriceCents:x.postExitWorstPriceCents??null,postExitWorstDeltaCents:x.postExitWorstDeltaCents??null,postExitLossAvoidedCents:x.postExitLossAvoidedCents??null,postExitResearchComplete:x.postExitResearchComplete===true,
+      postExitCurrentPriceCents:x.postExitCurrentPriceCents??null,postExitDeltaFromExitCents:x.postExitDeltaFromExitCents??null,postExitBestPriceCents:x.postExitBestPriceCents??null,postExitBestDeltaCents:x.postExitBestDeltaCents??null,postExitMissedUpsideCents:x.postExitMissedUpsideCents??null,postExitWorstPriceCents:x.postExitWorstPriceCents??null,postExitWorstDeltaCents:x.postExitWorstDeltaCents??null,postExitLossAvoidedCents:x.postExitLossAvoidedCents??null,postExitResearchComplete:x.postExitResearchComplete===true,postExitLive:x.postExitLive===true,postExitFinal:x.postExitFinal===true,postExitObservedAtMs:x.postExitObservedAtMs??null,
       shadowPnlCents:x.shadowPnlCents??null,shadowMoveCents:x.shadowMoveCents??null,shadowState:x.shadowState||null,greenTriggerCents:x.greenTriggerCents??null,atomicThunderBoltId:x.atomicThunderBoltId||null,athenaSelectedAttack:x.athenaSelectedAttack||null,realEntryId:x.realEntryId||null,referencePnlCents:x.referencePnlCents??null,signalPriceCents:x.signalPriceCents??null,referenceOriginCents:x.referenceOriginCents??null,
       virtualExecution:v?{fullPositionExecutable:v.fullPositionExecutable===true,executableAverageBidCents:v.executableAverageBidCents??null,executableCount:v.executableCount??null,requiredCount:v.requiredCount??null,confirmations:v.confirmations??null,requiredConfirmations:v.requiredConfirmations??null,targetNetPerOriginalContractCents:v.targetNetPerOriginalContractCents??null,holdReason:v.holdReason||null,action:v.action||null}:null,
     };
@@ -5514,8 +5551,17 @@ export class SagittariusEngine {
     const referenceOrigin = e.conceptName==='Dragon'?'dragon_signal':(e.conceptName==='Phoenix'?'phoenix_signal':(isShadowAttack?(String(e.conceptName||'')===String(CRYSTAL_WALL.shadowConceptName)?'crystal_wall_shadow':'another_dimension'):(isFeeder?'feeder_entry':null)));
     const identity=EXECUTION_ATTACK_DISPLAY[e.conceptName]||null;
     const aurora=e?.entryConfig?.aurora?.version===AURORA_EXECUTION.version&&e.entryConfig.aurora.frozen===true?e.entryConfig.aurora:null;
-    const postExit=e?.postExitState&&typeof e.postExitState==='object'?e.postExitState:{};
-    const closedPostPrice=e?.status==='closed'&&Number.isFinite(Number(postExit.latestMarketPriceCents))?Number(postExit.latestMarketPriceCents):null;
+    const persistedPost=e?.postExitState&&typeof e.postExitState==='object'?e.postExitState:{};
+    const runtimePost=this.profitGuard?.postExitRuntimeState instanceof Map?this.profitGuard.postExitRuntimeState.get(String(e?.id||'')):null;
+    const postExit=runtimePost&&typeof runtimePost==='object'?{...persistedPost,...runtimePost}:persistedPost;
+    const liveMark=e?.status==='closed'?this.livePostExitMark(e,view):null;
+    const closedPostPrice=e?.status==='closed'
+      ?(liveMark&&Number.isFinite(Number(liveMark.priceCents))?Number(liveMark.priceCents)
+        :(Number.isFinite(Number(postExit.latestMarketPriceCents))?Number(postExit.latestMarketPriceCents):null))
+      :null;
+    const closedPostDelta=e?.status==='closed'&&closedPostPrice!=null&&Number.isFinite(Number(e.exitPriceCents))
+      ?Number((closedPostPrice-Number(e.exitPriceCents)).toFixed(6))
+      :(Number.isFinite(Number(postExit.deltaFromExitCents))?Number(postExit.deltaFromExitCents):null);
     const shadowRuntime=isShadowAttack?(String(e.conceptName||'')===String(CRYSTAL_WALL.shadowConceptName)?this.crystalWallShadowRuntime?.get?.(String(e.id||'')):this.anotherDimensionRuntime?.get?.(String(e.id||''))):null;
     const shadowEvaluation=shadowRuntime?.lastEvaluation||null;
     const shadowPeak=isShadowAttack&&openLike(e.status)?Math.max(Number(e.peakPriceCents||e.entryPriceCents||0),Number(shadowRuntime?.peakPriceCents||0)):Number(e.peakPriceCents||0);
@@ -5529,7 +5575,10 @@ export class SagittariusEngine {
       currentBidCents:Number(view.q?.yesBid||view.priceCents||0)||null,
       currentAskCents:Number(view.q?.yesAsk||0)||null,
       postExitCurrentPriceCents:closedPostPrice,
-      postExitDeltaFromExitCents:Number.isFinite(Number(postExit.deltaFromExitCents))?Number(postExit.deltaFromExitCents):null,
+      postExitDeltaFromExitCents:closedPostDelta,
+      postExitLive:liveMark?.dataState==='LIVE',
+      postExitFinal:liveMark?.dataState==='FINALIZED',
+      postExitObservedAtMs:liveMark?.observedAtMs||Number(postExit.latestObservedAtMs||0)||null,
       postExitBestPriceCents:Number.isFinite(Number(postExit.bestExecutableBidCents))?Number(postExit.bestExecutableBidCents):null,
       postExitBestDeltaCents:Number.isFinite(Number(postExit.bestDeltaFromExitCents))?Number(postExit.bestDeltaFromExitCents):null,
       postExitMissedUpsideCents:Number.isFinite(Number(postExit.missedUpsideNetCents))?Number(postExit.missedUpsideNetCents):null,

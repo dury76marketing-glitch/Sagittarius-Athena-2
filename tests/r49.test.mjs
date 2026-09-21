@@ -984,8 +984,61 @@ test('provisional zero-minute record cannot outrank a later confirmed GCA minute
   assert.ok(Math.abs(st.eventClockRecord('RL').anchoredElapsedMinutes-60)<1e-6);
 });
 
+test('closed executable row overlays live post-exit price without changing realized P/L',()=>{
+  const s=settings({mode:'SIMULATION',recoveryTrackingHours:24});
+  const h=engineHarness([],s);
+  h.e.market={
+    wanted:new Set(),
+    setWanted(list){this.wanted=new Set(list);},
+    getQuote(){return {ticker:'PX-T',yesBid:71,yesAsk:72,status:'active',result:'',updatedAtMs:Date.now()};},
+    quoteAgeMs(){return 200;},
+  };
+  const entry={id:'px-1',systemName:'SAGITTARIUS',conceptName:'Athena Exclamation',ticker:'PX-T',status:'closed',entryPriceCents:60,exitPriceCents:64,pnlCents:18,count:5,remainingCount:0,openedAtMs:Date.now()-120000,closedAtMs:Date.now()-30000,closeReason:'infinity_break',postExitState:{latestMarketPriceCents:64,deltaFromExitCents:0}};
+  const view=h.e.decorateEntry(entry);
+  assert.equal(view.entryPriceCents,60);
+  assert.equal(view.exitPriceCents,64);
+  assert.equal(view.pnlCents,18);
+  assert.equal(view.postExitCurrentPriceCents,71);
+  assert.equal(view.postExitDeltaFromExitCents,7);
+  assert.equal(view.postExitLive,true);
+  const compact=h.e.compactDashboardEntry(entry);
+  assert.equal(compact.postExitCurrentPriceCents,71);
+  assert.equal(compact.postExitDeltaFromExitCents,7);
+  assert.equal(compact.pnlCents,18);
+});
 
+test('closed LIVE row uses the same live post-exit overlay and settlement uses final 0/100',()=>{
+  const s=settings({mode:'LIVE',recoveryTrackingHours:24});
+  const h=engineHarness([],s);
+  h.e.market={
+    wanted:new Set(),
+    setWanted(list){this.wanted=new Set(list);},
+    quotes:{
+      live:{ticker:'PX-LIVE',yesBid:40,yesAsk:41,status:'active',result:'',updatedAtMs:Date.now()},
+      done:{ticker:'PX-DONE',yesBid:8,yesAsk:9,status:'finalized',result:'no',updatedAtMs:Date.now()},
+    },
+    getQuote(ticker){return ticker==='PX-DONE'?this.quotes.done:this.quotes.live;},
+    quoteAgeMs(){return 100;},
+  };
+  const live={id:'px-live',systemName:'SAGITTARIUS',conceptName:'Athena Exclamation',ticker:'PX-LIVE',status:'closed',mode:'LIVE',entryPriceCents:55,exitPriceCents:50,pnlCents:-40,count:8,remainingCount:0,openedAtMs:Date.now()-180000,closedAtMs:Date.now()-20000,closeReason:'hard_stop_loss'};
+  const done={id:'px-done',systemName:'SAGITTARIUS',conceptName:'Athena Exclamation',ticker:'PX-DONE',status:'closed',mode:'LIVE',entryPriceCents:55,exitPriceCents:50,pnlCents:-40,count:8,remainingCount:0,openedAtMs:Date.now()-180000,closedAtMs:Date.now()-20000,closeReason:'hard_stop_loss'};
+  const liveView=h.e.decorateEntry(live);
+  assert.equal(liveView.postExitCurrentPriceCents,40);
+  assert.equal(liveView.postExitDeltaFromExitCents,-10);
+  assert.equal(liveView.pnlCents,-40);
+  const doneView=h.e.decorateEntry(done);
+  assert.equal(doneView.postExitCurrentPriceCents,0);
+  assert.equal(doneView.postExitFinal,true);
+  assert.equal(doneView.pnlCents,-40);
+});
 
-
-
-
+test('recent closed tickers stay on the wanted quote list for live post-exit tracking',()=>{
+  const s=settings({recoveryTrackingHours:24});
+  const h=engineHarness([],s);
+  const wanted=[];
+  h.e.market={wanted:new Set(),setWanted(list){wanted.splice(0,wanted.length,...list);this.wanted=new Set(list);}};
+  const closed=[{id:'c1',status:'closed',conceptName:'Athena Exclamation',ticker:'KEEP-ME',closedAtMs:Date.now()-1000}];
+  h.e.refreshPostExitWatchTickers(closed);
+  assert.equal(h.e.postExitWatchTickers.has('KEEP-ME'),true);
+  assert.ok(wanted.includes('KEEP-ME'));
+});
