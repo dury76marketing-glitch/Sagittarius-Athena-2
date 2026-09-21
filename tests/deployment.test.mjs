@@ -372,7 +372,8 @@ test('Mega Wave dashboard exposes Triple Crystal to Athena and 0-12 multi-Saint 
   const athenaAt=app.indexOf("{legacy:'Athena Exclamation',name:'Athena Exclamation'");
   const waveAt=app.indexOf("{legacy:'Wave Surfer',name:'Pegasus Ryu Sei Ken'");
   assert.ok(athenaAt>=0&&scarletAt>athenaAt&&waveAt>scarletAt,'Athena must be the first visible Mega Wave real Attack and Scarlet remains a downstream Saint');
-  for(const key of ['athenaExclamationFollowUpAttacks','scarletNeedleEnabled','scarletNeedleStakeCents','scarletNeedleMinEntryCents','scarletNeedleMaxEntryCents','scarletNeedleInfinityNetPerOriginalContractCents','scarletNeedleMaxRepeats'])assert.ok(app.includes(key),key);
+  for(const key of ['athenaExclamationFollowUpAttacks','scarletNeedleEnabled','scarletNeedleStakeCents','scarletNeedleMinEntryCents','scarletNeedleMaxEntryCents','scarletNeedleInfinityNetPerOriginalContractCents','maxRepeatsPerMarket','repeatCooldownMinutes'])assert.ok(app.includes(key),key);
+  assert.equal(app.includes("repeats:'scarletNeedleMaxRepeats'"),false);
   assert.ok(app.includes('Triple Crystal proof #1'));
   assert.ok(app.includes('BOLT DIRECT'));
   assert.ok(app.includes('Atomic Thunder times this attack') || app.includes('timed by Atomic Thunder'));
