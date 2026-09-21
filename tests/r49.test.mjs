@@ -1078,3 +1078,18 @@ test('createHunter still refuses a Saint or Athena without a Bolt Direct command
   assert.equal(await st.createHunter('Scarlet Needle',quote,s.scarletNeedleStakeCents,0,{legacyCompatibility:false}),null);
   assert.equal(await st.createHunter('Athena Exclamation',quote,s.athenaExclamationStakeCents,0,{legacyCompatibility:false}),null);
 });
+
+test('Bolt Direct dashboard 0/0/0 crash-rebound-ticks is saved and lets the bolt enter with no geometry wait',()=>{
+  const raw=sanitizeRuntimeSettings({scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,athenaExclamationMinCrashCents:0,athenaExclamationMinReboundCents:0,athenaExclamationMinUpwardTicks:0,justiceArrowMinCrashCents:0,waveMinCrashCents:0,momentumMinCrashCents:0,lightningPlasmaMinCrashCents:0,crystalWallMinCrashCents:0,crashRecoveryMinCrashCents:0});
+  assert.equal(raw.scarletNeedleMinCrashCents,0);
+  assert.equal(raw.scarletNeedleMinReboundCents,0);
+  assert.equal(raw.scarletNeedleMinUpwardTicks,0);
+  assert.equal(raw.athenaExclamationMinCrashCents,0);
+  assert.equal(raw.justiceArrowMinCrashCents,0);
+  assert.ok(raw.crystalWallMinCrashCents>=1,'Crystal Wall paper cannot be zero');
+  assert.ok(raw.crashRecoveryMinCrashCents>=1,'Starlight cannot be zero');
+  const s=settings({scarletNeedleEnabled:true,scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,scarletNeedleMinEntryCents:10,scarletNeedleMaxEntryCents:89});
+  const pass=boltDirectAttackCard('Scarlet Needle',q('BD-ZERO',50,51),s,null);
+  assert.equal(pass.ok,true,pass.reason);
+  assert.equal(pass.reason,'bolt_direct_card_qualified');
+});

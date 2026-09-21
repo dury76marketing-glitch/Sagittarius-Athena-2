@@ -687,20 +687,24 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
     out[reboundKey] = Math.max(1, Math.min(99, Math.floor(Number(out[reboundKey]) || out.crystalWallMinReboundCents)));
     out[ticksKey] = Math.max(1, Math.min(20, Math.floor(Number(out[ticksKey]) || out.crystalWallMinUpwardTicks)));
   }
-  out.justiceArrowMinCrashCents = Math.max(1, Math.min(99, Math.floor(Number(out.justiceArrowMinCrashCents) || 15)));
-  out.justiceArrowMinReboundCents = Math.max(1, Math.min(99, Math.floor(Number(out.justiceArrowMinReboundCents) || 5)));
-  out.justiceArrowMinUpwardTicks = Math.max(1, Math.min(20, Math.floor(Number(out.justiceArrowMinUpwardTicks) || 2)));
+  const clampBoltGeom=(value,fallback,max)=>{
+    const n=Number(value);
+    const raw=Number.isFinite(n)?Math.floor(n):fallback;
+    return Math.max(0, Math.min(max, raw));
+  };
+  out.justiceArrowMinCrashCents = clampBoltGeom(out.justiceArrowMinCrashCents, 15, 99);
+  out.justiceArrowMinReboundCents = clampBoltGeom(out.justiceArrowMinReboundCents, 5, 99);
+  out.justiceArrowMinUpwardTicks = clampBoltGeom(out.justiceArrowMinUpwardTicks, 2, 20);
   for (const [crash,rebound,ticks] of [
     ['athenaExclamationMinCrashCents','athenaExclamationMinReboundCents','athenaExclamationMinUpwardTicks'],
     ['scarletNeedleMinCrashCents','scarletNeedleMinReboundCents','scarletNeedleMinUpwardTicks'],
     ['waveMinCrashCents','waveMinReboundCents','waveMinUpwardTicks'],
     ['lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks'],
     ['momentumMinCrashCents','momentumMinReboundCents','momentumMinUpwardTicks'],
-    ['crashRecoveryMinCrashCents','crashRecoveryMinReboundCents','crashRecoveryMinUpwardTicks'],
   ]) {
-    out[crash] = Math.max(1, Math.min(99, Math.floor(Number(out[crash]) || 15)));
-    out[rebound] = Math.max(1, Math.min(99, Math.floor(Number(out[rebound]) || 5)));
-    out[ticks] = Math.max(1, Math.min(20, Math.floor(Number(out[ticks]) || 2)));
+    out[crash] = clampBoltGeom(out[crash], 15, 99);
+    out[rebound] = clampBoltGeom(out[rebound], 5, 99);
+    out[ticks] = clampBoltGeom(out[ticks], 2, 20);
   }
 
 
