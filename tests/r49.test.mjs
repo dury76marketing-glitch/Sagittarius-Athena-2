@@ -5,6 +5,7 @@ import { RELEASE, originalSettings, freshInstallSettings, CANONICAL_NUMERIC_SETT
 import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, EXECUTABLE_HUNTER_CONCEPTS, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { COSMOS_IDS } from '../src/constellation.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
 
@@ -1183,4 +1184,120 @@ test('Galactic ON lets a second attack sit on the same ticker; same attack stays
   assert.equal(await on.exactTickerExposureClear('Scarlet Needle',quote,'test'),true);
   assert.equal(await on.exactTickerExposureClear('Athena Exclamation',quote,'test'),false);
   assert.equal(await off.exactTickerExposureClear('Scarlet Needle',quote,'test'),false);
+});
+
+test('Galactic ON counts repeats per attack so siblings can still join',async()=>{
+  const now=Date.now();
+  const rows=['Scarlet Needle','Sagittarius Justice Arrow','Wave Surfer'].map((concept,i)=>({id:`ge-join-${i}`,systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:concept,ticker:'GE-FULL',eventTicker:'GE-FULL',mode:'SIMULATION',status:'open',openedAtMs:now-1000,entryPriceCents:50,remainingCount:1}));
+  const s=settings({galacticExplosionEnabled:true,maxRepeatsPerMarket:3,repeatCooldownMinutes:3,maxEntriesPerTrade:7,hunterCooldownMinutes:180});
+  const st=new StrategyEngine({db:memoryDb(rows),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const quote=q('GE-FULL',50,51);
+  const sibling=await st.hunterEntryPolicyDecision('Athena Exclamation',quote,{requireClock:false,includeCooldown:true,stage:'test',boltDirectAuthorized:true});
+  assert.equal(sibling.ok,true,sibling.reason);
+  const same=await st.hunterEntryPolicyDecision('Scarlet Needle',quote,{requireClock:false,includeCooldown:true,stage:'test',boltDirectAuthorized:true});
+  assert.equal(same.ok,false);
+  assert.equal(same.reason,'ticker_lock');
+  const off=settings({galacticExplosionEnabled:false,maxRepeatsPerMarket:3,repeatCooldownMinutes:3,maxEntriesPerTrade:7,hunterCooldownMinutes:0});
+  const blocked=new StrategyEngine({db:memoryDb(rows),kalshi:{},market:{},learning:{},getSettings:()=>off,getLiveReady:()=>false,random:()=>0});
+  const fourth=await blocked.hunterEntryPolicyDecision('Athena Exclamation',quote,{requireClock:false,includeCooldown:true,stage:'test',boltDirectAuthorized:true});
+  assert.equal(fourth.ok,false);
+  assert.ok(['event_repeat_cap','ticker_lock'].includes(fourth.reason), fourth.reason);
+});
+
+test('repeat unit is per attack per cosmos only',async()=>{
+  const now=Date.now();
+  const attacks=BOLT_DIRECT.attacks;
+  const s=settings({
+    galacticExplosionEnabled:true,excaliburEnabled:false,recoveryHunterEnabled:true,
+    maxRepeatsPerMarket:3,repeatCooldownMinutes:10,hunterCooldownMinutes:180,maxEntriesPerTrade:7,
+    athenaExclamationMinCrashCents:0,athenaExclamationMinReboundCents:0,athenaExclamationMinUpwardTicks:0,
+    scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,
+    justiceArrowMinCrashCents:0,justiceArrowMinReboundCents:0,justiceArrowMinUpwardTicks:0,
+    waveMinCrashCents:0,waveMinReboundCents:0,waveMinUpwardTicks:0,
+    momentumMinCrashCents:0,momentumMinReboundCents:0,momentumMinUpwardTicks:0,
+    lightningPlasmaMinCrashCents:0,lightningPlasmaMinReboundCents:0,lightningPlasmaMinUpwardTicks:0,
+    crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,
+  });
+  const quote=q('RPT-SIM',50,51);
+  const first=new StrategyEngine({db:memoryDb([]),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  for(const concept of attacks){
+    const decision=await first.hunterEntryPolicyDecision(concept,quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+    assert.equal(decision.ok,true,`${concept} first seat ${decision.reason}`);
+  }
+  const opened=attacks.map((concept,i)=>({id:`open-${i}`,systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:concept,ticker:'RPT-SIM',eventTicker:'RPT-SIM',mode:'SIMULATION',status:'open',openedAtMs:now-60_000,entryPriceCents:50,remainingCount:1}));
+  const live=new StrategyEngine({db:memoryDb(opened),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  for(const concept of attacks){
+    const decision=await live.hunterEntryPolicyDecision(concept,quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+    assert.equal(decision.ok,false);
+    assert.equal(decision.reason,'ticker_lock',concept);
+  }
+  const justClosed=attacks.map((concept,i)=>({id:`closed-hot-${i}`,systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:concept,ticker:'RPT-SIM',eventTicker:'RPT-SIM',mode:'SIMULATION',status:'closed',openedAtMs:now-12*60_000,closedAtMs:now-30_000,entryPriceCents:50,exitPriceCents:52,pnlCents:2,remainingCount:0}));
+  const cooling=new StrategyEngine({db:memoryDb(justClosed),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  for(const concept of attacks){
+    const decision=await cooling.hunterEntryPolicyDecision(concept,quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+    assert.equal(decision.ok,false,concept);
+    assert.equal(decision.reason,'repeat_cooldown',`${concept} ${decision.reason}`);
+  }
+  const cooled=attacks.map((concept,i)=>({id:`closed-cool-${i}`,systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:concept,ticker:'RPT-SIM',eventTicker:'RPT-SIM',mode:'SIMULATION',status:'closed',openedAtMs:now-40*60_000,closedAtMs:now-11*60_000,entryPriceCents:50,exitPriceCents:52,pnlCents:2,remainingCount:0}));
+  const ready=new StrategyEngine({db:memoryDb(cooled),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  for(const concept of attacks){
+    const decision=await ready.hunterEntryPolicyDecision(concept,quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+    assert.equal(decision.ok,true,`${concept} after 10m ${decision.reason}`);
+  }
+  const threeScarlet=[1,2,3].map((n)=>({id:`sc-${n}`,systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Scarlet Needle',ticker:'RPT-SIM',eventTicker:'RPT-SIM',mode:'SIMULATION',status:'closed',openedAtMs:now-n*40*60_000,closedAtMs:now-n*20*60_000,entryPriceCents:50,exitPriceCents:52,pnlCents:2,remainingCount:0}));
+  const capped=new StrategyEngine({db:memoryDb(threeScarlet),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const scarletCap=await capped.hunterEntryPolicyDecision('Scarlet Needle',quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+  assert.equal(scarletCap.ok,false);
+  assert.equal(scarletCap.reason,'event_repeat_cap');
+  const waveStill=await capped.hunterEntryPolicyDecision('Wave Surfer',quote,{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+  assert.equal(waveStill.ok,true,waveStill.reason);
+});
+
+test('Bolt Direct fire opens every Galactic joiner then honors per-attack repeat',async()=>{
+  const s=settings({
+    galacticExplosionEnabled:true,recoveryHunterEnabled:true,
+    maxRepeatsPerMarket:3,repeatCooldownMinutes:10,hunterCooldownMinutes:180,maxEntriesPerTrade:20,
+    athenaExclamationMinCrashCents:0,athenaExclamationMinReboundCents:0,athenaExclamationMinUpwardTicks:0,
+    scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,
+    justiceArrowMinCrashCents:0,justiceArrowMinReboundCents:0,justiceArrowMinUpwardTicks:0,
+    waveMinCrashCents:0,waveMinReboundCents:0,waveMinUpwardTicks:0,
+    momentumMinCrashCents:0,momentumMinReboundCents:0,momentumMinUpwardTicks:0,
+    lightningPlasmaMinCrashCents:0,lightningPlasmaMinReboundCents:0,lightningPlasmaMinUpwardTicks:0,
+    crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,
+  });
+  const db=memoryDb([]);
+  const quote=q('GE-FIRE',48,49);
+  const st=new StrategyEngine({db,kalshi:{},market:{
+    async refreshTicker(){return quote;},
+    getHistory(){return [];},
+    executableAsk(){return {filled:2,avgCents:quote.yesAsk,bestCents:quote.yesAsk};},
+    executableBid(){return {filled:2,avgCents:quote.yesBid,bestCents:quote.yesBid};},
+  },learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const bolt={id:'ATG-SIM-1',ticker:quote.ticker,eventTicker:quote.eventTicker,fingerprint:'fp-sim',greenTrigger:{shadowTradeId:'shadow-1',moveCents:1}};
+  const opened=[];
+  for(const concept of BOLT_DIRECT.attacks){
+    const row=await st.executeBoltDirectFire(quote,bolt,concept,{});
+    assert.ok(row,`${concept} ${st.lastAthenaFireAbort||'no abort'}`);
+    opened.push(row.conceptName);
+  }
+  assert.deepEqual(opened.slice().sort(),BOLT_DIRECT.attacks.slice().sort());
+  const book=await db.entries();
+  assert.equal(book.filter((e)=>e.status==='open').length,7);
+});
+
+test('Excalibur copies the opened attack onto free cosmosses',async()=>{
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:true,athenaExclamationStakeCents:100,scarletNeedleStakeCents:100,systemName:'ARIES'};
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.db={loadCosmosSettings:async(id,host)=>({...host,systemName:id,scarletNeedleStakeCents:100}),audit:async()=>{}};
+  const created=[];
+  engine.strategy={createHunter:async(concept,q,stake)=>({id:`${engine.settings.systemName}-${concept}`,systemName:engine.settings.systemName,conceptName:concept,ticker:q.ticker,status:'open',stakeCents:stake})};
+  engine.rememberCosmosBookEntry=(row)=>{engine.cosmosBooks[row.systemName]=[...(engine.cosmosBooks[row.systemName]||[]),row];created.push(row);};
+  const source={id:'src-sc',systemName:'ARIES',conceptName:'Scarlet Needle',ticker:'EX-SIM',entryConfig:{athenaFire:{version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,selectedAttack:'Scarlet Needle',ticker:'EX-SIM',stakeCents:100,commandHash:'x'}}};
+  const quote={ticker:'EX-SIM',eventTicker:'EX-SIM',yesBid:50,yesAsk:51,status:'active'};
+  const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,quote);
+  assert.ok(copied.length>=10,`copied ${copied.length}`);
+  assert.ok(copied.every((row)=>row.conceptName==='Scarlet Needle'));
+  assert.equal(copied.some((row)=>row.systemName==='ARIES'),false);
+  assert.equal(new Set(copied.map((row)=>row.systemName)).size,copied.length);
 });

@@ -6,7 +6,7 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled, boltDirectEnabledAttacks, boltDirectAttackCard } from './strategy.mjs';
+import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled, boltDirectEnabledAttacks, boltDirectAttackCard, attackConfiguredStakeCents } from './strategy.mjs';
 import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
@@ -2738,9 +2738,8 @@ export class SagittariusEngine {
       if(!eventAdmission){await this.db.audit('warning','post_bolt_event_policy_unavailable',{boltId:bolt.id,ticker:q.ticker}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'event_policy_unavailable'});continue;}
       if(eventAdmission.eventCapBlocked){await this.db.audit('info','post_bolt_event_cap_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:eventAdmission.eventTicker,activeEntries:eventAdmission.activeEntries,maxEntriesPerTrade:eventAdmission.maxEntriesPerTrade}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'event_entry_cap'});continue;}
       const galacticOn=s.galacticExplosionEnabled===true;
-      if(!galacticOn&&eventAdmission.cooldownBlocked){await this.db.audit('info','post_bolt_cooldown_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:eventAdmission.eventTicker,hunterCooldownMinutes:eventAdmission.hunterCooldownMinutes,cooldownScope:eventAdmission.cooldownScope,latestHunterEntryMs:eventAdmission.latestHunterEntryMs}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'hunter_cooldown'});continue;}
-      if(!galacticOn&&eventAdmission.repeatCapBlocked){await this.db.audit('info','post_bolt_repeat_cap_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:eventAdmission.eventTicker,executableRepeatEntries:eventAdmission.executableRepeatEntries,maxRepeatsPerMarket:eventAdmission.maxRepeatsPerMarket}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'event_repeat_cap'});continue;}
-      if(!galacticOn&&eventAdmission.repeatCooldownBlocked){await this.db.audit('info','post_bolt_repeat_cooldown_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:eventAdmission.eventTicker,repeatCooldownMinutes:eventAdmission.repeatCooldownMinutes,latestExecutableCloseMs:eventAdmission.latestExecutableCloseMs}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'repeat_cooldown'});continue;}
+      const repeatUnitOwnsReentry=Number(s.maxRepeatsPerMarket||0)>0||Number(s.repeatCooldownMinutes||0)>0;
+      if(!galacticOn&&!repeatUnitOwnsReentry&&eventAdmission.cooldownBlocked){await this.db.audit('info','post_bolt_cooldown_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:eventAdmission.eventTicker,hunterCooldownMinutes:eventAdmission.hunterCooldownMinutes,cooldownScope:eventAdmission.cooldownScope,latestHunterEntryMs:eventAdmission.latestHunterEntryMs}).catch(()=>{});this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'POST_BOLT_BLOCKED',status:'BLOCKED',reason:'hunter_cooldown'});continue;}
       const enabledAttacks=boltDirectEnabledAttacks(s);
       if(!enabledAttacks.length){
         this.recordEntryCandidateStage({candidateId:this.candidateIdForBolt(bolt),boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'BOLT_DIRECT_BLOCKED',status:'BLOCKED',reason:'no_enabled_bolt_direct_attack'});
@@ -3416,11 +3415,11 @@ export class SagittariusEngine {
     return Number(simulationPortfolioCents||0);
   }
 
-  cosmosHoldsExactTicker(id, ticker) {
+  cosmosHoldsExactTicker(id, ticker, concept=null) {
     const exact=String(ticker||'');
     const openLike=(status)=>['open','entry_pending','exit_pending','pending_recovery'].includes(String(status||''));
     const rows=isolateBook(this.cosmosBooks?.[id]||[],id);
-    return rows.some((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)&&String(row.ticker||'')===exact);
+    return rows.some((row)=>this.isConstellationOverviewHunter(row)&&openLike(row.status)&&String(row.ticker||'')===exact&&(!concept||String(row.conceptName||'')===String(concept)));
   }
 
   excaliburRuntime() {
@@ -3456,7 +3455,7 @@ export class SagittariusEngine {
     if (host.excaliburEnabled!==true) return [];
     if (host.rozanHyakuRyuHaEnabled===true) return [];
     const concept=String(sourceEntry?.conceptName||'');
-    if (concept!=='Athena Exclamation') return [];
+    if (!BOLT_DIRECT.attacks.includes(concept)) return [];
     const ticker=String(sourceEntry?.ticker||q?.ticker||'');
     if (!ticker) return [];
     const sourceRoom=normalizeCosmosId(sourceEntry?.systemName||host.systemName);
@@ -3467,9 +3466,12 @@ export class SagittariusEngine {
     }
     const grants=this.excaliburRuntime();
     const geometry=this.seedExcaliburGeometry(ticker,q);
-    const prior=grants.get(ticker);
+    const grantKey=`${ticker}|attack:${concept}`;
+    const prior=grants.get(grantKey);
     const grant={
       ticker,
+      concept,
+      grantKey,
       eventTicker:String(q?.eventTicker||sourceEntry?.eventTicker||ticker),
       sourceEntryId:String(sourceEntry.id||''),
       sourceCosmos:sourceRoom,
@@ -3480,9 +3482,10 @@ export class SagittariusEngine {
       crashDepthCents:Math.max(Number(prior?.crashDepthCents||0),Number(geometry.crashDepthCents||0)),
       rooms:prior?.rooms instanceof Map?prior.rooms:new Map(),
     };
-    grants.set(ticker,grant);
+    grants.set(grantKey,grant);
     await this.db?.audit?.('info','excalibur_granted',{
       ticker,
+      concept,
       sourceCosmos:sourceRoom,
       sourceEntryId:grant.sourceEntryId,
       crashDepthCents:grant.crashDepthCents,
@@ -3498,7 +3501,20 @@ export class SagittariusEngine {
     const ticker=String(q?.ticker||'');
     if(!ticker) return [];
     const grants=this.excaliburRuntime();
-    const grant=grants.get(ticker);
+    const matching=[...grants.values()].filter((row)=>String(row?.ticker||'')===ticker);
+    if(!matching.length) return [];
+    const openedAll=[];
+    for(const grant of matching){
+      const opened=await this.observeExcaliburGrant(q, grant, crashState);
+      if(opened.length) openedAll.push(...opened);
+    }
+    return openedAll;
+  }
+
+  async observeExcaliburGrant(q, grant, crashState=null) {
+    const host=this.settings||{};
+    const ticker=String(q?.ticker||grant?.ticker||'');
+    const grants=this.excaliburRuntime();
     if(!grant) return [];
     if(crashState?.episodeId){
       const peak=Math.max(0,Number(crashState.preCrashPeakCents||0));
@@ -3510,16 +3526,18 @@ export class SagittariusEngine {
     }
     const status=String(q?.status||'active').toLowerCase();
     if(Boolean(q?.result)||['finalized','settled','closed'].includes(status)){
-      grants.delete(ticker);
+      if(grant.grantKey) grants.delete(grant.grantKey);
+      else grants.delete(ticker);
       return [];
     }
+    const concept=String(grant.concept||grant.sourceFire?.selectedAttack||'Athena Exclamation');
     const opened=[];
     for(const id of COSMOS_IDS){
       if(id===grant.sourceCosmos) continue;
-      if(this.cosmosHoldsExactTicker(id,ticker)) continue;
+      if(this.cosmosHoldsExactTicker(id,ticker,concept)) continue;
       const room=grant.rooms.get(id)||{status:'WATCHING',watch:null,openedEntryId:null};
       if(room.status==='OPENED'||room.openedEntryId) continue;
-      const flight=`${ticker}:${id}`;
+      const flight=`${ticker}|attack:${concept}:${id}`;
       if(this.excaliburInFlight.has(flight)) continue;
       const replica=await this.withCosmosSettings(id, async (bound) => {
         const seed={
@@ -3529,25 +3547,30 @@ export class SagittariusEngine {
           lastBidCents:Number(room.watch?.lastBidCents||q?.yesBid||0),
           upwardTicks:Math.max(0,Math.floor(Number(room.watch?.upwardTicks||0))),
         };
-        const geometry=crystalWallGeometryReady(seed,q,bound,Date.now());
+        const boltDirectCopy=String(grant.sourceFire?.authorityMode||'')===BOLT_DIRECT.strategicEntryAuthority;
+        const geometry=boltDirectCopy
+          ? {geometryReady:true,reason:'bolt_direct_excalibur_copy',minCrashCents:0,minReboundCents:0,minUpwardTicks:0,crashDepthCents:Number(seed.crashDepthCents||0),reboundCents:0,upwardTicks:Number(seed.upwardTicks||0)}
+          : crystalWallGeometryReady(seed,q,bound,Date.now());
         room.watch=geometry;
         room.status=geometry.geometryReady?'READY':geometry.reason||'WATCHING';
         grant.rooms.set(id,room);
         if(geometry.geometryReady!==true) return null;
         this.excaliburInFlight.add(flight);
         try{
-          const stake=Number(bound?.athenaExclamationStakeCents||host.athenaExclamationStakeCents||100);
+          const stake=Number(attackConfiguredStakeCents(bound,concept)||host.athenaExclamationStakeCents||100);
           const core=structuredClone(grant.sourceFire);
           delete core.commandHash;
           core.systemName=id;
           core.stakeCents=stake;
-          core.authorizationId=`EXCALIBUR:${grant.sourceEntryId||'fire'}:${id}`;
+          core.selectedAttack=concept;
+          core.authorizationId=`EXCALIBUR:${grant.sourceEntryId||'fire'}:${id}:${concept}`;
           core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Date.now()+10_000);
-          core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
+          core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,copiedConcept:concept,wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
           const command=sealAthenaFireCommand(core);
-          return this.strategy.createHunter('Athena Exclamation', q, stake, 0, {
+          return this.strategy.createHunter(concept, q, stake, 0, {
             athenaFireCommand:command,
-            entryQualificationSnapshot:{excalibur:true,sourceCosmos:grant.sourceCosmos,parentEntryId:grant.sourceEntryId,crystalWallGeometry:geometry},
+            boltDirectAuthorization:boltDirectCopy?{version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,boltId:String(command.boltId||''),ticker,selectedAttack:concept}:null,
+            entryQualificationSnapshot:{excalibur:true,sourceCosmos:grant.sourceCosmos,parentEntryId:grant.sourceEntryId,copiedConcept:concept,crystalWallGeometry:geometry},
             legacyCompatibility:false,
           });
         } finally {

@@ -698,7 +698,7 @@ test('TC1 Excalibur grant does not copy Athena until each room prints its own Cr
   const grantQuote = { ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: 58, yesAsk: 60, status: 'active' };
   const immediate = await SagittariusEngine.prototype.fanOutExcalibur.call(engine, source, grantQuote);
   assert.equal(immediate.length, 0);
-  assert.equal(engine.excaliburGrants.get('KXITFMATCH-TOP').sourceCosmos, 'ARIES');
+  assert.equal(engine.excaliburGrants.get('KXITFMATCH-TOP|attack:Athena Exclamation').sourceCosmos, 'ARIES');
 
   const shallow = {
     ticker: 'KXITFMATCH-TOP', eventTicker: 'KXITFMATCH-TOP', yesBid: 50, yesAsk: 52, status: 'active',

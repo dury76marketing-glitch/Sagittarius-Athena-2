@@ -968,6 +968,13 @@ export class Database {
     ), by_concept as (
       select concept_name,coalesce(max(opened_at_ms) filter(where status<>'rejected'),0)::bigint as latest_hunter_entry_ms
       from event_rows group by concept_name
+    ), repeat_by_concept as (
+      select concept_name,
+        count(*) filter(where status in ('open','entry_pending','exit_pending','pending_recovery','closed'))::int as repeat_entries,
+        coalesce(max(closed_at_ms) filter(where status='closed'),0)::bigint as latest_close_ms
+      from event_rows
+      where concept_name = any($4::text[]) and concept_name <> 'Crash Recovery Hunter'
+      group by concept_name
     ), aggregate as (
       select count(*) filter(where status in ('open','entry_pending','exit_pending','pending_recovery'))::int as active_entries,
         coalesce(max(opened_at_ms) filter(where status<>'rejected'),0)::bigint as latest_hunter_entry_ms,
@@ -975,10 +982,14 @@ export class Database {
         coalesce(max(closed_at_ms) filter(where concept_name = any($4::text[]) and concept_name <> 'Crash Recovery Hunter' and status='closed'),0)::bigint as latest_executable_close_ms
       from event_rows
     ) select aggregate.active_entries,aggregate.latest_hunter_entry_ms,aggregate.executable_repeat_entries,aggregate.latest_executable_close_ms,
-      coalesce((select jsonb_object_agg(concept_name,latest_hunter_entry_ms) from by_concept),'{}'::jsonb) as latest_by_concept
+      coalesce((select jsonb_object_agg(concept_name,latest_hunter_entry_ms) from by_concept),'{}'::jsonb) as latest_by_concept,
+      coalesce((select jsonb_object_agg(concept_name,repeat_entries) from repeat_by_concept),'{}'::jsonb) as repeat_by_concept,
+      coalesce((select jsonb_object_agg(concept_name,latest_close_ms) from repeat_by_concept),'{}'::jsonb) as close_by_concept
       from aggregate`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,event,EXECUTABLE_HUNTER_CONCEPT_NAMES]);
     const by=r.rows[0]?.latest_by_concept||{};
-    return{activeEntries:n(r.rows[0]?.active_entries),latestHunterEntryMs:n(r.rows[0]?.latest_hunter_entry_ms),executableRepeatEntries:n(r.rows[0]?.executable_repeat_entries),latestExecutableCloseMs:n(r.rows[0]?.latest_executable_close_ms),latestByConcept:Object.fromEntries(Object.entries(by).map(([k,v])=>[k,n(v)]))};
+    const repeats=r.rows[0]?.repeat_by_concept||{};
+    const closes=r.rows[0]?.close_by_concept||{};
+    return{activeEntries:n(r.rows[0]?.active_entries),latestHunterEntryMs:n(r.rows[0]?.latest_hunter_entry_ms),executableRepeatEntries:n(r.rows[0]?.executable_repeat_entries),latestExecutableCloseMs:n(r.rows[0]?.latest_executable_close_ms),latestByConcept:Object.fromEntries(Object.entries(by).map(([k,v])=>[k,n(v)])),repeatByConcept:Object.fromEntries(Object.entries(repeats).map(([k,v])=>[k,n(v)])),closeByConcept:Object.fromEntries(Object.entries(closes).map(([k,v])=>[k,n(v)]))};
   }
   async recoverySourceEntries(systemName,{sinceMs=0}={}){
     const since=Math.max(0,Number(sinceMs)||0);
