@@ -1,23 +1,27 @@
-# SAGITTARIUS — Twelve Cosmos / Mega Wave / Game Clock retired
+# SAGITTARIUS — Bolt Direct R2
 
-Release: `SAGITTARIUS-COMPLETE-AUDITED-PRODUCTION-GAME-CLOCK-AUTHORITY-REMOVED-2026-09-20`
+Release: `SAGITTARIUS-BOLT-DIRECT-R2-2026-09-21`
 
 Package version: `3.3.2`
 
 ## Current executable chain
 
 ```
-CI1 crash
-→ Crystal Wall Proof 1…N (operator 1–5)
-→ proof certificate
-→ Athena Exclamation own crash / rebound / ticks
-→ Andromeda + book / spread / band / cap
+Feeder shadow
+→ GREEN
+→ Atomic Thunder Bolt (5s timing ticket)
+→ enabled attack own band / crash / rebound / ticks
+→ Andromeda + book / spread / cap
 → full configured size
 → SIM or LIVE fill
 → Infinity Break / Aurora
 → close
-→ historical timestamps and proof IDs
 ```
+
+Crystal Wall proofs are paper only. They do not authorize Athena.
+Athena is an optional attack, not a grant source.
+Galactic Explosion OFF = one ticker one hunter.
+Galactic Explosion ON = each enabled attack may join that ticker (one seat per attack).
 
 Game Clock is **historical telemetry only**. It does not grant or deny trades. A candidate at 4, 95, 177, or 200 minutes is not blocked by minutes.
 

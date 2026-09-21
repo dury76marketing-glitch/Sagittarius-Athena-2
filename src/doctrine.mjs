@@ -350,20 +350,37 @@ export const SAGITTARIUS_JUSTICE_ARROW = Object.freeze({
 });
 
 export const GALACTIC_EXPLOSION = Object.freeze({
-  version:'GALACTIC-EXPLOSION-V2',
-  policyRevision:'GE-R2-ATHENA-OPEN-SAME-TICKER-SAINTS',
+  version:'GALACTIC-EXPLOSION-V3',
+  policyRevision:'GE-R3-BOLT-DIRECT-SAME-TICKER-JOIN',
   role:'multi_attack_exact_ticker_topology',
   disabledLockScope:'exact_ticker',
   enabledLockScope:'exact_ticker_plus_attack_identity',
   sameAttackDuplicatesAllowed:false,
   defaultEnabled:false,
-  offRule:'one_exact_ticker_one_hunter_saints_only_after_profitable_athena_close',
-  onRule:'athena_open_grants_enabled_follow_up_saints_same_ticker_same_cosmos',
-  saintReleaseWhenOn:'athena_open',
-  saintReleaseWhenOff:'profitable_athena_close',
+  offRule:'one_exact_ticker_one_hunter',
+  onRule:'enabled_bolt_direct_attacks_may_join_same_exact_ticker',
+  saintReleaseWhenOn:'none_bolt_direct_joiners',
+  saintReleaseWhenOff:'none_one_ticker_one_hunter',
   copiesAthenaFill:false,
   saintsKeepOwnDoctrine:true,
   sameCosmosOnly:true,
+  athenaIsPermission:false,
+});
+
+export const BOLT_DIRECT = Object.freeze({
+  version:'BOLT-DIRECT-R2',
+  policyRevision:'BD-R2-THUNDERBOLT-ONLY-TIMING',
+  role:'atomic_thunder_bolt_times_one_enabled_attack',
+  authority:'SIGNAL_PLUS_ATTACK_CARD',
+  timingAuthority:'ATOMIC_THUNDER_BOLT',
+  crystalWallPermission:false,
+  athenaPermission:false,
+  megaWavePermission:false,
+  saintGrantPermission:false,
+  maximumOpportunityAgeMs:5_000,
+  attacks:Object.freeze(['Scarlet Needle','Sagittarius Justice Arrow','Wave Surfer','Momentum Hunter','Lightning Plasma','Athena Exclamation']),
+  excludedAttacks:Object.freeze(['Recovery Hunter','Crash Recovery Hunter','Another Dimension']),
+  strategicEntryAuthority:'BOLT-DIRECT-ATTACK-CARD',
 });
 
 export const ROZAN_HYAKU_RYU_HA = Object.freeze({

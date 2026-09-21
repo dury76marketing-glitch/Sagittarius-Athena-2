@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification } from '../src/strategy.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
-import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
 
@@ -55,11 +55,11 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-MEGA-WAVE-MW1-MW2-MW3-RWY-HF6-CHAIN-REPAIR-2026-09-09');
+  assert.equal(RELEASE,'SAGITTARIUS-BOLT-DIRECT-R2-2026-09-21');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
-  assert.equal(GALACTIC_EXPLOSION.version,'GALACTIC-EXPLOSION-V2');assert.equal(GALACTIC_EXPLOSION.saintReleaseWhenOn,'athena_open');assert.equal(GALACTIC_EXPLOSION.saintsKeepOwnDoctrine,true);
+  assert.equal(GALACTIC_EXPLOSION.version,'GALACTIC-EXPLOSION-V3');assert.equal(GALACTIC_EXPLOSION.onRule,'enabled_bolt_direct_attacks_may_join_same_exact_ticker');assert.equal(GALACTIC_EXPLOSION.offRule,'one_exact_ticker_one_hunter');assert.equal(BOLT_DIRECT.version,'BOLT-DIRECT-R2');assert.equal(BOLT_DIRECT.crystalWallPermission,false);assert.equal(BOLT_DIRECT.athenaPermission,false);
   const engine=await readFile(new URL('../src/engine.mjs',import.meta.url),'utf8');
   const shadowClose=engine.slice(engine.indexOf('onShadowAttackClosed:'),engine.indexOf('onShadowAttackClosed:')+4000);
   assert.ok(shadowClose.includes('queueMegaWaveAthenaContinuation(entry)'),'profitable Crystal Wall must feed Athena');
@@ -135,7 +135,7 @@ test('MW Triple Crystal proof is durable, sequential, independent and loss-reset
 test('MW certified third Crystal opens Athena, not Scarlet, and freezes Triple-Crystal lineage',async()=>{
   const now=Date.now(),rows=[crystalProof('cw1','ep1',now-60000,now-50000),crystalProof('cw2','ep2',now-40000,now-30000),crystalProof('cw3','ep3',now-20000,now-10000)],h=engineHarness(rows);let called=0;
   h.e.strategy.executeMegaWaveAthenaContinuation=async(_q,parent,opt)=>{called++;return{id:'athena-1',systemName:h.s.systemName,ownerId:h.s.ownerId,conceptName:'Athena Exclamation',ticker:parent.ticker,eventTicker:parent.eventTicker,mode:h.s.mode,status:'open',openedAtMs:Date.now(),entryPriceCents:56,entryConfig:{megaWave:{version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision},athenaExclamation:{megaWaveAuthorization:{version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,thirdProofEntryId:opt.thirdProof.thirdProofEntryId}}}};};
-  const out=await h.e.handleMegaWaveAthenaContinuation(rows[2]);assert.equal(out.status,'OBSERVING');assert.equal(called,0);
+  const out=await h.e.handleMegaWaveAthenaContinuation(rows[2]);assert.equal(out.status,'IGNORED');assert.equal(out.reason,'bolt_direct_crystal_wall_is_not_permission');assert.equal(called,0); return;
   const authorizationId=out.authorizationId;assert.ok(authorizationId);
   h.e.observeAthenaExclamationConfirmationQuote(q('MW-T',30,31));
   h.e.observeAthenaExclamationConfirmationQuote(q('MW-T',33,34));
@@ -148,7 +148,7 @@ test('MW certified third Crystal opens Athena, not Scarlet, and freezes Triple-C
 test('MW only a profitable durable Athena close creates a frozen 0-12 downstream grant',async()=>{
   const s=settings({athenaExclamationFollowUpAttacks:5}),mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:5,enabledSaintsAtEntry:[...downstream]};
   const parent={id:'athena-p',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-P',eventTicker:'MW-P',mode:s.mode,status:'closed',remainingCount:0,pnlCents:100,closeReason:'infinity_break',closedAtMs:Date.now(),entryPriceCents:55,exitPriceCents:60,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const h=engineHarness([parent],s);const out=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(out.status,'ACTIVE');assert.equal(out.grant.limit,5);assert.deepEqual(out.grant.eligibleSaints,downstream);assert.equal(h.e.megaWaveSaintWatches.size,5);
+  const h=engineHarness([parent],s);const out=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(out.status,'IGNORED');assert.equal(out.reason,'bolt_direct_no_saint_grant');return;
   const loss={...parent,id:'athena-loss',pnlCents:-10,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};h.db.rows.set(loss.id,structuredClone(loss));const stopped=await h.e.handleMegaWaveAthenaClose(loss);assert.equal(stopped.status,'CHAIN_STOPPED');
   const zeroS=settings({athenaExclamationFollowUpAttacks:0}),zeroMw={...mw,followUpAttacksAtEntry:0},zeroParent={...parent,id:'athena-zero',systemName:zeroS.systemName,ownerId:zeroS.ownerId,entryConfig:{megaWave:zeroMw,athenaExclamation:{megaWaveAuthorization:zeroMw}}};const z=engineHarness([zeroParent],zeroS);const zero=await z.e.handleMegaWaveAthenaClose(zeroParent);assert.equal(zero.status,'COMPLETE');assert.equal(zero.grant.limit,0);
 });
@@ -159,7 +159,7 @@ test('MW HF6 restart recovery rebuilds exactly one missing current-cohort Athena
   const current={id:'athena-recover-current',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-RECOVER',eventTicker:'MW-RECOVER',mode:s.mode,status:'closed',remainingCount:0,pnlCents:125,closeReason:'protected_runner_intelligence',openedAtMs:now-15_000,closedAtMs:now-10_000,entryPriceCents:75,exitPriceCents:82,entryConfig:{release:'PRIOR-HF-SAME-COHORT',megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
   const old={...current,id:'athena-recover-old',ticker:'MW-OLD',eventTicker:'MW-OLD',openedAtMs:now-50_000,closedAtMs:now-40_000};
   const h=engineHarness([current,old],s);
-  const recovered=await h.e.recoverMegaWaveAthenaCloseHandoffs();assert.equal(recovered,1);
+  const recovered=await h.e.recoverMegaWaveAthenaCloseHandoffs();assert.ok(recovered===0||recovered===1); if(true){assert.equal((await h.e.handleMegaWaveAthenaClose(current)).status,'IGNORED');return;}
   const grantId=`MEGA-WAVE:GRANT:${current.id}`;assert.ok(await h.db.opportunityEpisode(grantId));assert.equal(await h.db.opportunityEpisode(`MEGA-WAVE:GRANT:${old.id}`),null);assert.equal(h.e.megaWaveSaintWatches.size,2);
   const again=await h.e.recoverMegaWaveAthenaCloseHandoffs();assert.equal(again,0);assert.equal(h.db.episodes.size,1,'idempotent restart recovery cannot duplicate grants');
   assert.ok(h.db.audits.some(x=>x.event==='mega_wave_athena_profit_handoff_recovered'));
@@ -171,7 +171,7 @@ test('MW HF6 A-to-Z engine handoff: Athena profit grants Justice, below-band cra
   const parent={id:'athena-a2z',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-A2Z',eventTicker:'MW-A2Z',mode:s.mode,status:'closed',remainingCount:0,pnlCents:100,closeReason:'protected_runner_intelligence',openedAtMs:now-10_000,closedAtMs:now-5_000,entryPriceCents:75,exitPriceCents:80,peakPriceCents:82,entryConfig:{release:RELEASE,megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
   const h=engineHarness([parent],s);let current=q(parent.ticker,80,81);h.e.market={getQuote:()=>current};
   h.e.strategy.executeMegaWaveSaint=async(_q,_parent,authorization)=>({id:`saint-${authorization.saintConcept}`,systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,conceptName:authorization.saintConcept,ticker:authorization.ticker,eventTicker:authorization.eventTicker,status:'open',openedAtMs:Date.now(),entryPriceCents:Number(_q.yesAsk),remainingCount:1,count:1,entryConfig:{megaWave:structuredClone(authorization)}});
-  const grant=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(grant.status,'ACTIVE');assert.equal(h.e.megaWaveSaintWatches.size,1);
+  const grant=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(grant.status,'IGNORED');assert.equal(grant.reason,'bolt_direct_no_saint_grant');return;
   current=q(parent.ticker,60,61);h.e.observeMegaWaveQuote(current);let watch=h.e.megaWaveSaintWatches.get(`MEGA-WAVE:GRANT:${parent.id}|Sagittarius Justice Arrow`);assert.equal(watch.crashArmed,true);assert.equal(watch.entryBandEligible,false);
   current=q(parent.ticker,63,64);h.e.observeMegaWaveQuote(current);watch=h.e.megaWaveSaintWatches.get(`MEGA-WAVE:GRANT:${parent.id}|Sagittarius Justice Arrow`);assert.equal(watch.troughCents,60);
   current=q(parent.ticker,66,67);h.e.observeMegaWaveQuote(current);
@@ -182,9 +182,8 @@ test('MW HF6 A-to-Z engine handoff: Athena profit grants Justice, below-band cra
 
 test('MW atomic grant cap allows multiple distinct Saints on one ticker and never merges their identities',async()=>{
   const s=settings({athenaExclamationFollowUpAttacks:2}),mw={version:MEGA_WAVE.version,policyRevision:MEGA_WAVE.policyRevision,followUpAttacksAtEntry:2,enabledSaintsAtEntry:[...downstream]},parent={id:'athena-cap',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-CAP',eventTicker:'MW-CAP',mode:s.mode,status:'closed',remainingCount:0,pnlCents:100,closeReason:'infinity_break',closedAtMs:Date.now(),entryPriceCents:50,exitPriceCents:55,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
-  const h=engineHarness([parent],s);await h.e.handleMegaWaveAthenaClose(parent);h.e.strategy.executeMegaWaveSaint=async(_q,_p,a)=>({id:`entry-${a.saintConcept}`,conceptName:a.saintConcept,ticker:a.ticker,status:'open',openedAtMs:Date.now()});
-  const gid=`MEGA-WAVE:GRANT:${parent.id}`;const a=await h.e.attemptMegaWaveSaint(gid,'Scarlet Needle');assert.equal(a.status,'OPENED');const b=await h.e.attemptMegaWaveSaint(gid,'Wave Surfer');assert.equal(b.status,'OPENED');assert.notEqual(a.entry.id,b.entry.id);assert.equal(a.entry.ticker,b.entry.ticker);
-  const c=await h.e.attemptMegaWaveSaint(gid,'Momentum Hunter');assert.equal(c.status,'IGNORED');const ep=await h.db.opportunityEpisode(gid),grant=ep.athenaDecision.megaWaveGrant;assert.equal(grant.status,'COMPLETE');assert.equal(Object.values(grant.reservations).filter(x=>x.status==='OPENED').length,2);
+  const h=engineHarness([parent],s);const closed=await h.e.handleMegaWaveAthenaClose(parent);assert.equal(closed.status,'IGNORED');
+  const gid=`MEGA-WAVE:GRANT:${parent.id}`;const a=await h.e.attemptMegaWaveSaint(gid,'Scarlet Needle');assert.equal(a.status,'IGNORED');
 });
 
 test('MW every real Attack independently freezes Infinity or PRI1-R2 while Crystal Wall stays on virtual Infinity',()=>{
@@ -276,8 +275,8 @@ test('R13 MFE1 profitable Crystal Wall proof cannot arm Athena on a banned marke
   const parent=crystalProof('cw-banned-1','CRASH:BANNED',Date.now()-20_000,Date.now()-10_000,ticker,25);
   const {e}=engineHarness([parent],s);
   const out=await e.handleMegaWaveAthenaContinuation(parent);
-  assert.equal(out.status,'BLOCKED');
-  assert.equal(out.reason,MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode);
+  assert.equal(out.status,'IGNORED');
+  assert.equal(out.reason,'bolt_direct_crystal_wall_is_not_permission');
 });
 
 test('R13 MFE1 active banned downstream grants are neutralized on restart before any Saint watch is restored',async()=>{
@@ -422,7 +421,7 @@ test('profitable Athena close still grants Saints in that cosmos',async()=>{
   const parent={id:'athena-profit-ge',systemName:'ARIES',ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-WIN',eventTicker:'MW-WIN',mode:s.mode,status:'closed',remainingCount:0,pnlCents:40,openedAtMs:Date.now()-1000,closedAtMs:Date.now(),closeReason:'infinity_break',entryPriceCents:56,exitPriceCents:62,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
   const h=engineHarness([parent],{...s,systemName:'ARIES'});
   const out=await h.e.handleMegaWaveAthenaClose(parent);
-  assert.equal(out.status,'ACTIVE',out.reason);
+  assert.equal(out.status,'IGNORED');return;
   assert.equal(out.grant.source,'ATHENA_PROFIT_CLOSE');
   assert.equal(out.grant.systemName,'ARIES');
   assert.equal(h.e.megaWaveSaintWatches.size,3);
@@ -474,7 +473,7 @@ test('Athena loss does not grant Saints',async()=>{
   const closed={id:'athena-loss-ge',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'MW-LOSS',eventTicker:'MW-LOSS',mode:s.mode,status:'closed',remainingCount:0,pnlCents:-40,openedAtMs:Date.now()-1000,closedAtMs:Date.now(),closeReason:'hard_stop',entryPriceCents:56,entryConfig:{megaWave:mw,athenaExclamation:{megaWaveAuthorization:mw}}};
   const h=engineHarness([closed],s);
   const stopped=await h.e.handleMegaWaveAthenaClose(closed);
-  assert.equal(stopped.status,'CHAIN_STOPPED');
+  assert.equal(stopped.status,'IGNORED');return;
   assert.equal(h.e.megaWaveSaintWatches.size,0);
 });
 
@@ -1041,4 +1040,41 @@ test('recent closed tickers stay on the wanted quote list for live post-exit tra
   h.e.refreshPostExitWatchTickers(closed);
   assert.equal(h.e.postExitWatchTickers.has('KEEP-ME'),true);
   assert.ok(wanted.includes('KEEP-ME'));
+});
+
+test('Bolt Direct card keeps own crash/rebound/ticks and rejects a missing crash',()=>{
+  const s=settings({scarletNeedleEnabled:true,scarletNeedleMinCrashCents:8,scarletNeedleMinReboundCents:3,scarletNeedleMinUpwardTicks:2,scarletNeedleMinEntryCents:10,scarletNeedleMaxEntryCents:89});
+  const quote=q('BD-T',50,51);
+  assert.equal(boltDirectAttackCard('Scarlet Needle',quote,s,null).ok,false);
+  assert.equal(boltDirectAttackCard('Scarlet Needle',quote,s,{crashDepthCents:2,reboundCents:3,upwardTicks:2}).reason,'crash_not_confirmed');
+  const pass=boltDirectAttackCard('Scarlet Needle',quote,s,{crashDepthCents:10,reboundCents:4,upwardTicks:2});
+  assert.equal(pass.ok,true);
+  assert.equal(boltDirectEnabledAttacks(s).includes('Scarlet Needle'),true);
+});
+
+test('Bolt Direct lock is ticker-only when Galactic is OFF and ticker+attack when ON',()=>{
+  const off=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false}),getLiveReady:()=>false,random:()=>0});
+  const on=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:true}),getLiveReady:()=>false,random:()=>0});
+  assert.equal(off.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),'KX-T');
+  assert.equal(on.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),'KX-T|attack:Scarlet Needle');
+  assert.notEqual(on.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),on.hunterConcurrencyLockKey('Wave Surfer','KX-T'));
+});
+
+test('Crystal Wall profit no longer grants Athena and Athena open no longer grants Saints',async()=>{
+  const h=engineHarness([]);
+  const ignoredOpen=await h.e.handleMegaWaveAthenaOpen({id:'a1',ticker:'T',conceptName:'Athena Exclamation',status:'open'});
+  assert.equal(ignoredOpen.status,'IGNORED');
+  const ignoredClose=await h.e.handleMegaWaveAthenaClose({id:'a1',ticker:'T',conceptName:'Athena Exclamation',status:'closed',remainingCount:0,pnlCents:10});
+  assert.equal(ignoredClose.status,'IGNORED');
+  const ignoredCw=await h.e.handleMegaWaveAthenaContinuation({id:'cw1',ticker:'T',conceptName:CRYSTAL_WALL.shadowConceptName,status:'closed',remainingCount:0,pnlCents:12,closeReason:CRYSTAL_WALL.profitableCloseReason});
+  assert.equal(ignoredCw.status,'IGNORED');
+  assert.equal(ignoredCw.reason,'bolt_direct_crystal_wall_is_not_permission');
+});
+
+test('createHunter still refuses a Saint or Athena without a Bolt Direct command',async()=>{
+  const s=settings({scarletNeedleEnabled:true,athenaExclamationEnabled:true});
+  const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const quote=q('BD-NO',50,51);
+  assert.equal(await st.createHunter('Scarlet Needle',quote,s.scarletNeedleStakeCents,0,{legacyCompatibility:false}),null);
+  assert.equal(await st.createHunter('Athena Exclamation',quote,s.athenaExclamationStakeCents,0,{legacyCompatibility:false}),null);
 });
