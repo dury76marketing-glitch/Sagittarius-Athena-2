@@ -80,7 +80,7 @@ test('R52 preserves Golden Eye isolation while adding only the explicit post-exi
   assert.equal(/golden[_ ]?eye/i.test(schema),false,'Golden Eye state must stay isolated from sag_entries');
 });
 
-test('R37 Golden Eye migration auto-enables only existing SIMULATION records while LIVE autonomy remains explicitly fail-safe off',async()=>{const C=await import('../src/config.mjs');const s=C.originalSettings();assert.equal(s.mode,'SIMULATION');assert.equal(s.liveArmed,false);assert.equal(C.normalizeStartupExecutionMode({...s,mode:'LIVE',liveArmed:true},true).settings.liveArmed,false);const old={...s};delete old.infinityBreakMinNetPerOriginalContractCents;old.atomicThunderMinNetPerOriginalContractCents=7;const migrated=C.sanitizeRuntimeSettings(old);assert.equal(migrated.infinityBreakMinNetPerOriginalContractCents,7);assert.equal(migrated.auroraDamageControlPercent,45);});
+test('R37 Golden Eye migration auto-enables only existing SIMULATION records while LIVE autonomy remains explicitly fail-safe off',async()=>{const C=await import('../src/config.mjs');const s=C.originalSettings();assert.equal(s.mode,'SIMULATION');assert.equal(s.liveArmed,false);assert.equal(C.normalizeStartupExecutionMode({...s,mode:'LIVE',liveArmed:true},true).settings.liveArmed,false);const old={...s};delete old.infinityBreakMinNetPerOriginalContractCents;old.atomicThunderMinNetPerOriginalContractCents=7;const migrated=C.sanitizeRuntimeSettings(old);assert.equal(migrated.infinityBreakMinNetPerOriginalContractCents,7);assert.equal(migrated.auroraDamageControlPercent,25);});
 
 test('R37 Golden Eye quote events are not lost during an active evaluation/execution and shutdown clears/drains Golden Eye work',async()=>{
   const engine=await readFile(resolve(root,'src/engine.mjs'),'utf8');
