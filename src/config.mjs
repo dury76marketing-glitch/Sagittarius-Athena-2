@@ -670,61 +670,39 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.crashRecoveryInfinityNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.crashRecoveryInfinityNetPerOriginalContractCents) || 5));
   out.scarletNeedleMaxRepeats = Math.max(0, Math.min(1, Math.floor(Number(out.scarletNeedleMaxRepeats) || 0)));
   out.lightningPlasmaMaxStrikes = Math.max(1, Math.floor(Number(out.lightningPlasmaMaxStrikes) || 1));
-  const clampWallGeom=(value,fallback,max)=>{
+  const clampZeroGeom=(value,fallback,max)=>{
     const n=Number(value);
     const raw=Number.isFinite(n)?Math.floor(n):fallback;
     return Math.max(0, Math.min(max, raw));
   };
-  out.crystalWallMinCrashCents = clampWallGeom(out.crystalWallMinCrashCents, 15, 99);
-  out.crystalWallMinReboundCents = clampWallGeom(out.crystalWallMinReboundCents, 5, 99);
-  out.crystalWallMinUpwardTicks = clampWallGeom(out.crystalWallMinUpwardTicks, 2, 20);
-  out.crystalWallWinsToTriggerAthena = Math.max(1, Math.min(5, Math.floor(Number(out.crystalWallWinsToTriggerAthena) || 3)));
-  // CW proof-ladder migration: missing per-proof geometry inherits the shared
-  // Crystal Wall values so existing 15/5/2 (or operator) boxes stay identical.
+  const zeroGeomKeys=[
+    'crystalWallMinCrashCents','crystalWallMinReboundCents','crystalWallMinUpwardTicks',
+    'justiceArrowMinCrashCents','justiceArrowMinReboundCents','justiceArrowMinUpwardTicks',
+    'athenaExclamationMinCrashCents','athenaExclamationMinReboundCents','athenaExclamationMinUpwardTicks',
+    'scarletNeedleMinCrashCents','scarletNeedleMinReboundCents','scarletNeedleMinUpwardTicks',
+    'waveMinCrashCents','waveMinReboundCents','waveMinUpwardTicks',
+    'lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks',
+    'momentumMinCrashCents','momentumMinReboundCents','momentumMinUpwardTicks',
+    'crashRecoveryMinCrashCents','crashRecoveryMinReboundCents','crashRecoveryMinUpwardTicks','crashRecoveryUpwardTicks',
+    'recoveryMinReboundCents',
+  ];
   for (const stage of [1,2,3,4,5]) {
-    const crashKey=`crystalWallProof${stage}MinCrashCents`;
-    const reboundKey=`crystalWallProof${stage}MinReboundCents`;
-    const ticksKey=`crystalWallProof${stage}MinUpwardTicks`;
-    if (!Object.hasOwn(src, crashKey)) out[crashKey] = out.crystalWallMinCrashCents;
-    if (!Object.hasOwn(src, reboundKey)) out[reboundKey] = out.crystalWallMinReboundCents;
-    if (!Object.hasOwn(src, ticksKey)) out[ticksKey] = out.crystalWallMinUpwardTicks;
-    out[crashKey] = Math.max(1, Math.min(99, Math.floor(Number(out[crashKey]) || out.crystalWallMinCrashCents)));
-    out[reboundKey] = Math.max(1, Math.min(99, Math.floor(Number(out[reboundKey]) || out.crystalWallMinReboundCents)));
-    out[ticksKey] = Math.max(1, Math.min(20, Math.floor(Number(out[ticksKey]) || out.crystalWallMinUpwardTicks)));
+    zeroGeomKeys.push(`crystalWallProof${stage}MinCrashCents`,`crystalWallProof${stage}MinReboundCents`,`crystalWallProof${stage}MinUpwardTicks`);
   }
-  const clampBoltGeom=(value,fallback,max)=>{
-    const n=Number(value);
-    const raw=Number.isFinite(n)?Math.floor(n):fallback;
-    return Math.max(0, Math.min(max, raw));
-  };
-  out.justiceArrowMinCrashCents = clampBoltGeom(out.justiceArrowMinCrashCents, 15, 99);
-  out.justiceArrowMinReboundCents = clampBoltGeom(out.justiceArrowMinReboundCents, 5, 99);
-  out.justiceArrowMinUpwardTicks = clampBoltGeom(out.justiceArrowMinUpwardTicks, 2, 20);
-  for (const [crash,rebound,ticks] of [
-    ['athenaExclamationMinCrashCents','athenaExclamationMinReboundCents','athenaExclamationMinUpwardTicks'],
-    ['scarletNeedleMinCrashCents','scarletNeedleMinReboundCents','scarletNeedleMinUpwardTicks'],
-    ['waveMinCrashCents','waveMinReboundCents','waveMinUpwardTicks'],
-    ['lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks'],
-    ['momentumMinCrashCents','momentumMinReboundCents','momentumMinUpwardTicks'],
-  ]) {
-    out[crash] = clampBoltGeom(out[crash], 15, 99);
-    out[rebound] = clampBoltGeom(out[rebound], 5, 99);
-    out[ticks] = clampBoltGeom(out[ticks], 2, 20);
+  for (const key of zeroGeomKeys) {
+    const isTicks=/Ticks|ticks/.test(key);
+    const isRebound=/Rebound/.test(key);
+    out[key]=clampZeroGeom(out[key], isTicks?2:isRebound?5:15, isTicks?20:99);
   }
-
-
+  out.crystalWallWinsToTriggerAthena = Math.max(1, Math.min(5, Math.floor(Number(out.crystalWallWinsToTriggerAthena) || 3)));
   out.momentumMinRiseCents=Math.max(0,Math.min(99,Number(out.momentumMinRiseCents)||0));
   out.momentumMinPullbackCents=Math.max(0,Math.min(99,Number(out.momentumMinPullbackCents)||0));
   out.momentumMaxPullbackCents=Math.max(out.momentumMinPullbackCents,Math.min(99,Number(out.momentumMaxPullbackCents)||12));
   out.momentumMinTimeLeftMinutes=Math.max(0,Math.min(240,Number(out.momentumMinTimeLeftMinutes)||0));
   out.waveMinFeederFavorableMoveCents=Math.max(0,Math.min(99,Number(out.waveMinFeederFavorableMoveCents)||0));
-  out.crashRecoveryMinCrashCents=Math.max(1,Math.min(99,Number(out.crashRecoveryMinCrashCents)||15));
-  out.crashRecoveryMinReboundCents=Math.max(1,Math.min(99,Number(out.crashRecoveryMinReboundCents)||5));
   out.crashRecoveryMinReclaimRate=Math.max(0,Math.min(1,Number(out.crashRecoveryMinReclaimRate)||0.33));
-  out.crashRecoveryStableObservations=Math.max(1,Math.min(20,Math.floor(Number(out.crashRecoveryStableObservations)||2)));
-  out.crashRecoveryUpwardTicks=Math.max(1,Math.min(20,Math.floor(Number(out.crashRecoveryUpwardTicks)||2)));
+  out.crashRecoveryStableObservations=Math.max(0,Math.min(20,Math.floor(Number.isFinite(Number(out.crashRecoveryStableObservations))?Number(out.crashRecoveryStableObservations):2)));
   if(!Object.hasOwn(out,'crashRecoveryMinUpwardTicks') || out.crashRecoveryMinUpwardTicks==null) out.crashRecoveryMinUpwardTicks=out.crashRecoveryUpwardTicks;
-  out.crashRecoveryMinUpwardTicks=Math.max(1,Math.min(20,Math.floor(Number(out.crashRecoveryMinUpwardTicks)||out.crashRecoveryUpwardTicks||2)));
 
   out.athenaExclamationFollowUpAttacks = Math.max(0, Math.min(12, Math.floor(Number(out.athenaExclamationFollowUpAttacks) || 0)));
   for (const key of ['athenaExclamationPri1R2TriggerCents','scarletNeedlePri1R2TriggerCents','justiceArrowPri1R2TriggerCents','momentumPri1R2TriggerCents','wavePri1R2TriggerCents','crashRecoveryPri1R2TriggerCents','lightningPlasmaPri1R2TriggerCents']) {

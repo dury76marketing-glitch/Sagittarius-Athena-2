@@ -1089,7 +1089,7 @@ test('Bolt Direct dashboard 0/0/0 crash-rebound-ticks is saved and lets the bolt
   assert.equal(raw.athenaExclamationMinCrashCents,0);
   assert.equal(raw.justiceArrowMinCrashCents,0);
   assert.equal(raw.crystalWallMinCrashCents,0);
-  assert.ok(raw.crashRecoveryMinCrashCents>=1,'Starlight cannot be zero');
+  assert.equal(raw.crashRecoveryMinCrashCents,0);
   const s=settings({scarletNeedleEnabled:true,scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,scarletNeedleMinEntryCents:10,scarletNeedleMaxEntryCents:89});
   const pass=boltDirectAttackCard('Scarlet Needle',q('BD-ZERO',50,51),s,null);
   assert.equal(pass.ok,true,pass.reason);
@@ -1104,4 +1104,23 @@ test('Crystal Wall is a Bolt Direct real attack timed by the bolt',()=>{
   const pass=boltDirectAttackCard('Recovery Hunter',q('CW-REAL',50,51),s,null);
   assert.equal(pass.ok,true,pass.reason);
   assert.equal(boltDirectEnabledAttacks(s).includes('Recovery Hunter'),true);
+});
+
+test('dashboard crash/rebound/ticks save 0 on every attack and keep it',()=>{
+  const keys=['athenaExclamation','scarletNeedle','justiceArrow','wave','momentum','lightningPlasma','crashRecovery','crystalWall'];
+  const raw={};
+  for(const pfx of keys){
+    raw[`${pfx}MinCrashCents`]=0;
+    raw[`${pfx}MinReboundCents`]=0;
+    raw[`${pfx}MinUpwardTicks`]=0;
+  }
+  raw.crashRecoveryUpwardTicks=0;
+  for(let i=1;i<=5;i++){raw[`crystalWallProof${i}MinCrashCents`]=0;raw[`crystalWallProof${i}MinReboundCents`]=0;raw[`crystalWallProof${i}MinUpwardTicks`]=0;}
+  const s=sanitizeRuntimeSettings(raw);
+  for(const pfx of keys){
+    assert.equal(s[`${pfx}MinCrashCents`],0,pfx+' crash');
+    assert.equal(s[`${pfx}MinReboundCents`],0,pfx+' rebound');
+    assert.equal(s[`${pfx}MinUpwardTicks`],0,pfx+' ticks');
+  }
+  assert.equal(s.crashRecoveryUpwardTicks,0);
 });
