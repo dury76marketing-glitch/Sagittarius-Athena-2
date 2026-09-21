@@ -2006,11 +2006,7 @@ export class StrategyEngine {
       await this.audit('market_family_execution_exclusion_blocked',{concept,ticker:exactTicker,eventTicker:q?.eventTicker||exactTicker,mode:s.mode,marketFamilyExclusion});
       return null;
     }
-    // R69.3 hard isolation: Crystal Wall can never enter the real Hunter
-    // execution path in any mode. Legacy Recovery Hunter rows may still be
-    // protected/exited, but no new broker or simulation-portfolio position may
-    // be created through createHunter.
-    if (concept===CRYSTAL_WALL.conceptName) {
+    if (concept===CRYSTAL_WALL.conceptName && boltDirectEntry!==true) {
       trace('CRYSTAL_WALL_SHADOW_ISOLATION','BLOCKED','crystal_wall_shadow_only_no_real_hunter_authority');
       await this.audit('crystal_wall_real_entry_blocked',{concept,ticker:exactTicker,eventTicker:q?.eventTicker||exactTicker,reason:'crystal_wall_shadow_only_no_real_hunter_authority'});
       return null;
@@ -2359,7 +2355,9 @@ export class StrategyEngine {
       }
       if (typeof this.db.acquireFleetTickerLock === 'function') {
         const fleetUnison=s.rozanHyakuRyuHaEnabled===true||s.excaliburEnabled===true;
-        const fleetLockKey=fleetUnison?`${exactTicker}|cosmos:${s.systemName}`:exactTicker;
+        const fleetLockKey=s.galacticExplosionEnabled===true
+          ? `${exactTicker}|attack:${concept}|cosmos:${s.systemName}`
+          : fleetUnison?`${exactTicker}|cosmos:${s.systemName}`:exactTicker;
         fleetTickerUnlock = await this.db.acquireFleetTickerLock(fleetLockKey);
         if (!fleetTickerUnlock) {
           trace('FLEET_TICKER_LOCK','BLOCKED','fleet_ticker_lock_busy');

@@ -1156,3 +1156,28 @@ test('factory recipe lock 2026-09-21 bands stake geometry cooldown',()=>{
     assert.equal(row.lightningPlasmaMinUpwardTicks,0);
   }
 });
+
+test('Crystal Wall without a Bolt Direct command stays blocked; bolt command is allowed past shadow isolation',async()=>{
+  const s=settings({recoveryHunterEnabled:true,recoveryMinEntryCents:10,recoveryMaxEntryCents:89,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0});
+  const traces=[];
+  const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  st.recordEntryPipeline=(id,concept,ticker,stage,status,reason)=>{traces.push({stage,status,reason,concept});};
+  const quote=q('CW-REAL-2',55,56);
+  const blocked=await st.createHunter('Recovery Hunter',quote,100,0,{});
+  assert.equal(blocked,null);
+  assert.ok(traces.some((row)=>row.reason==='crystal_wall_shadow_only_no_real_hunter_authority'));
+  traces.length=0;
+  const command={version:BOLT_DIRECT.version,authorityMode:BOLT_DIRECT.strategicEntryAuthority,boltId:'bolt-cw',commandHash:'h'};
+  await st.createHunter('Recovery Hunter',quote,100,0,{boltDirectAuthorization:command,athenaFireCommand:command});
+  assert.equal(traces.some((row)=>row.reason==='crystal_wall_shadow_only_no_real_hunter_authority'),false);
+});
+
+test('Galactic ON lets a second attack sit on the same ticker; same attack stays locked',async()=>{
+  const open={id:'open-athena',systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'GE-JOIN',eventTicker:'GE-JOIN',mode:'SIMULATION',status:'open',openedAtMs:1,entryPriceCents:32};
+  const on=new StrategyEngine({db:memoryDb([open]),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:true}),getLiveReady:()=>false,random:()=>0});
+  const off=new StrategyEngine({db:memoryDb([open]),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false}),getLiveReady:()=>false,random:()=>0});
+  const quote=q('GE-JOIN',32,33);
+  assert.equal(await on.exactTickerExposureClear('Scarlet Needle',quote,'test'),true);
+  assert.equal(await on.exactTickerExposureClear('Athena Exclamation',quote,'test'),false);
+  assert.equal(await off.exactTickerExposureClear('Scarlet Needle',quote,'test'),false);
+});
