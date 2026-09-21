@@ -670,9 +670,14 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.crashRecoveryInfinityNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.crashRecoveryInfinityNetPerOriginalContractCents) || 5));
   out.scarletNeedleMaxRepeats = Math.max(0, Math.min(1, Math.floor(Number(out.scarletNeedleMaxRepeats) || 0)));
   out.lightningPlasmaMaxStrikes = Math.max(1, Math.floor(Number(out.lightningPlasmaMaxStrikes) || 1));
-  out.crystalWallMinCrashCents = Math.max(1, Math.min(99, Math.floor(Number(out.crystalWallMinCrashCents) || 15)));
-  out.crystalWallMinReboundCents = Math.max(1, Math.min(99, Math.floor(Number(out.crystalWallMinReboundCents) || 5)));
-  out.crystalWallMinUpwardTicks = Math.max(1, Math.min(20, Math.floor(Number(out.crystalWallMinUpwardTicks) || 2)));
+  const clampWallGeom=(value,fallback,max)=>{
+    const n=Number(value);
+    const raw=Number.isFinite(n)?Math.floor(n):fallback;
+    return Math.max(0, Math.min(max, raw));
+  };
+  out.crystalWallMinCrashCents = clampWallGeom(out.crystalWallMinCrashCents, 15, 99);
+  out.crystalWallMinReboundCents = clampWallGeom(out.crystalWallMinReboundCents, 5, 99);
+  out.crystalWallMinUpwardTicks = clampWallGeom(out.crystalWallMinUpwardTicks, 2, 20);
   out.crystalWallWinsToTriggerAthena = Math.max(1, Math.min(5, Math.floor(Number(out.crystalWallWinsToTriggerAthena) || 3)));
   // CW proof-ladder migration: missing per-proof geometry inherits the shared
   // Crystal Wall values so existing 15/5/2 (or operator) boxes stay identical.

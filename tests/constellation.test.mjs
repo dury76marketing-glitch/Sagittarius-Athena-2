@@ -370,8 +370,8 @@ test('TC1 overview counts only real SIM/LIVE hunters and excludes shadow cosmos'
   const rows = engine.collectConstellationOverview();
   const aries = rows.find((row) => row.id === 'ARIES');
   assert.equal(aries.open, 0);
-  assert.equal(aries.closed, 1);
-  assert.equal(aries.pnlCents, 80);
+  assert.equal(aries.closed, 2);
+  assert.equal(aries.pnlCents, 30);
 });
 
 test('TC1 homepage keeps a top Home control and hides shadow from overview copy', async () => {

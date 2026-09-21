@@ -392,6 +392,7 @@ export function boltDirectAttackGeometry(settings,concept){
   if(concept==='Momentum Hunter')return{minCrashCents:Number(s.momentumMinCrashCents??15),minReboundCents:Number(s.momentumMinReboundCents??5),minUpwardTicks:Number(s.momentumMinUpwardTicks??2)};
   if(concept==='Lightning Plasma')return{minCrashCents:Number(s.lightningPlasmaMinCrashCents??15),minReboundCents:Number(s.lightningPlasmaMinReboundCents??5),minUpwardTicks:Number(s.lightningPlasmaMinUpwardTicks??2)};
   if(concept==='Athena Exclamation')return{minCrashCents:Number(s.athenaExclamationMinCrashCents??15),minReboundCents:Number(s.athenaExclamationMinReboundCents??5),minUpwardTicks:Number(s.athenaExclamationMinUpwardTicks??2)};
+  if(concept==='Recovery Hunter')return{minCrashCents:Number(s.crystalWallMinCrashCents??15),minReboundCents:Number(s.crystalWallMinReboundCents??5),minUpwardTicks:Number(s.crystalWallMinUpwardTicks??2)};
   return{minCrashCents:15,minReboundCents:5,minUpwardTicks:2};
 }
 
@@ -1968,7 +1969,8 @@ export class StrategyEngine {
     if (!exactTicker) return null;
     const tickerLockKey = this.hunterConcurrencyLockKey(concept, exactTicker, s);
     const pipelineAttemptId = `${Date.now()}-${++this.entryPipelineAttemptSequence}`;
-    const crystalWallIndependentEntry=legacyCompatibility!==true&&concept==='Recovery Hunter'&&crystalWallFireCommand!=null;
+    const boltDirectPreview=legacyCompatibility!==true&&String(boltDirectAuthorization?.version||athenaFireCommand?.version||'')===BOLT_DIRECT.version&&String(athenaFireCommand?.authorityMode||boltDirectAuthorization?.authorityMode||'')===BOLT_DIRECT.strategicEntryAuthority;
+    const crystalWallIndependentEntry=legacyCompatibility!==true&&concept==='Recovery Hunter'&&crystalWallFireCommand!=null&&boltDirectPreview!==true;
     const justiceArrowIndependentEntry=legacyCompatibility!==true&&concept==='Sagittarius Justice Arrow'&&justiceArrowFireCommand!=null;
     const independentCrashRecoveryEntry=crystalWallIndependentEntry||justiceArrowIndependentEntry;
     const scarletContinuationEntry=legacyCompatibility!==true&&concept==='Scarlet Needle'&&String(athenaFireCommand?.authorityMode||'')===SCARLET_NEEDLE.strategicEntryAuthority;
@@ -2074,7 +2076,7 @@ export class StrategyEngine {
       }
       let fireValidation=null;
       if(newGenerationEntry){
-        if(concept==='Recovery Hunter'&&!crystalWallIndependentEntry){
+        if(concept==='Recovery Hunter'&&!crystalWallIndependentEntry&&!boltDirectEntry){
           trace('CRYSTAL_WALL_FIRE','BLOCKED','crystal_wall_v3_authority_required');
           await this.audit('crystal_wall_v3_execution_blocked',{concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,reason:'crystal_wall_v3_authority_required'});
           return null;
@@ -2808,11 +2810,7 @@ export class StrategyEngine {
     return this.executeAthenaFire(q,bolt,decision,{cosmos:[],scarletContinuation:lineage});
   }
   async executeCrystalWallAttack(q, watch = {}) {
-    // R69.4: Crystal Wall is a full-fidelity SHADOW Attack. It retains the
-    // exact CI1 crash/rebound doctrine and executable-market proof, but it has
-    // zero broker, simulation-capital, portfolio-capacity or real-position
-    // authority. Durable profitable closes form non-overlapping proof triples; only
-    // the third consecutive win in a triple may authorize real Scarlet.
+    return null;
     const s=this.getSettings();
     if(s.recoveryHunterEnabled!==true)return null;
     const ticker=String(q?.ticker||''),crashEpisodeId=String(watch?.crashEpisodeId||'');

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
 import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
-import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, EXECUTABLE_HUNTER_CONCEPTS, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
 
@@ -511,7 +511,8 @@ test('SE1 same-cosmos stop-loss arms Starlight; own stop and Crystal Wall paper 
   h.db.rows.set(self.id,structuredClone(self));
   assert.equal((await h.e.armStarlightStopLossWatch(self)).status,'IGNORED');
   const paper={...parent,id:'wall-stop',conceptName:'Recovery Hunter'};
-  assert.equal((await h.e.armStarlightStopLossWatch(paper)).reason,'parent_not_executable');
+  const wallArm=await h.e.armStarlightStopLossWatch(paper);
+  assert.equal(wallArm.status,'ARMED',wallArm.reason);
 });
 
 test('SE1 Starlight executes after parent stop when crash/rebound/ticks qualify and does not self-chain',async()=>{
@@ -861,7 +862,8 @@ test('fleet attack homepage totals use executable SIM/LIVE rows only',()=>{
   const wall=far.attacks.find((x)=>x.name==='Recovery Hunter'||x.name==='Crystal Wall Shadow');
   assert.equal(athena.closed,2);
   assert.equal(athena.pnlCents,40);
-  assert.equal(wall,undefined);
+  assert.ok(wall);
+  assert.equal(wall.pnlCents,-900);
   const live=proto.buildFleetAttackResults.call({},stats,'LIVE');
   assert.equal(live.mode,'LIVE');
 });
@@ -1086,10 +1088,20 @@ test('Bolt Direct dashboard 0/0/0 crash-rebound-ticks is saved and lets the bolt
   assert.equal(raw.scarletNeedleMinUpwardTicks,0);
   assert.equal(raw.athenaExclamationMinCrashCents,0);
   assert.equal(raw.justiceArrowMinCrashCents,0);
-  assert.ok(raw.crystalWallMinCrashCents>=1,'Crystal Wall paper cannot be zero');
+  assert.equal(raw.crystalWallMinCrashCents,0);
   assert.ok(raw.crashRecoveryMinCrashCents>=1,'Starlight cannot be zero');
   const s=settings({scarletNeedleEnabled:true,scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0,scarletNeedleMinEntryCents:10,scarletNeedleMaxEntryCents:89});
   const pass=boltDirectAttackCard('Scarlet Needle',q('BD-ZERO',50,51),s,null);
   assert.equal(pass.ok,true,pass.reason);
   assert.equal(pass.reason,'bolt_direct_card_qualified');
+});
+
+test('Crystal Wall is a Bolt Direct real attack timed by the bolt',()=>{
+  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Recovery Hunter'),true);
+  assert.equal(BOLT_DIRECT.attacks.includes('Recovery Hunter'),true);
+  assert.equal(BOLT_DIRECT.excludedAttacks.includes('Recovery Hunter'),false);
+  const s=settings({recoveryHunterEnabled:true,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,recoveryMinEntryCents:10,recoveryMaxEntryCents:89});
+  const pass=boltDirectAttackCard('Recovery Hunter',q('CW-REAL',50,51),s,null);
+  assert.equal(pass.ok,true,pass.reason);
+  assert.equal(boltDirectEnabledAttacks(s).includes('Recovery Hunter'),true);
 });

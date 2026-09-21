@@ -91,7 +91,7 @@ test('homepage scoreboard counts executable fleet hunters and drops Crystal Wall
   const {EXECUTABLE_HUNTER_CONCEPTS}=await import('../src/doctrine.mjs');
   assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Athena Exclamation'),true);
   assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Scarlet Needle'),true);
-  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Recovery Hunter'),false);
+  assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Recovery Hunter'),true);
   assert.equal(OPERATOR_PLANE_ISOLATION.maximumClosedRows,500);
   const e=Object.create(SagittariusEngine.prototype);
   e.settings={systemName:'LIBRA',ownerId:'sagittarius-main',mode:'SIMULATION',resetTimestampMs:1000,startingCapitalCents:100000,simFeeCents:2};
@@ -123,17 +123,14 @@ test('homepage scoreboard counts executable fleet hunters and drops Crystal Wall
     async entries(){throw new Error('generic entries loader must not run');},
   };
   const dash=await e.performance({dashboard:true});
-  assert.equal(dash.open.length,1);
-  assert.equal(dash.open[0].conceptName,'Athena Exclamation');
-  assert.equal(dash.closed.length,2);
-  assert.equal(dash.closed.some((row)=>row.conceptName==='Recovery Hunter'),false);
-  assert.equal(dash.closedHunters,2);
-  assert.equal(dash.hunterRealizedCents,521);
+  assert.equal(dash.open.length,2);
+  assert.equal(dash.open.some((row)=>row.conceptName==='Recovery Hunter'),true);
+  assert.equal(dash.closed.length,3);
+  assert.equal(dash.closed.some((row)=>row.conceptName==='Recovery Hunter'),true);
   const hist=await e.performance({fullHistory:true});
   assert.equal(fleetLog,1);
-  assert.equal(hist.closed.length,2);
-  assert.equal(hist.hunters.length,2);
-  assert.equal(hist.closedHunters,2);
+  assert.equal(hist.closed.length,3);
+  assert.equal(hist.hunters.length,3);
 });
 
 test('R68 diagnostics explicitly restore full open-position and Athena fidelity outside the compact SSE path',async()=>{

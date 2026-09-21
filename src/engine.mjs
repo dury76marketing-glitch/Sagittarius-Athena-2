@@ -3390,7 +3390,7 @@ export class SagittariusEngine {
     const concept=String(row?.conceptName||'');
     if(!concept) return false;
     if(FEEDER_CONCEPTS.has(concept) || SHADOW_ATTACK_CONCEPTS.has(concept)) return false;
-    if(concept===CRYSTAL_WALL.shadowConceptName || concept===CRYSTAL_WALL.conceptName || concept==='Recovery Hunter') return false;
+    if(concept===CRYSTAL_WALL.shadowConceptName) return false;
     return EXECUTABLE_HUNTER_CONCEPTS.has(concept);
   }
 
@@ -5633,8 +5633,8 @@ export class SagittariusEngine {
         const sig=signals.get(name)||{},link=linked.get(name)||{},closed=Number(link.closed||0),wins=Number(link.wins||0),losses=Number(link.losses||0);
         out.push({name,displayName:name,legacyName:null,total:Number(link.total||0),open:Number(link.open||0),closed,wins,losses,winRate:closed?wins/closed:0,pnlCents:Number(link.pnl_cents||0),avgEntryCents:Math.round(Number(sig.avg_entry_cents||0)),avgCurrentCents:Math.round(Number(sig.avg_current_cents||0)),avgLiquidity:Number(sig.avg_liquidity||0),fedHunters:Number(link.total||0),feederSignals:Number(sig.feeder_signals||0),statsBasis:'fed_hunters'});
       }else{
-        if(name==='Recovery Hunter' || SHADOW_ATTACK_CONCEPTS.has(name)){
-          out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:0,open:0,closed:0,wins:0,losses:0,winRate:0,pnlCents:0,avgEntryCents:0,avgCurrentCents:0,avgLiquidity:0,fedHunters:null,excluded:'crystal_wall_shadow'});
+        if(SHADOW_ATTACK_CONCEPTS.has(name)){
+          out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:0,open:0,closed:0,wins:0,losses:0,winRate:0,pnlCents:0,avgEntryCents:0,avgCurrentCents:0,avgLiquidity:0,fedHunters:null,excluded:'shadow'});
           continue;
         }
         const r=portfolio.get(name)||{},closed=Number(r.closed||0),wins=Number(r.wins||0),losses=Number(r.losses||0);
@@ -5680,7 +5680,7 @@ export class SagittariusEngine {
         });
         continue;
       }
-      if(name==='Recovery Hunter' || SHADOW_ATTACK_CONCEPTS.has(name)){
+      if(SHADOW_ATTACK_CONCEPTS.has(name)){
         out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:0,open:0,closed:0,wins:0,losses:0,winRate:0,pnlCents:0,avgEntryCents:0,avgCurrentCents:0,avgLiquidity:0,fedHunters:null,excluded:'crystal_wall_shadow'});
         continue;
       }
