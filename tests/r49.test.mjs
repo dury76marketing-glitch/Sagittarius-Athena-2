@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { RELEASE, originalSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
+import { RELEASE, originalSettings, freshInstallSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
 import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, EXECUTABLE_HUNTER_CONCEPTS, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
@@ -297,17 +297,17 @@ test('R13 MFE1 active banned downstream grants are neutralized on restart before
 test('RJA4 Athena, Scarlet, Wave and Plasma expose Justice-style editable crash/rebound/tick parameters',()=>{
   for(const k of ['athenaExclamationMinCrashCents','athenaExclamationMinReboundCents','athenaExclamationMinUpwardTicks','scarletNeedleMinCrashCents','scarletNeedleMinReboundCents','scarletNeedleMinUpwardTicks','waveMinCrashCents','waveMinReboundCents','waveMinUpwardTicks','lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks'])assert.ok(CANONICAL_NUMERIC_SETTINGS.includes(k),k);
   const s=originalSettings();
-  assert.equal(s.athenaExclamationStakeCents,500);assert.equal(s.athenaExclamationMinEntryCents,10);assert.equal(s.athenaExclamationMaxEntryCents,50);
-  assert.equal(s.scarletNeedleStakeCents,500);assert.equal(s.scarletNeedleMinEntryCents,10);assert.equal(s.scarletNeedleMaxEntryCents,50);
-  assert.equal(s.waveStakeCents,500);assert.equal(s.waveMinEntryCents,10);assert.equal(s.waveMaxEntryCents,50);
-  assert.equal(s.lightningPlasmaFieldStakeCents,500);assert.equal(s.lightningPlasmaMinEntryCents,10);assert.equal(s.lightningPlasmaMaxEntryCents,50);
-  assert.equal(s.athenaExclamationMinCrashCents,15);assert.equal(s.athenaExclamationMinReboundCents,5);assert.equal(s.athenaExclamationMinUpwardTicks,2);
+  assert.equal(s.athenaExclamationStakeCents,100);assert.equal(s.athenaExclamationMinEntryCents,30);assert.equal(s.athenaExclamationMaxEntryCents,35);
+  assert.equal(s.scarletNeedleStakeCents,100);assert.equal(s.scarletNeedleMinEntryCents,35);assert.equal(s.scarletNeedleMaxEntryCents,40);
+  assert.equal(s.waveStakeCents,100);assert.equal(s.waveMinEntryCents,45);assert.equal(s.waveMaxEntryCents,50);
+  assert.equal(s.lightningPlasmaFieldStakeCents,100);assert.equal(s.lightningPlasmaMinEntryCents,65);assert.equal(s.lightningPlasmaMaxEntryCents,70);
+  assert.equal(s.athenaExclamationMinCrashCents,0);assert.equal(s.athenaExclamationMinReboundCents,0);assert.equal(s.athenaExclamationMinUpwardTicks,0);
 });
 
 test('RJA6 real Athena and Saints honor operator cap and cooldown; Crystal Wall paper does not',async()=>{
   const now=Date.now();
   const priorAthena={id:'athena-1',systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'AIN',eventTicker:'AIN',mode:'SIMULATION',status:'closed',openedAtMs:now-47_000,closedAtMs:now-1_000,pnlCents:40,entryPriceCents:56,exitPriceCents:65,remainingCount:0};
-  const s=settings({maxEntriesPerTrade:1,hunterCooldownMinutes:90,galacticExplosionEnabled:true});
+  const s=settings({maxEntriesPerTrade:1,hunterCooldownMinutes:90,repeatCooldownMinutes:0,maxRepeatsPerMarket:0,galacticExplosionEnabled:true});
   const db=memoryDb([priorAthena]);
   const st=new StrategyEngine({db,kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
   const quote=q('AIN',67,68);
@@ -347,8 +347,8 @@ test('repeat unit is independent of open-cap cooldown and ignores Crystal Wall p
   assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('maxRepeatsPerMarket'));
   assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('repeatCooldownMinutes'));
   const fresh=sanitizeRuntimeSettings({});
-  assert.equal(fresh.maxRepeatsPerMarket,0);
-  assert.equal(fresh.repeatCooldownMinutes,0);
+  assert.equal(fresh.maxRepeatsPerMarket,3);
+  assert.equal(fresh.repeatCooldownMinutes,3);
 });
 
 test('ECA1 Crystal Wall leading clock is inherited by Athena and Saints; a younger probe cannot rewrite it',async()=>{
@@ -375,9 +375,9 @@ test('ECA1 Crystal Wall leading clock is inherited by Athena and Saints; a young
 test('RJA5 Great Horn and Starlight use Athena-style crash/rebound/tick parameters',()=>{
   for(const k of ['momentumMinCrashCents','momentumMinReboundCents','momentumMinUpwardTicks','crashRecoveryMinUpwardTicks'])assert.ok(CANONICAL_NUMERIC_SETTINGS.includes(k),k);
   const s=originalSettings();
-  assert.equal(s.momentumMinCrashCents,15);assert.equal(s.momentumMinReboundCents,5);assert.equal(s.momentumMinUpwardTicks,2);
-  assert.equal(s.crashRecoveryMinCrashCents,15);assert.equal(s.crashRecoveryMinReboundCents,5);assert.equal(s.crashRecoveryMinUpwardTicks,2);
-  let horn=megaWaveSaintSignalState('Momentum Hunter',{parentEntryPriceCents:70,parentExitPriceCents:70,peakCents:70,lastBidCents:70},q('MW-H',55,56),s);
+  assert.equal(s.momentumMinCrashCents,0);assert.equal(s.momentumMinReboundCents,0);assert.equal(s.momentumMinUpwardTicks,0);
+  assert.equal(s.crashRecoveryMinCrashCents,0);assert.equal(s.crashRecoveryMinReboundCents,0);assert.equal(s.crashRecoveryMinUpwardTicks,0);
+  let horn=megaWaveSaintSignalState('Momentum Hunter',{parentEntryPriceCents:70,parentExitPriceCents:70,peakCents:70,lastBidCents:70},q('MW-H',55,56),{...s,momentumMinCrashCents:15,momentumMinReboundCents:5,momentumMinUpwardTicks:2});
   assert.equal(horn.qualified,false);assert.equal(horn.watch.crashArmed,true);
 });
 
@@ -1123,4 +1123,36 @@ test('dashboard crash/rebound/ticks save 0 on every attack and keep it',()=>{
     assert.equal(s[`${pfx}MinUpwardTicks`],0,pfx+' ticks');
   }
   assert.equal(s.crashRecoveryUpwardTicks,0);
+});
+
+test('factory recipe lock 2026-09-21 bands stake geometry cooldown',()=>{
+  const s=originalSettings();
+  const f=freshInstallSettings();
+  for(const row of [s,f]){
+    assert.equal(row.maxEntriesPerTrade,7);
+    assert.equal(row.maxRepeatsPerMarket,3);
+    assert.equal(row.hunterCooldownMinutes,180);
+    assert.equal(row.repeatCooldownMinutes,3);
+    assert.equal(row.eventCooldownMinutes,3);
+    assert.equal(row.athenaExclamationStakeCents,100);
+    assert.equal(row.athenaExclamationMinEntryCents,30);
+    assert.equal(row.athenaExclamationMaxEntryCents,35);
+    assert.equal(row.scarletNeedleMinEntryCents,35);
+    assert.equal(row.scarletNeedleMaxEntryCents,40);
+    assert.equal(row.justiceArrowMinEntryCents,40);
+    assert.equal(row.justiceArrowMaxEntryCents,45);
+    assert.equal(row.waveMinEntryCents,45);
+    assert.equal(row.waveMaxEntryCents,50);
+    assert.equal(row.crashRecoveryMinEntryCents,50);
+    assert.equal(row.crashRecoveryMaxEntryCents,55);
+    assert.equal(row.recoveryMinEntryCents,55);
+    assert.equal(row.recoveryMaxEntryCents,60);
+    assert.equal(row.momentumMinEntryCents,60);
+    assert.equal(row.momentumMaxEntryCents,65);
+    assert.equal(row.lightningPlasmaMinEntryCents,65);
+    assert.equal(row.lightningPlasmaMaxEntryCents,70);
+    assert.equal(row.athenaExclamationPri1R2Enabled,false);
+    assert.equal(row.crystalWallMinCrashCents,0);
+    assert.equal(row.lightningPlasmaMinUpwardTicks,0);
+  }
 });

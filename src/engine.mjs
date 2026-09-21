@@ -3741,19 +3741,19 @@ export class SagittariusEngine {
     if(next.maxSpreadCents<0||next.maxSpreadCents>99)throw new Error('maxSpreadCents must be between 0 and 99');
     if(next.simFeeCents<0)throw new Error('simFeeCents cannot be negative');
     if(next.recoveryTrackingHours<=0)throw new Error('recoveryTrackingHours must be greater than zero');
-    if(next.crystalWallMinCrashCents<1||next.crystalWallMinCrashCents>99||!Number.isInteger(next.crystalWallMinCrashCents))throw new Error('crystalWallMinCrashCents must be an integer from 1 to 99');
-    if(next.crystalWallMinReboundCents<1||next.crystalWallMinReboundCents>99||!Number.isInteger(next.crystalWallMinReboundCents))throw new Error('crystalWallMinReboundCents must be an integer from 1 to 99');
-    if(next.crystalWallMinUpwardTicks<1||next.crystalWallMinUpwardTicks>20||!Number.isInteger(next.crystalWallMinUpwardTicks))throw new Error('crystalWallMinUpwardTicks must be an integer from 1 to 20');
+    if(next.crystalWallMinCrashCents<0||next.crystalWallMinCrashCents>99||!Number.isInteger(next.crystalWallMinCrashCents))throw new Error('crystalWallMinCrashCents must be an integer from 0 to 99');
+    if(next.crystalWallMinReboundCents<0||next.crystalWallMinReboundCents>99||!Number.isInteger(next.crystalWallMinReboundCents))throw new Error('crystalWallMinReboundCents must be an integer from 0 to 99');
+    if(next.crystalWallMinUpwardTicks<0||next.crystalWallMinUpwardTicks>20||!Number.isInteger(next.crystalWallMinUpwardTicks))throw new Error('crystalWallMinUpwardTicks must be an integer from 0 to 20');
     if(next.crystalWallWinsToTriggerAthena<1||next.crystalWallWinsToTriggerAthena>5||!Number.isInteger(next.crystalWallWinsToTriggerAthena))throw new Error('crystalWallWinsToTriggerAthena must be an integer from 1 to 5');
     for(const stage of CRYSTAL_WALL_PROOF_STAGES){
       const keys=crystalWallProofSettingKeys(stage);
-      if(next[keys.crash]<1||next[keys.crash]>99||!Number.isInteger(next[keys.crash]))throw new Error(`${keys.crash} must be an integer from 1 to 99`);
-      if(next[keys.rebound]<1||next[keys.rebound]>99||!Number.isInteger(next[keys.rebound]))throw new Error(`${keys.rebound} must be an integer from 1 to 99`);
-      if(next[keys.ticks]<1||next[keys.ticks]>20||!Number.isInteger(next[keys.ticks]))throw new Error(`${keys.ticks} must be an integer from 1 to 20`);
+      if(next[keys.crash]<0||next[keys.crash]>99||!Number.isInteger(next[keys.crash]))throw new Error(`${keys.crash} must be an integer from 0 to 99`);
+      if(next[keys.rebound]<0||next[keys.rebound]>99||!Number.isInteger(next[keys.rebound]))throw new Error(`${keys.rebound} must be an integer from 0 to 99`);
+      if(next[keys.ticks]<0||next[keys.ticks]>20||!Number.isInteger(next[keys.ticks]))throw new Error(`${keys.ticks} must be an integer from 0 to 20`);
     }
-    if(next.justiceArrowMinCrashCents<1||next.justiceArrowMinCrashCents>99||!Number.isInteger(next.justiceArrowMinCrashCents))throw new Error('justiceArrowMinCrashCents must be an integer from 1 to 99');
-    if(next.justiceArrowMinReboundCents<1||next.justiceArrowMinReboundCents>99||!Number.isInteger(next.justiceArrowMinReboundCents))throw new Error('justiceArrowMinReboundCents must be an integer from 1 to 99');
-    if(next.justiceArrowMinUpwardTicks<1||next.justiceArrowMinUpwardTicks>20||!Number.isInteger(next.justiceArrowMinUpwardTicks))throw new Error('justiceArrowMinUpwardTicks must be an integer from 1 to 20');
+    if(next.justiceArrowMinCrashCents<0||next.justiceArrowMinCrashCents>99||!Number.isInteger(next.justiceArrowMinCrashCents))throw new Error('justiceArrowMinCrashCents must be an integer from 0 to 99');
+    if(next.justiceArrowMinReboundCents<0||next.justiceArrowMinReboundCents>99||!Number.isInteger(next.justiceArrowMinReboundCents))throw new Error('justiceArrowMinReboundCents must be an integer from 0 to 99');
+    if(next.justiceArrowMinUpwardTicks<0||next.justiceArrowMinUpwardTicks>20||!Number.isInteger(next.justiceArrowMinUpwardTicks))throw new Error('justiceArrowMinUpwardTicks must be an integer from 0 to 20');
     if(next.atomicThunderGreenTriggerCents<1||next.atomicThunderGreenTriggerCents>99||!Number.isInteger(next.atomicThunderGreenTriggerCents))throw new Error('atomicThunderGreenTriggerCents must be an integer from 1 to 99');
     if(next.dragonMaxEpisode<1||!Number.isInteger(next.dragonMaxEpisode))throw new Error('dragonMaxEpisode must be a positive integer');
     if(next.infinityBreakMinNetPerOriginalContractCents<=0)throw new Error('infinityBreakMinNetPerOriginalContractCents must be greater than zero');
