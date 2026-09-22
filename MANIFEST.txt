@@ -1,18 +1,16 @@
 SAGITTARIUS COMPLETE SYSTEM MANIFEST
-release=SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22
+release=SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22
 gate=npm test && npm run check
-gate_result=503/503 pass + check pass
-built=2026-09-22T18:55:29Z
+gate_result=504/504 pass + check pass
+built=2026-09-22T20:16:12Z
 
 CHANGED_THIS_TURN
-605ce39b1003e966fe1131c00db17c6a08ebaad21a79b9b26df470c097921069  62072  src/doctrine.mjs
-f5ec7bdd1874ab3b68ea95eaae070321f59903b042fc91bec595a821d0cc9864  34346  src/config.mjs
-430d1a3a724fbe7dc9ffdb426dbc36f35a6fb0d2b2923063530d7601af516460  314866  src/strategy.mjs
-e4db23bf468197e18cc571bea6aa4b642e9edb6f1531cf97ec64579e6f2fc66b  310410  src/profitGuard.mjs
-aad98c9dbce53510322a8ed3123202360cbf8fcb1ae099b4f2177816dea8cdb9  476453  src/engine.mjs
-f0db72312a94bf77f7c37a4631b6ed6d2b87f072a4d8807413723dc3ecfd218c  54320  public/app.js
-97141d6e5634141979a145d73fb29a115400b97171951af991ea87e9c748f830  136730  tests/r49.test.mjs
-a211ded709d26d77f1b500800c4320b5c79702b62f7e09a2857d4e1938b262c9  61333  tests/deployment.test.mjs
-a7bd2c959c015db2240b8443055e57f72830355c2afc347a24cbe9d3cbb66fdf  43988  tests/constellation.test.mjs
-01a39cb3d9d089efee8ec4e963cf30967d060889b488ad2aa4ccaafa5110dff1  238717  tests/profitGuard.test.mjs
-be6dcb34391be85b4b235fd5da691d9796eab736a6c707f040c81f07fbb9070e  1698  README.md
+0133d58b1e64a78563b7e6602c3ea28a52852de3752fa831b851a108080ab435  311216  src/profitGuard.mjs
+a94a8c46212af6c69b83d3eaa34764859d7ef6e102375a9093e4b19eb125c536  314912  src/strategy.mjs
+79fbe384741e9c29dda51e92537316eaa400406a6c9e10dd01d4274a6d5e1407  34350  src/config.mjs
+6666c88a7350b64fb46cd588ccab18d703a051fec75be3337b222abd40f7e8ed  54274  public/app.js
+2bbcad13f57e007db80c1ea127dcdc84120908b25263f4e0a503475813b4eea9  137302  tests/r49.test.mjs
+c3a1994d7f7453e5b572d6653cd8b61c8f9c4b78a321a3d75fc4fd8acb22bb89  61341  tests/deployment.test.mjs
+0d38c63b6626e8e4a220e1a4368d0f49e06cde678b59b68ab9cbfa83f862b66d  43992  tests/constellation.test.mjs
+f202da67cb14aaa092fbdd2e3275f40f70a24d8fc5205dd3c5edeb4244fedc05  238721  tests/profitGuard.test.mjs
+66c96cf50bdbc914868437dfbb00260a7ac23f2f5899f8d9f6a7e8c06a9bc917  1698  README.md

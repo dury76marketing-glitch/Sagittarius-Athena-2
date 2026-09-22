@@ -2202,7 +2202,14 @@ export class ProfitGuard {
     const capitalLatchTargetNetCents = Math.max(0, PROTECTED_RUNNER_INTELLIGENCE.capitalLatchNetPerOriginalContractCents * originalCount);
     const configuredActivationPerContract=Math.max(0, n(entry?.entryConfig?.pri1R2?.triggerNetPerOriginalContractCents));
     const configuredActivationTargetNetCents=Math.max(capitalLatchTargetNetCents, configuredActivationPerContract*originalCount);
-    const profitFloorArmTargetNetCents = Math.max(capitalLatchTargetNetCents, PROTECTED_RUNNER_INTELLIGENCE.profitFloorArmNetPerOriginalContractCents * originalCount);
+    const operatorTrail=n(entry?.entryConfig?.pri1R2?.trailNetPerOriginalContractCents);
+    const crystalWallFollowPri=String(entry?.conceptName||'')==='Recovery Hunter' && operatorTrail>0;
+    const profitFloorArmTargetNetCents = Math.max(
+      capitalLatchTargetNetCents,
+      crystalWallFollowPri
+        ? configuredActivationTargetNetCents
+        : PROTECTED_RUNNER_INTELLIGENCE.profitFloorArmNetPerOriginalContractCents * originalCount,
+    );
     const lateProfitTightenTargetNetCents = Math.max(profitFloorArmTargetNetCents, PROTECTED_RUNNER_INTELLIGENCE.lateProfitTightenAtNetPerOriginalContractCents * originalCount);
     const committed = isCommittedProtectedRunnerPhase(state?.phase);
 
@@ -2283,7 +2290,8 @@ export class ProfitGuard {
       const infinityLockAgg=infinityLockPer*originalCount;
       const infinityLockActive=profitFloorArmed && infinityLockPer>0 && peakExecutableNetCents+1e-9>=infinityLockAgg;
       const allowedGivebackNetCents = profitFloorArmed ? count * effectiveRunnerGivebackCents : null;
-      const protectedNetFloorCents = profitFloorArmed ? Math.max(infinityLockActive?infinityLockAgg:0, peakExecutableNetCents - allowedGivebackNetCents) : 0;
+      let protectedNetFloorCents = profitFloorArmed ? Math.max(infinityLockActive?infinityLockAgg:0, peakExecutableNetCents - allowedGivebackNetCents) : 0;
+      if (profitFloorArmed && crystalWallFollowPri) protectedNetFloorCents = Math.max(protectedNetFloorCents, originalCount * 1);
       const protectedPriceFloorCents = profitFloorArmed ? this.priceForAggregateNetTargetCents(entry, count, settings, protectedNetFloorCents) : breakEvenPriceCents;
       const phase = !profitFloorArmed ? 'PRI1_CAPITAL_SAFE' : protectedNetFloorCents > 1e-9 ? 'PRI1_PROFIT_FLOOR_ARMED' : 'PRI1_CAPITAL_FLOOR_ARMED';
       state = await this.persistProtectedRunnerState(entry, {
@@ -2317,11 +2325,14 @@ export class ProfitGuard {
       return { q:freshQ, state, armed:true, committed:false, triggered:false, executable:true, executableFull:true, executableBidCents, executableNetCents, breakEvenPriceCents, capitalLatchTargetNetCents, profitFloorArmTargetNetCents, ...this.protectedRunnerTelemetry(state, executableBidCents, executableNetCents, true) };
     }
 
-    const runnerGivebackCents = clamp(
-      n(state.runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.coldStartRunnerGivebackNetPerContractCents),
-      PROTECTED_RUNNER_INTELLIGENCE.minimumRunnerGivebackNetPerContractCents,
-      PROTECTED_RUNNER_INTELLIGENCE.maximumRunnerGivebackNetPerContractCents,
-    );
+    const liveOperatorTrail=n(entry?.entryConfig?.pri1R2?.trailNetPerOriginalContractCents);
+    const runnerGivebackCents = liveOperatorTrail>0
+      ? clamp(liveOperatorTrail, 1, 4)
+      : clamp(
+          n(state.runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.coldStartRunnerGivebackNetPerContractCents),
+          PROTECTED_RUNNER_INTELLIGENCE.minimumRunnerGivebackNetPerContractCents,
+          PROTECTED_RUNNER_INTELLIGENCE.maximumRunnerGivebackNetPerContractCents,
+        );
     const priorPeakNetCents = n(state.peakExecutableNetCents, executableNetCents);
     const peakExecutableNetCents = Math.max(priorPeakNetCents, executableNetCents);
     const priorPeakBidCents = n(state.peakExecutableBidCents, executableBidCents);
@@ -2340,9 +2351,12 @@ export class ProfitGuard {
     const infinityLockActive=profitFloorArmed && infinityLockPer>0 && peakExecutableNetCents+1e-9>=infinityLockAgg;
     const allowedGivebackNetCents = profitFloorArmed ? count * effectiveRunnerGivebackCents : null;
     const priorProtectedNetFloorCents = profitFloorArmed ? Math.max(0, n(state.protectedNetFloorCents)) : 0;
-    const protectedNetFloorCents = profitFloorArmed
+    let protectedNetFloorCents = profitFloorArmed
       ? Math.max(infinityLockActive?infinityLockAgg:0, priorProtectedNetFloorCents, peakExecutableNetCents - allowedGivebackNetCents)
       : 0;
+    if (profitFloorArmed && String(entry?.conceptName||'')==='Recovery Hunter') {
+      protectedNetFloorCents = Math.max(protectedNetFloorCents, count * 1);
+    }
     const protectedPriceFloorCents = profitFloorArmed
       ? this.priceForAggregateNetTargetCents(entry, count, settings, protectedNetFloorCents)
       : breakEvenPriceCents;
@@ -2352,7 +2366,7 @@ export class ProfitGuard {
     // A gap obligation exists only after sell authority has actually armed.
     // Merely reaching CAPITAL_SAFE is telemetry; a dip below zero and recovery
     // cannot create a break-even sell by itself.
-    if (wasGapped && executableNetCents >= -1e-9) {
+    if (wasGapped && executableNetCents >= -1e-9 && String(entry?.conceptName||'')!=='Recovery Hunter') {
       state = await this.persistProtectedRunnerState(entry, {
         ...state, policyRevision:PROTECTED_RUNNER_INTELLIGENCE.policyRevision,
         phase:'PRI1_EXIT_COMMITTED', exitCommittedAtMs:Date.now(), exitTrigger:'capital_floor_recovered',

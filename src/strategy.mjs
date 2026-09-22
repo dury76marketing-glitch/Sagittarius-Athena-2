@@ -2547,7 +2547,7 @@ export class StrategyEngine {
       frozenEntryConfig.profitAuthority=frozenProfitPolicy.authority;
       frozenEntryConfig.profitAuthorityRevision=frozenProfitPolicy.revision;
       if(frozenProfitPolicy.authority===PROTECTED_RUNNER_INTELLIGENCE.version){
-        frozenEntryConfig.pri1R2={version:PROTECTED_RUNNER_INTELLIGENCE.version,policyRevision:PROTECTED_RUNNER_INTELLIGENCE.policyRevision,enabledAtEntry:true,triggerNetPerOriginalContractCents:frozenProfitPolicy.triggerNetPerOriginalContractCents,...(concept==='Recovery Hunter'?{trailNetPerOriginalContractCents:frozenProfitPolicy.trailNetPerOriginalContractCents,infinityLockNetPerOriginalContractCents:Number(s.infinityBreakMinNetPerOriginalContractCents??1)}:{}),fullPositionOnly:true,lossAuthority:'U-SG1'};
+        frozenEntryConfig.pri1R2={version:PROTECTED_RUNNER_INTELLIGENCE.version,policyRevision:PROTECTED_RUNNER_INTELLIGENCE.policyRevision,enabledAtEntry:true,triggerNetPerOriginalContractCents:frozenProfitPolicy.triggerNetPerOriginalContractCents,...(concept==='Recovery Hunter'?{trailNetPerOriginalContractCents:frozenProfitPolicy.trailNetPerOriginalContractCents,infinityLockNetPerOriginalContractCents:Math.max(1,Number(frozenProfitPolicy.trailNetPerOriginalContractCents||s.recoveryPri1R2TrailCents||1))}:{}),fullPositionOnly:true,lossAuthority:'U-SG1'};
         delete frozenEntryConfig.infinityBreak;
         delete frozenEntryConfig.athenaExit;
       }else if(PORTFOLIO_CONCEPTS.has(concept)){

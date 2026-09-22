@@ -58,7 +58,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22');
+  assert.equal(RELEASE,'SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -886,6 +886,8 @@ test('fleet concept aggregate SQL excludes Crystal Wall paper and includes host 
   assert.ok(engine.includes("excluded:'crystal_wall_shadow'"));
   assert.ok(html.includes('attackBody'));
   assert.ok(app.includes('fleetStatFor'));
+  assert.equal(app.includes("a.legacy==='Recovery Hunter'?{avgEntryCents:0"),false);
+  assert.equal(app.includes("if(name==='Recovery Hunter' || name==='Crystal Wall Shadow')"),false);
   assert.ok(!html.includes('fleetAttackResultsSection'));
 });
 
@@ -1626,4 +1628,11 @@ test('Crystal Wall follow-up opens after a profitable Infinity close and Excalib
   const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,quote);
   assert.ok(copied.length>=10,`copied ${copied.length}`);
   assert.ok(copied.every((row)=>row.conceptName==='Recovery Hunter'));
+});
+
+test('Crystal Wall homepage row uses live fleet results, not a hard zero',async()=>{
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  assert.ok(app.includes('const st=fleetStatFor(s,a.legacy)'));
+  assert.equal(app.includes("name==='Recovery Hunter' || name==='Crystal Wall Shadow'"),false);
+  assert.ok(app.includes("CRYSTAL WALL FOLLOW-UP"));
 });

@@ -1,6 +1,6 @@
-# SAGITTARIUS — Crystal Wall Infinity Follow + Scarlet Regular Attack
+# SAGITTARIUS — Crystal Wall Follow Scoreboard + PRI Floor Repair
 
-Release: `SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22`
+Release: `SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22`
 
 Package version: `3.3.2`
 
