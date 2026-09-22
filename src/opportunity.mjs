@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, INFINITY_BREAK, EXECUTION_ATTACK_DISPLAY, BOLT_DIRECT, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
+import { ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, INFINITY_BREAK, EXECUTION_ATTACK_DISPLAY, BOLT_DIRECT, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
 
 const finite=(v,d=null)=>Number.isFinite(Number(v))?Number(v):d;
 const clamp=(v,lo=0,hi=100)=>Math.max(lo,Math.min(hi,Number(v)||0));
@@ -249,6 +249,8 @@ export function atomicThunderBoltFeatures({q,history=[],settings={},cosmos=[],cr
 export function atomicThunderBoltDecision(features={},settings={}){
   if(!features?.ticker)return{detected:false,reason:'ticker_missing',score:0};
   if(!(features.askCents>0)||!(features.bidCents>0)||features.bidCents>features.askCents)return{detected:false,reason:'invalid_quote',score:0};
+  const family=executionMarketFamilyExclusion(features.ticker,settings);
+  if(family.blocked)return{detected:false,reason:String(family.reason||MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode),score:0,marketFamilyExclusion:family};
   if(!Array.isArray(features.eligibleAttacks)||features.eligibleAttacks.length===0)return{detected:false,reason:'no_enabled_attack_band',score:0};
   const economicallyFeasible=features.eligibleAttacks.filter(x=>x?.targetFeasible!==false);
   if(!economicallyFeasible.length)return{detected:false,reason:'economic_target_unreachable',score:0};

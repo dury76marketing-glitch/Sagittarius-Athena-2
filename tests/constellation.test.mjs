@@ -77,7 +77,7 @@ test('TC1-P8 host wrapper schedules twelve executing rooms in one process', () =
 });
 
 test('TC1 does not change Mega Wave doctrine or release identity', () => {
-  assert.equal(RELEASE, 'SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22');
+  assert.equal(RELEASE, 'SAGITTARIUS-CW4-R3-BOLT-OUTCOME-FUNNEL-2026-09-22');
   assert.equal(MEGA_WAVE.version, 'MEGA-WAVE-MW1-MW2-MW3');
   assert.equal(MEGA_WAVE.maximumFollowUpAttacks, 12);
 });

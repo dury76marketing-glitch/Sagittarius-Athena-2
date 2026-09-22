@@ -58,7 +58,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22');
+  assert.equal(RELEASE,'SAGITTARIUS-CW4-R3-BOLT-OUTCOME-FUNNEL-2026-09-22');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -1635,4 +1635,74 @@ test('Crystal Wall homepage row uses live fleet results, not a hard zero',async(
   assert.ok(app.includes('const st=fleetStatFor(s,a.legacy)'));
   assert.equal(app.includes("name==='Recovery Hunter' || name==='Crystal Wall Shadow'"),false);
   assert.ok(app.includes("CRYSTAL WALL FOLLOW-UP"));
+});
+
+
+test('banned family is not reported as no_enabled_attack_band',()=>{
+  const s=sanitizeRuntimeSettings({
+    ...originalSettings(),
+    andromedaThunderWaveEnabled:true,
+    andromedaThunderWaveLevel:'MID',
+    athenaExclamationEnabled:true,
+    athenaExclamationMinEntryCents:30,
+    athenaExclamationMaxEntryCents:90,
+    athenaExclamationMinCrashCents:0,
+    athenaExclamationMinReboundCents:0,
+    athenaExclamationMinUpwardTicks:0,
+  });
+  const quote=q('KXATPCHALLENGERMATCH-26SEP22DONCAD-CAD',58,60);
+  const features=atomicThunderBoltFeatures({q:quote,history:[],settings:s,cosmos:[{id:'s1',conceptName:'Dragon',ticker:quote.ticker,status:'open',entryPriceCents:50,openedAtMs:1}],now:Date.now()});
+  const decision=atomicThunderBoltDecision(features,s);
+  assert.equal(decision.detected,false);
+  assert.equal(decision.reason,MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode);
+  assert.notEqual(decision.reason,'no_enabled_attack_band');
+});
+
+test('allowed family outside the operator band still reports no_enabled_attack_band',()=>{
+  const s=sanitizeRuntimeSettings({
+    ...originalSettings(),
+    andromedaThunderWaveEnabled:true,
+    andromedaThunderWaveLevel:'MID',
+    athenaExclamationEnabled:true,
+    scarletNeedleEnabled:false,
+    justiceArrowEnabled:false,
+    momentumHunterEnabled:false,
+    waveSurferEnabled:false,
+    lightningPlasmaEnabled:false,
+    recoveryHunterEnabled:false,
+    athenaExclamationMinEntryCents:60,
+    athenaExclamationMaxEntryCents:69,
+    athenaExclamationMinCrashCents:0,
+    athenaExclamationMinReboundCents:0,
+    athenaExclamationMinUpwardTicks:0,
+  });
+  const quote=q('KXUCLWGAME-26SEP22JUVSLB-SLB',87,88);
+  const features=atomicThunderBoltFeatures({q:quote,history:[],settings:s,cosmos:[{id:'s1',conceptName:'Phoenix',ticker:quote.ticker,status:'open',entryPriceCents:80,openedAtMs:1}],now:Date.now()});
+  const decision=atomicThunderBoltDecision(features,s);
+  assert.equal(decision.detected,false);
+  assert.equal(decision.reason,'no_enabled_attack_band');
+});
+
+test('allowed family inside the operator band can still detect a bolt',()=>{
+  const s=sanitizeRuntimeSettings({
+    ...originalSettings(),
+    andromedaThunderWaveEnabled:true,
+    andromedaThunderWaveLevel:'MID',
+    athenaExclamationEnabled:true,
+    scarletNeedleEnabled:false,
+    justiceArrowEnabled:false,
+    momentumHunterEnabled:false,
+    waveSurferEnabled:false,
+    lightningPlasmaEnabled:false,
+    recoveryHunterEnabled:false,
+    athenaExclamationMinEntryCents:60,
+    athenaExclamationMaxEntryCents:69,
+    athenaExclamationMinCrashCents:0,
+    athenaExclamationMinReboundCents:0,
+    athenaExclamationMinUpwardTicks:0,
+  });
+  const quote=q('KXUCLWGAME-26SEP22JUVSLB-SLB',63,64);
+  const features=atomicThunderBoltFeatures({q:quote,history:[],settings:s,cosmos:[{id:'s1',conceptName:'Phoenix',ticker:quote.ticker,status:'open',entryPriceCents:61,openedAtMs:1}],now:Date.now()});
+  const decision=atomicThunderBoltDecision(features,s);
+  assert.equal(decision.detected,true,decision.reason);
 });

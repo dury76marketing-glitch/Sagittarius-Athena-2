@@ -3095,7 +3095,7 @@ export class StrategyEngine {
     const card=boltDirectAttackCard(name,q,s,context.crashState||context.crashSignal||null);
     if(!card.ok){this.lastAthenaFireAbort=card.reason;await this.audit('bolt_direct_execution_aborted',{boltId:bolt?.id||null,ticker:q?.ticker||null,concept:name,reason:card.reason,stage:'attack_card'});return null;}
     const family=executionMarketFamilyExclusion(q?.ticker,s);
-    if(family.blocked){this.lastAthenaFireAbort=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;return null;}
+    if(family.blocked){this.lastAthenaFireAbort=MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode;await this.audit('bolt_direct_execution_aborted',{boltId:bolt?.id||null,ticker:q?.ticker||null,concept:name,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,stage:'market_family'});return null;}
     const stakeCents=attackConfiguredStakeCents(s,name);
     if(!(stakeCents>0)){this.lastAthenaFireAbort='bolt_direct_stake_invalid';return null;}
     const envelope=hunterEntryEnvelope(s,name);

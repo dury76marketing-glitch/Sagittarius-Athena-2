@@ -2837,6 +2837,12 @@ export class SagittariusEngine {
           this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'BOLT_DIRECT_CARD',status:'BLOCKED',reason:card.reason,concept});
           continue;
         }
+        const family=executionMarketFamilyExclusion(q.ticker,s);
+        if(family.blocked){
+          this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'BOLT_DIRECT_CARD',status:'BLOCKED',reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,concept});
+          await this.db.audit('info','bolt_direct_execution_aborted',{boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,concept,reason:MARKET_FAMILY_EXECUTION_EXCLUSION.reasonCode,stage:'market_family'}).catch(()=>{});
+          continue;
+        }
         this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'EXECUTION_ELIGIBLE',status:'PASS',reason:'bolt_direct_card_ready',concept});
         if(s.excaliburEnabled===true&&s.rozanHyakuRyuHaEnabled!==true){
           if(this.excaliburSourceClaimed(q.ticker,concept) || this.fleetHoldsExactTickerAttack(q.ticker,concept)){
@@ -2854,6 +2860,10 @@ export class SagittariusEngine {
           const unison=await this.fanOutExcalibur(e,q);
           if(unison.length) created.push(...unison);
           if(!galacticOn)break;
+        } else {
+          const reason=String(this.strategy?.lastAthenaFireAbort||'bolt_direct_fire_returned_null');
+          this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'EXECUTION_BLOCKED',status:'BLOCKED',reason,concept});
+          await this.db.audit('info','bolt_direct_execution_aborted',{boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,concept,reason,stage:'post_eligible_fire'}).catch(()=>{});
         }
       }
       if(openedAny)this.atomicThunderBolt.consume(bolt.id,q.ticker);

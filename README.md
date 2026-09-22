@@ -1,6 +1,8 @@
 # SAGITTARIUS — Crystal Wall Follow Scoreboard + PRI Floor Repair
 
-Release: `SAGITTARIUS-CW4-R2-SCOREBOARD-PRI-FLOOR-2026-09-22`
+Release: `SAGITTARIUS-CW4-R3-BOLT-OUTCOME-FUNNEL-2026-09-22`
+
+R3: Atomic Thunder reports market-family exclusion instead of a false band miss. A card-ready fire that does not open is recorded as EXECUTION_BLOCKED. Operator 60-69 bands and Andromeda MID are unchanged.
 
 Package version: `3.3.2`
 
