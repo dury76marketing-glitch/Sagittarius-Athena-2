@@ -58,7 +58,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-BOLT-DIRECT-R4-EXCALIBUR-ALL-ATTACKS-12-2026-09-22');
+  assert.equal(RELEASE,'SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -69,11 +69,12 @@ test('MW Railway identity and architecture contract are exact',async()=>{
   assert.equal(shadowClose.includes('queueScarletContinuation(entry)'),false,'Crystal Wall must not directly release Scarlet');
 });
 
-test('MW dashboard/config exposes 0-12 release and independent PRI1-R2 controls without giving Crystal Wall PRI authority',async()=>{
+test('MW dashboard/config exposes 0-12 release and independent PRI1-R2 controls including Crystal Wall follow-up PRI',async()=>{
   assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('athenaExclamationFollowUpAttacks'));
   for(const k of ['athenaExclamationPri1R2TriggerCents','scarletNeedlePri1R2TriggerCents','justiceArrowPri1R2TriggerCents','momentumPri1R2TriggerCents','wavePri1R2TriggerCents','crashRecoveryPri1R2TriggerCents','lightningPlasmaPri1R2TriggerCents'])assert.ok(CANONICAL_NUMERIC_SETTINGS.includes(k),k);
   for(const k of ['athenaExclamationPri1R2Enabled','scarletNeedlePri1R2Enabled','justiceArrowPri1R2Enabled','momentumPri1R2Enabled','wavePri1R2Enabled','crashRecoveryPri1R2Enabled','lightningPlasmaPri1R2Enabled'])assert.ok(CANONICAL_BOOLEAN_SETTINGS.includes(k),k);
-  assert.equal(CANONICAL_BOOLEAN_SETTINGS.includes('recoveryPri1R2Enabled'),false);
+  assert.equal(CANONICAL_BOOLEAN_SETTINGS.includes('recoveryPri1R2Enabled'),true);
+  assert.ok(CANONICAL_NUMERIC_SETTINGS.includes('recoveryPri1R2TrailCents'));
   const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');assert.ok(app.includes('Follow-up Attacks (0-12)'));assert.ok(app.includes('Athena-profit downstream Saint'));assert.ok(app.includes('Starlight Extinction'));assert.ok(app.includes('athenaExclamationMinCrashCents'));assert.ok(app.includes('scarletNeedleMinReboundCents'));assert.ok(app.includes('waveMinUpwardTicks'));assert.ok(app.includes('lightningPlasmaMinCrashCents'));assert.ok(app.includes('momentumMinCrashCents'));assert.ok(app.includes('crashRecoveryMinUpwardTicks'));assert.equal(app.includes('waveMinFeederFavorableMoveCents'),false);assert.equal(app.includes('momentumMinRiseCents'),false);assert.equal(app.includes('crashRecoveryMinReclaimRate'),false);
 });
 
@@ -204,7 +205,8 @@ test('MW every real Attack independently freezes Infinity or PRI1-R2 while Cryst
     const on=attackProfitAuthoritySnapshot(settings({[onKey]:true,[targetKey]:6}),concept);assert.equal(on.authority,PROTECTED_RUNNER_INTELLIGENCE.version,concept);assert.equal(on.triggerNetPerOriginalContractCents,6);
     const snap=entryConfigSnapshot(settings({[onKey]:true,[targetKey]:6}),concept,null,500,null,null,'MW');assert.equal(snap.profitAuthority,PROTECTED_RUNNER_INTELLIGENCE.version);assert.equal(snap.pri1R2.triggerNetPerOriginalContractCents,6);assert.equal(snap.lossAuthority,'U-SG1');
   }
-  const crystal=attackProfitAuthoritySnapshot(settings(),'Recovery Hunter');assert.equal(crystal.authority,INFINITY_BREAK.version);assert.equal(crystal.pri1Enabled,false);
+  const crystalOff=attackProfitAuthoritySnapshot(settings({recoveryPri1R2Enabled:false}),'Recovery Hunter');assert.equal(crystalOff.authority,INFINITY_BREAK.version);assert.equal(crystalOff.pri1Enabled,false);
+  const crystalOn=attackProfitAuthoritySnapshot(settings({recoveryPri1R2Enabled:true,recoveryPri1R2TriggerCents:1,recoveryPri1R2TrailCents:1}),'Recovery Hunter');assert.equal(crystalOn.authority,PROTECTED_RUNNER_INTELLIGENCE.version);assert.equal(crystalOn.trailNetPerOriginalContractCents,1);
 });
 
 test('MW frozen provenance labels match actual Mega Wave authority instead of retired parent chains',()=>{
@@ -1103,14 +1105,15 @@ test('Bolt Direct dashboard 0/0/0 crash-rebound-ticks is saved and lets the bolt
   assert.equal(pass.reason,'bolt_direct_card_qualified');
 });
 
-test('Crystal Wall is a Bolt Direct real attack timed by the bolt',()=>{
+test('Crystal Wall is not a Bolt Direct opener; it is an Infinity-win follow-up',()=>{
   assert.equal(EXECUTABLE_HUNTER_CONCEPTS.has('Recovery Hunter'),true);
-  assert.equal(BOLT_DIRECT.attacks.includes('Recovery Hunter'),true);
-  assert.equal(BOLT_DIRECT.excludedAttacks.includes('Recovery Hunter'),false);
+  assert.equal(BOLT_DIRECT.attacks.includes('Recovery Hunter'),false);
+  assert.equal(BOLT_DIRECT.excludedAttacks.includes('Recovery Hunter'),true);
   const s=settings({recoveryHunterEnabled:true,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,recoveryMinEntryCents:10,recoveryMaxEntryCents:89});
   const pass=boltDirectAttackCard('Recovery Hunter',q('CW-REAL',50,51),s,null);
-  assert.equal(pass.ok,true,pass.reason);
-  assert.equal(boltDirectEnabledAttacks(s).includes('Recovery Hunter'),true);
+  assert.equal(pass.ok,false);
+  assert.equal(pass.reason,'bolt_direct_attack_not_allowed');
+  assert.equal(boltDirectEnabledAttacks(s).includes('Recovery Hunter'),false);
 });
 
 test('dashboard crash/rebound/ticks save 0 on every attack and keep it',()=>{
@@ -1167,7 +1170,7 @@ test('factory recipe lock 2026-09-21 bands stake geometry cooldown',()=>{
   }
 });
 
-test('Crystal Wall without a Bolt Direct command stays blocked; bolt command is allowed past shadow isolation',async()=>{
+test('Crystal Wall without an Infinity-follow command stays blocked; bolt cannot open it',async()=>{
   const s=settings({recoveryHunterEnabled:true,recoveryMinEntryCents:10,recoveryMaxEntryCents:89,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0});
   const traces=[];
   const st=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
@@ -1175,11 +1178,11 @@ test('Crystal Wall without a Bolt Direct command stays blocked; bolt command is 
   const quote=q('CW-REAL-2',55,56);
   const blocked=await st.createHunter('Recovery Hunter',quote,100,0,{});
   assert.equal(blocked,null);
-  assert.ok(traces.some((row)=>row.reason==='crystal_wall_shadow_only_no_real_hunter_authority'));
+  assert.ok(traces.some((row)=>['crystal_wall_shadow_only_no_real_hunter_authority','crystal_wall_infinity_follow_required'].includes(row.reason)));
   traces.length=0;
   const command={version:BOLT_DIRECT.version,authorityMode:BOLT_DIRECT.strategicEntryAuthority,boltId:'bolt-cw',commandHash:'h'};
   await st.createHunter('Recovery Hunter',quote,100,0,{boltDirectAuthorization:command,athenaFireCommand:command});
-  assert.equal(traces.some((row)=>row.reason==='crystal_wall_shadow_only_no_real_hunter_authority'),false);
+  assert.ok(traces.some((row)=>['crystal_wall_shadow_only_no_real_hunter_authority','crystal_wall_infinity_follow_required','bolt_direct_attack_not_allowed'].includes(row.reason)));
 });
 
 test('Galactic ON lets a second attack sit on the same ticker; same attack stays locked',async()=>{
@@ -1288,7 +1291,7 @@ test('Bolt Direct fire opens every Galactic joiner then honors per-attack repeat
   }
   assert.deepEqual(opened.slice().sort(),BOLT_DIRECT.attacks.slice().sort());
   const book=await db.entries();
-  assert.equal(book.filter((e)=>e.status==='open').length,7);
+  assert.equal(book.filter((e)=>e.status==='open').length,BOLT_DIRECT.attacks.length);
 });
 
 test('Excalibur copies the opened attack onto free cosmosses',async()=>{
@@ -1582,3 +1585,45 @@ test('homepage closed table source drops feeder concept names',async()=>{
   assert.ok(app.includes('closed=(s.closedHunters||[]).filter'));
 });
 
+
+test('Scarlet Needle uses the shared Infinity target, not a private minimum',()=>{
+  const s=settings({infinityBreakMinNetPerOriginalContractCents:1,scarletNeedleInfinityNetPerOriginalContractCents:9});
+  assert.equal(attackInfinityNetTargetCents(s,'Scarlet Needle'),1);
+  assert.equal(attackInfinityNetTargetCents(s,'Athena Exclamation'),1);
+});
+
+test('Crystal Wall follow-up opens after a profitable Infinity close and Excalibur can copy it',async()=>{
+  const s=settings({
+    recoveryHunterEnabled:true,recoveryPri1R2Enabled:true,recoveryPri1R2TriggerCents:1,recoveryPri1R2TrailCents:1,
+    recoveryMinEntryCents:10,recoveryMaxEntryCents:89,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,
+    recoveryStakeCents:100,excaliburEnabled:true,infinityBreakMinNetPerOriginalContractCents:1,
+  });
+  const parent={id:'ath-ib-1',systemName:'ARIES',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'CW-FLW',eventTicker:'CW-FLW',mode:'SIMULATION',status:'closed',remainingCount:0,pnlCents:12,closeReason:'infinity_break',openedAtMs:1,closedAtMs:2,entryPriceCents:48,exitPriceCents:52,peakPriceCents:53};
+  const db=memoryDb([parent]);
+  const quote=q('CW-FLW',52,53);
+  const st=new StrategyEngine({db,kalshi:{},market:{
+    async refreshTicker(){return quote;},
+    getHistory(){return [];},
+    executableAsk(){return {filled:2,avgCents:quote.yesAsk,bestCents:quote.yesAsk,full:true};},
+    executableBid(){return {filled:2,avgCents:quote.yesBid,bestCents:quote.yesBid,full:true};},
+  },learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const opened=await st.executeCrystalWallFollowUp(quote,parent,{grantId:'CW4:ath-ib-1'},{crashDepthCents:0,reboundCents:0,upwardTicks:0});
+  assert.ok(opened,st.lastAthenaFireAbort||'follow-up did not open');
+  assert.equal(opened.conceptName,'Recovery Hunter');
+  assert.equal(opened.sourceTradeId,'ath-ib-1');
+  assert.equal(opened.entryConfig?.profitAuthority,PROTECTED_RUNNER_INTELLIGENCE.version);
+  assert.equal(opened.entryConfig?.pri1R2?.trailNetPerOriginalContractCents,1);
+
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings={...s,excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,systemName:'ARIES',recoveryHunterEnabled:true,recoveryStakeCents:100,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,recoveryMinEntryCents:10,recoveryMaxEntryCents:89};
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.excaliburGrants=new Map(); engine.excaliburInFlight=new Set(); engine.excaliburSourceClaims=new Map(); engine.excaliburFanoutLocks=new Map();
+  engine.db={loadCosmosSettings:async(id,host)=>({...host,systemName:id,recoveryHunterEnabled:true,recoveryStakeCents:100,crystalWallMinCrashCents:0,crystalWallMinReboundCents:0,crystalWallMinUpwardTicks:0,recoveryMinEntryCents:10,recoveryMaxEntryCents:89}),audit:async()=>{}};
+  engine.withCosmosSettings=async(id,fn)=>{const prev=engine.settings; engine.settings={...engine.settings,systemName:id}; try{return await fn(engine.settings);} finally{engine.settings=prev;}};
+  engine.strategy={createHunter:async(concept,q,stake)=>({id:`${engine.settings.systemName}-${concept}`,systemName:engine.settings.systemName,conceptName:concept,ticker:q.ticker,status:'open',stakeCents:stake})};
+  engine.rememberCosmosBookEntry=(row)=>{engine.cosmosBooks[row.systemName]=[...(engine.cosmosBooks[row.systemName]||[]),row];};
+  const source={id:opened.id,systemName:'ARIES',conceptName:'Recovery Hunter',ticker:'CW-FLW',entryConfig:{athenaFire:opened.entryConfig?.athenaFire||{version:CRYSTAL_WALL.followVersion,authorityMode:CRYSTAL_WALL.followAuthority,selectedAttack:'Recovery Hunter',ticker:'CW-FLW',stakeCents:100}}};
+  const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,quote);
+  assert.ok(copied.length>=10,`copied ${copied.length}`);
+  assert.ok(copied.every((row)=>row.conceptName==='Recovery Hunter'));
+});

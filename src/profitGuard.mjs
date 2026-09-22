@@ -2260,15 +2260,18 @@ export class ProfitGuard {
         retentionRatio:PROTECTED_RUNNER_INTELLIGENCE.legacyColdStartRetentionRatio,
         specificity:'cold_start', promoted:false, totalObservations:0, confidence:'low',
       };
-      if (typeof this.learning?.profitRetentionProfileCached === 'function') {
+      const operatorTrail=n(entry?.entryConfig?.pri1R2?.trailNetPerOriginalContractCents);
+      if (!(operatorTrail>0) && typeof this.learning?.profitRetentionProfileCached === 'function') {
         try { profile = { ...profile, ...this.learning.profitRetentionProfileCached(entry) }; }
         catch (error) { void this.audit('pli1_profile_cache_failed', { id:entry.id, ticker:entry.ticker, error:String(error?.message || error) }, 'warning'); }
       }
-      const runnerGivebackCents = clamp(
-        n(profile.runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.coldStartRunnerGivebackNetPerContractCents),
-        PROTECTED_RUNNER_INTELLIGENCE.minimumRunnerGivebackNetPerContractCents,
-        PROTECTED_RUNNER_INTELLIGENCE.maximumRunnerGivebackNetPerContractCents,
-      );
+      const runnerGivebackCents = operatorTrail>0
+        ? clamp(operatorTrail, 1, 4)
+        : clamp(
+            n(profile.runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.coldStartRunnerGivebackNetPerContractCents),
+            PROTECTED_RUNNER_INTELLIGENCE.minimumRunnerGivebackNetPerContractCents,
+            PROTECTED_RUNNER_INTELLIGENCE.maximumRunnerGivebackNetPerContractCents,
+          );
       const peakExecutableNetCents = executableNetCents;
       const peakExecutableBidCents = executableBidCents;
       const profitFloorArmed = peakExecutableNetCents + 1e-9 >= profitFloorArmTargetNetCents;
@@ -2276,8 +2279,11 @@ export class ProfitGuard {
       const effectiveRunnerGivebackCents = lateProfitTightened
         ? Math.min(runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.lateProfitGivebackNetPerContractCents)
         : runnerGivebackCents;
+      const infinityLockPer=Math.max(0,n(entry?.entryConfig?.pri1R2?.infinityLockNetPerOriginalContractCents));
+      const infinityLockAgg=infinityLockPer*originalCount;
+      const infinityLockActive=profitFloorArmed && infinityLockPer>0 && peakExecutableNetCents+1e-9>=infinityLockAgg;
       const allowedGivebackNetCents = profitFloorArmed ? count * effectiveRunnerGivebackCents : null;
-      const protectedNetFloorCents = profitFloorArmed ? Math.max(0, peakExecutableNetCents - allowedGivebackNetCents) : 0;
+      const protectedNetFloorCents = profitFloorArmed ? Math.max(infinityLockActive?infinityLockAgg:0, peakExecutableNetCents - allowedGivebackNetCents) : 0;
       const protectedPriceFloorCents = profitFloorArmed ? this.priceForAggregateNetTargetCents(entry, count, settings, protectedNetFloorCents) : breakEvenPriceCents;
       const phase = !profitFloorArmed ? 'PRI1_CAPITAL_SAFE' : protectedNetFloorCents > 1e-9 ? 'PRI1_PROFIT_FLOOR_ARMED' : 'PRI1_CAPITAL_FLOOR_ARMED';
       state = await this.persistProtectedRunnerState(entry, {
@@ -2329,10 +2335,13 @@ export class ProfitGuard {
     const effectiveRunnerGivebackCents = lateProfitTightened
       ? Math.min(runnerGivebackCents, PROTECTED_RUNNER_INTELLIGENCE.lateProfitGivebackNetPerContractCents)
       : runnerGivebackCents;
+    const infinityLockPer=Math.max(0,n(entry?.entryConfig?.pri1R2?.infinityLockNetPerOriginalContractCents));
+    const infinityLockAgg=infinityLockPer*count;
+    const infinityLockActive=profitFloorArmed && infinityLockPer>0 && peakExecutableNetCents+1e-9>=infinityLockAgg;
     const allowedGivebackNetCents = profitFloorArmed ? count * effectiveRunnerGivebackCents : null;
     const priorProtectedNetFloorCents = profitFloorArmed ? Math.max(0, n(state.protectedNetFloorCents)) : 0;
     const protectedNetFloorCents = profitFloorArmed
-      ? Math.max(0, priorProtectedNetFloorCents, peakExecutableNetCents - allowedGivebackNetCents)
+      ? Math.max(infinityLockActive?infinityLockAgg:0, priorProtectedNetFloorCents, peakExecutableNetCents - allowedGivebackNetCents)
       : 0;
     const protectedPriceFloorCents = profitFloorArmed
       ? this.priceForAggregateNetTargetCents(entry, count, settings, protectedNetFloorCents)

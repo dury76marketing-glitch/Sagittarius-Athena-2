@@ -1,10 +1,12 @@
-# SAGITTARIUS — Bolt Direct R4 Excalibur All-Attacks 12
+# SAGITTARIUS — Crystal Wall Infinity Follow + Scarlet Regular Attack
 
-Release: `SAGITTARIUS-BOLT-DIRECT-R4-EXCALIBUR-ALL-ATTACKS-12-2026-09-22`
+Release: `SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22`
 
 Package version: `3.3.2`
 
-Excalibur ON: one bolt + one enabled attack opens that attack once in every cosmos (12 seats). This applies to Athena, Scarlet, Justice, Wave, Horn, Plasma and every other Bolt Direct attack — not Athena only.
+Crystal Wall is no longer a bolt opener. After a real attack closes on Infinity with a win, Crystal Wall may enter the same ticker using its own crash/rebound/ticks and PRI trail. Excalibur copies that Crystal Wall fill across free cosmosses. Scarlet Needle is a regular Bolt Direct attack and uses the shared Infinity target.
+
+Excalibur ON still copies a Bolt Direct source attack once into every free cosmos (12 seats).
 
 ## What R4 repairs
 

@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-BOLT-DIRECT-R4-EXCALIBUR-ALL-ATTACKS-12-2026-09-22';
+export const RELEASE = 'SAGITTARIUS-CW4-INFINITY-FOLLOW-PRI-2026-09-22';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -160,6 +160,8 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'wavePri1R2TriggerCents',
   'crashRecoveryPri1R2TriggerCents',
   'lightningPlasmaPri1R2TriggerCents',
+  'recoveryPri1R2TriggerCents',
+  'recoveryPri1R2TrailCents',
 
   'resetTimestampMs',
 ]);
@@ -192,6 +194,7 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'wavePri1R2Enabled',
   'crashRecoveryPri1R2Enabled',
   'lightningPlasmaPri1R2Enabled',
+  'recoveryPri1R2Enabled',
 ]);
 
 export const CRYSTAL_WALL_PROOF_STAGES = Object.freeze([1,2,3,4,5]);
@@ -383,6 +386,9 @@ export function originalSettings() {
     crashRecoveryPri1R2TriggerCents: 6,
     lightningPlasmaPri1R2Enabled: false,
     lightningPlasmaPri1R2TriggerCents: 5,
+    recoveryPri1R2Enabled: true,
+    recoveryPri1R2TriggerCents: 1,
+    recoveryPri1R2TrailCents: 1,
 
     resetTimestampMs: null,
   };
@@ -553,6 +559,9 @@ export function freshInstallSettings() {
     crashRecoveryPri1R2TriggerCents:5,
     lightningPlasmaPri1R2Enabled:false,
     lightningPlasmaPri1R2TriggerCents:5,
+    recoveryPri1R2Enabled:true,
+    recoveryPri1R2TriggerCents:1,
+    recoveryPri1R2TrailCents:1,
 
     resetTimestampMs:null,
   };
@@ -705,9 +714,11 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   if(!Object.hasOwn(out,'crashRecoveryMinUpwardTicks') || out.crashRecoveryMinUpwardTicks==null) out.crashRecoveryMinUpwardTicks=out.crashRecoveryUpwardTicks;
 
   out.athenaExclamationFollowUpAttacks = Math.max(0, Math.min(12, Math.floor(Number(out.athenaExclamationFollowUpAttacks) || 0)));
-  for (const key of ['athenaExclamationPri1R2TriggerCents','scarletNeedlePri1R2TriggerCents','justiceArrowPri1R2TriggerCents','momentumPri1R2TriggerCents','wavePri1R2TriggerCents','crashRecoveryPri1R2TriggerCents','lightningPlasmaPri1R2TriggerCents']) {
+  for (const key of ['athenaExclamationPri1R2TriggerCents','scarletNeedlePri1R2TriggerCents','justiceArrowPri1R2TriggerCents','momentumPri1R2TriggerCents','wavePri1R2TriggerCents','crashRecoveryPri1R2TriggerCents','lightningPlasmaPri1R2TriggerCents','recoveryPri1R2TriggerCents']) {
     out[key] = Math.max(0.01, Math.min(99, Number(out[key]) || 0.01));
   }
+  out.recoveryPri1R2TrailCents = Math.max(1, Math.min(4, Number(out.recoveryPri1R2TrailCents) || 1));
+  out.recoveryPri1R2Enabled = out.recoveryPri1R2Enabled===true;
 
   // R63 simulation/live parity: persisted legacy probabilities are neutralized.
   // SIM still requires fresh executable depth and may fill partially, but never
