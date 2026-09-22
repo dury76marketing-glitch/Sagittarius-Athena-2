@@ -842,11 +842,12 @@ test('entry admission never blocks on Game Clock minutes or unknown clocks',()=>
   assert.equal(entryAdmissionDecision({quote:{ticker:'X',status:'closed',result:'yes'}}).reason,'game_final');
 });
 
-test('homepage closed table shows latest 30 rows in a scroll box',async()=>{
+test('homepage closed table shows latest 500 rows in a scroll box',async()=>{
   const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
   const html=await readFile(new URL('../public/index.html',import.meta.url),'utf8');
   const css=await readFile(new URL('../public/styles.css',import.meta.url),'utf8');
-  assert.ok(app.includes('const closedLimit=30'));
+  assert.ok(app.includes('const closedLimit=500'));
+  assert.ok(!app.includes('const closedLimit=30'));
   assert.ok(app.includes('closed.slice(0,closedLimit)'));
   assert.ok(html.includes('closed-trades-scroll'));
   assert.ok(css.includes('.closed-trades-scroll{max-height:360px'));

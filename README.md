@@ -1,6 +1,6 @@
-# SAGITTARIUS — Bolt Direct R3 Excalibur 12
+# SAGITTARIUS — Bolt Direct R3 Excalibur 12 + Closed Table 500
 
-Release: `SAGITTARIUS-BOLT-DIRECT-R3-EXCALIBUR-12-2026-09-22`
+Release: `SAGITTARIUS-BOLT-DIRECT-R3-CLOSED-TABLE-500-2026-09-22`
 
 Package version: `3.3.2`
 
@@ -65,5 +65,7 @@ This is the complete application tree for Railway:
 
 Start: `npm start`  
 Gate: `npm test && npm run check`
+
+Homepage closed-trades table shows the latest 500 executable rows in the existing scroll box. Backend OPI1 already fetched 500; only the UI slice was still 30.
 
 Simulation-validated. Not LIVE-certified until a live cohort is scored after this deploy.
