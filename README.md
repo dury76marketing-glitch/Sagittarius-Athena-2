@@ -1,8 +1,10 @@
-# SAGITTARIUS — Bolt Direct R2
+# SAGITTARIUS — Bolt Direct R3 Excalibur 12
 
-Release: `SAGITTARIUS-BOLT-DIRECT-R2-2026-09-21`
+Release: `SAGITTARIUS-BOLT-DIRECT-R3-EXCALIBUR-12-2026-09-22`
 
 Package version: `3.3.2`
+
+Excalibur ON: one bolt + one enabled attack opens that attack once in every cosmos (12 seats). The source room fires; the other eleven rooms copy immediately. Same cosmos + same attack + same ticker stays locked.
 
 ## Current executable chain
 

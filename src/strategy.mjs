@@ -1612,7 +1612,15 @@ export class StrategyEngine {
   hunterConcurrencyLockKey(concept,ticker,settings=this.getSettings()) {
     const exact=String(ticker||'');
     if(!exact)return '';
-    return settings?.galacticExplosionEnabled===true ? `${exact}|attack:${String(concept||'')}` : exact;
+    const attack=String(concept||'');
+    const room=String(settings?.systemName||'');
+    const unison=settings?.excaliburEnabled===true||settings?.rozanHyakuRyuHaEnabled===true;
+    const galactic=settings?.galacticExplosionEnabled===true;
+    if(galactic===true||unison===true){
+      const scoped=`${exact}|attack:${attack}`;
+      return room?`${scoped}|cosmos:${room}`:scoped;
+    }
+    return exact;
   }
 
   async activeHunterTickerExposure(ticker) {
@@ -1850,25 +1858,26 @@ export class StrategyEngine {
     // Only Crystal Wall paper proofs stay exempt.
     const galacticSaintCapBypass=(megaWaveAuthorized===true&&s.galacticExplosionEnabled===true&&MEGA_WAVE.downstreamSaints.includes(String(concept||'')))
       ||(boltDirectAuthorized===true&&s.galacticExplosionEnabled===true&&BOLT_DIRECT.attacks.includes(String(concept||'')));
+    const excaliburFirstSeatBypass=boltDirectAuthorized===true&&s.excaliburEnabled===true&&s.rozanHyakuRyuHaEnabled!==true&&BOLT_DIRECT.attacks.includes(String(concept||''));
     const starlightCapBypass=starlightReentry===true&&concept===STARLIGHT_EXTINCTION.conceptName;
-    if (eventState.eventCapBlocked && crystalWallOverlay!==true && !galacticSaintCapBypass && !starlightCapBypass) {
+    if (eventState.eventCapBlocked && crystalWallOverlay!==true && !galacticSaintCapBypass && !excaliburFirstSeatBypass && !starlightCapBypass) {
       await this.audit('hunter_entry_trade_cap_blocked', { concept, ticker:q.ticker, eventTicker:event, activeEntries:eventState.activeEntries, maxEntriesPerTrade:eventState.maxEntriesPerTrade, stage, megaWaveAuthorized:megaWaveAuthorized===true });
       return {ok:false,reason:'event_entry_cap',...eventState};
     }
     const repeatUnitOwnsReentry=Number(s.maxRepeatsPerMarket||0)>0||Number(s.repeatCooldownMinutes||0)>0;
-    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && eventState.cooldownBlocked && !repeatUnitOwnsReentry) {
+    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && !excaliburFirstSeatBypass && eventState.cooldownBlocked && !repeatUnitOwnsReentry) {
       await this.audit('hunter_entry_cooldown_blocked', { concept, ticker:q.ticker, eventTicker:event, hunterCooldownMinutes:eventState.hunterCooldownMinutes, cooldownScope:eventState.cooldownScope, latestHunterEntryMs:eventState.latestHunterEntryMs, attackLatestEntryMs:eventState.attackLatestEntryMs, stage, megaWaveAuthorized:megaWaveAuthorized===true });
       return {ok:false,reason:'hunter_cooldown',...eventState};
     }
-    if (crystalWallOverlay!==true && !starlightCapBypass && eventState.repeatCapBlocked) {
+    if (crystalWallOverlay!==true && !starlightCapBypass && !excaliburFirstSeatBypass && eventState.repeatCapBlocked) {
       await this.audit('hunter_entry_repeat_cap_blocked', { concept, ticker:q.ticker, eventTicker:event, executableRepeatEntries:eventState.executableRepeatEntries, maxRepeatsPerMarket:eventState.maxRepeatsPerMarket, stage });
       return {ok:false,reason:'event_repeat_cap',...eventState};
     }
-    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && eventState.repeatCooldownBlocked) {
+    if (includeCooldown && crystalWallOverlay!==true && !starlightCapBypass && !excaliburFirstSeatBypass && eventState.repeatCooldownBlocked) {
       await this.audit('hunter_entry_repeat_cooldown_blocked', { concept, ticker:q.ticker, eventTicker:event, repeatCooldownMinutes:eventState.repeatCooldownMinutes, latestExecutableCloseMs:eventState.latestExecutableCloseMs, stage });
       return {ok:false,reason:'repeat_cooldown',...eventState};
     }
-    return {ok:true,reason:'qualified',...eventState,cooldownApplied:includeCooldown&&crystalWallOverlay!==true&&starlightCapBypass!==true,eventCapBypassed:(crystalWallOverlay===true||galacticSaintCapBypass===true||starlightCapBypass===true)&&eventState.eventCapBlocked,crystalWallOverlay:crystalWallOverlay===true,megaWaveAuthorized:megaWaveAuthorized===true,galacticSaintCapBypass:galacticSaintCapBypass===true,starlightReentry:starlightCapBypass===true};
+    return {ok:true,reason:'qualified',...eventState,cooldownApplied:includeCooldown&&crystalWallOverlay!==true&&starlightCapBypass!==true&&excaliburFirstSeatBypass!==true,eventCapBypassed:(crystalWallOverlay===true||galacticSaintCapBypass===true||excaliburFirstSeatBypass===true||starlightCapBypass===true)&&eventState.eventCapBlocked,crystalWallOverlay:crystalWallOverlay===true,megaWaveAuthorized:megaWaveAuthorized===true,galacticSaintCapBypass:galacticSaintCapBypass===true,excaliburFirstSeatBypass:excaliburFirstSeatBypass===true,starlightReentry:starlightCapBypass===true};
   }
 
   async hunterEntryPolicy(concept, q, { requireClock = true } = {}) {

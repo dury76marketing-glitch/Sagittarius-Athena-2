@@ -57,7 +57,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-BOLT-DIRECT-R2-2026-09-21');
+  assert.equal(RELEASE,'SAGITTARIUS-BOLT-DIRECT-R3-EXCALIBUR-12-2026-09-22');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -1057,11 +1057,14 @@ test('Bolt Direct card keeps own crash/rebound/ticks and rejects a missing crash
 });
 
 test('Bolt Direct lock is ticker-only when Galactic is OFF and ticker+attack when ON',()=>{
-  const off=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false}),getLiveReady:()=>false,random:()=>0});
-  const on=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:true}),getLiveReady:()=>false,random:()=>0});
+  const off=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false,excaliburEnabled:false,systemName:'ARIES'}),getLiveReady:()=>false,random:()=>0});
+  const on=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:true,excaliburEnabled:false,systemName:'ARIES'}),getLiveReady:()=>false,random:()=>0});
+  const blade=new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false,excaliburEnabled:true,systemName:'ARIES'}),getLiveReady:()=>false,random:()=>0});
   assert.equal(off.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),'KX-T');
-  assert.equal(on.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),'KX-T|attack:Scarlet Needle');
+  assert.equal(on.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),'KX-T|attack:Scarlet Needle|cosmos:ARIES');
   assert.notEqual(on.hunterConcurrencyLockKey('Scarlet Needle','KX-T'),on.hunterConcurrencyLockKey('Wave Surfer','KX-T'));
+  assert.equal(blade.hunterConcurrencyLockKey('Athena Exclamation','KX-T'),'KX-T|attack:Athena Exclamation|cosmos:ARIES');
+  assert.notEqual(blade.hunterConcurrencyLockKey('Athena Exclamation','KX-T'),new StrategyEngine({db:memoryDb(),kalshi:{},market:{},learning:{},getSettings:()=>settings({galacticExplosionEnabled:false,excaliburEnabled:true,systemName:'TAURUS'}),getLiveReady:()=>false,random:()=>0}).hunterConcurrencyLockKey('Athena Exclamation','KX-T'));
 });
 
 test('Crystal Wall profit no longer grants Athena and Athena open no longer grants Saints',async()=>{
@@ -1411,4 +1414,34 @@ test('Galactic OFF keeps one ticker one hunter after the first Bolt Direct seat'
   const join=await occupied.hunterEntryPolicyDecision('Scarlet Needle',q('GE-OFF',50,51),{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
   assert.equal(join.ok,false);
   assert.equal(join.reason,'ticker_lock');
+});
+
+test('Excalibur first seat is not clipped by event cap or repeat cap',async()=>{
+  const now=Date.now();
+  const crowded=Array.from({length:7},(_,i)=>({id:`ae-${i}`,systemName:'TAURUS',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'EX-CAP',eventTicker:'EX-CAP',mode:'SIMULATION',status:'closed',openedAtMs:now-8_000,closedAtMs:now-4_000,entryPriceCents:50,remainingCount:0}));
+  const s=overnightAthenaOnly({galacticExplosionEnabled:false,excaliburEnabled:true,maxEntriesPerTrade:1,maxRepeatsPerMarket:1,systemName:'TAURUS'});
+  const st=new StrategyEngine({db:memoryDb(crowded),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const blocked=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EX-CAP',50,51),{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:false});
+  assert.equal(blocked.ok,false);
+  const firstSeat=await st.hunterEntryPolicyDecision('Athena Exclamation',q('EX-CAP',50,51),{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+  assert.equal(firstSeat.ok,true,firstSeat.reason);
+  assert.equal(firstSeat.excaliburFirstSeatBypass,true);
+});
+
+test('Excalibur source claim plus fan-out yields one seat per cosmos',async()=>{
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:false,athenaExclamationStakeCents:100,systemName:'ARIES'};
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.db={loadCosmosSettings:async(id,host)=>({...host,systemName:id,athenaExclamationStakeCents:100}),audit:async()=>{}};
+  engine.strategy={createHunter:async(concept,q,stake)=>({id:`${engine.settings.systemName}-${concept}`,systemName:engine.settings.systemName,conceptName:concept,ticker:q.ticker,status:'open',stakeCents:stake})};
+  engine.rememberCosmosBookEntry=(row)=>{engine.cosmosBooks[row.systemName]=[...(engine.cosmosBooks[row.systemName]||[]),row];};
+  const source={id:'src-ae',systemName:'ARIES',conceptName:'Athena Exclamation',ticker:'EX-12',entryConfig:{athenaFire:{version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,selectedAttack:'Athena Exclamation',ticker:'EX-12',stakeCents:100,commandHash:'x'}}};
+  engine.cosmosBooks.ARIES=[source];
+  const quote={ticker:'EX-12',eventTicker:'EX-12',yesBid:50,yesAsk:51,status:'active'};
+  const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,quote);
+  assert.equal(copied.length,11,`copied ${copied.length}`);
+  assert.equal(engine.excaliburSourceClaimed('EX-12','Athena Exclamation'),true);
+  assert.equal(engine.fleetHoldsExactTickerAttack('EX-12','Athena Exclamation'),true);
+  assert.equal(new Set(['ARIES',...copied.map((row)=>row.systemName)]).size,12);
+  assert.equal(SagittariusEngine.prototype.claimExcaliburSource.call(engine,'EX-12','Athena Exclamation','TAURUS'),false);
 });

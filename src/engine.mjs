@@ -2756,9 +2756,19 @@ export class SagittariusEngine {
           continue;
         }
         this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'EXECUTION_ELIGIBLE',status:'PASS',reason:'bolt_direct_card_ready',concept});
+        if(s.excaliburEnabled===true&&s.rozanHyakuRyuHaEnabled!==true){
+          if(this.excaliburSourceClaimed(q.ticker,concept) || this.fleetHoldsExactTickerAttack(q.ticker,concept)){
+            const copies=await this.observeExcaliburQuote(q,null);
+            if(copies.length){created.push(...copies);openedAny=true;}
+            this.recordEntryCandidateStage({candidateId,boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'EXCALIBUR_FOLLOW',status:'PASS',reason:'source_already_claimed',concept,copied:copies.length});
+            if(!galacticOn)break;
+            continue;
+          }
+        }
         const e=await this.strategy.executeBoltDirectFire(q,bolt,concept,commandContext);
         if(e){
           created.push(e);openedAny=true;
+          if(s.excaliburEnabled===true) this.claimExcaliburSource(q.ticker,concept,e.systemName||s.systemName);
           const unison=await this.fanOutExcalibur(e,q);
           if(unison.length) created.push(...unison);
           if(!galacticOn)break;
@@ -3425,7 +3435,33 @@ export class SagittariusEngine {
   excaliburRuntime() {
     if(!(this.excaliburGrants instanceof Map)) this.excaliburGrants=new Map();
     if(!(this.excaliburInFlight instanceof Set)) this.excaliburInFlight=new Set();
+    if(!(this.excaliburSourceClaims instanceof Map)) this.excaliburSourceClaims=new Map();
+    if(!(this.excaliburFanoutLocks instanceof Map)) this.excaliburFanoutLocks=new Map();
     return this.excaliburGrants;
+  }
+
+  excaliburGrantKey(ticker, concept) {
+    return `${String(ticker||'')}|attack:${String(concept||'')}`;
+  }
+
+  excaliburSourceClaimed(ticker, concept) {
+    this.excaliburRuntime();
+    return this.excaliburSourceClaims.has(this.excaliburGrantKey(ticker,concept));
+  }
+
+  claimExcaliburSource(ticker, concept, cosmosId) {
+    this.excaliburRuntime();
+    const key=this.excaliburGrantKey(ticker,concept);
+    if(this.excaliburSourceClaims.has(key)) return false;
+    this.excaliburSourceClaims.set(key, String(cosmosId||''));
+    return true;
+  }
+
+  fleetHoldsExactTickerAttack(ticker, concept) {
+    const exact=String(ticker||'');
+    const name=String(concept||'');
+    if(!exact||!name) return false;
+    return COSMOS_IDS.some((id)=>this.cosmosHoldsExactTicker(id,exact,name));
   }
 
   seedExcaliburGeometry(ticker, q={}) {
@@ -3465,8 +3501,9 @@ export class SagittariusEngine {
       return [];
     }
     const grants=this.excaliburRuntime();
+    this.claimExcaliburSource(ticker,concept,sourceRoom);
     const geometry=this.seedExcaliburGeometry(ticker,q);
-    const grantKey=`${ticker}|attack:${concept}`;
+    const grantKey=this.excaliburGrantKey(ticker,concept);
     const prior=grants.get(grantKey);
     const grant={
       ticker,
@@ -3503,12 +3540,20 @@ export class SagittariusEngine {
     const grants=this.excaliburRuntime();
     const matching=[...grants.values()].filter((row)=>String(row?.ticker||'')===ticker);
     if(!matching.length) return [];
-    const openedAll=[];
-    for(const grant of matching){
-      const opened=await this.observeExcaliburGrant(q, grant, crashState);
-      if(opened.length) openedAll.push(...opened);
-    }
-    return openedAll;
+    const lockKey=`fanout:${ticker}`;
+    const prior=this.excaliburFanoutLocks.get(lockKey);
+    if(prior) return prior;
+    const work=(async()=>{
+      const openedAll=[];
+      for(const grant of matching){
+        const opened=await this.observeExcaliburGrant(q, grant, crashState);
+        if(opened.length) openedAll.push(...opened);
+      }
+      return openedAll;
+    })();
+    this.excaliburFanoutLocks.set(lockKey, work);
+    try { return await work; }
+    finally { if(this.excaliburFanoutLocks.get(lockKey)===work) this.excaliburFanoutLocks.delete(lockKey); }
   }
 
   async observeExcaliburGrant(q, grant, crashState=null) {
@@ -3932,6 +3977,9 @@ export class SagittariusEngine {
         this.crystalWallShadowRuntime?.clear?.();
         this.activeCosmosByTicker?.clear?.();
         this.excaliburGrants?.clear?.();
+        this.excaliburSourceClaims?.clear?.();
+        this.excaliburInFlight?.clear?.();
+        this.excaliburFanoutLocks?.clear?.();
         this.cosmosBooks = emptyCosmosBooks();
         const resetAt=Date.now();
         this.settings = { ...this.settings, resetTimestampMs: resetAt };
