@@ -3609,7 +3609,9 @@ export class SagittariusEngine {
           core.stakeCents=stake;
           core.selectedAttack=concept;
           core.authorizationId=`EXCALIBUR:${grant.sourceEntryId||'fire'}:${id}:${concept}`;
-          core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Date.now()+10_000);
+          core.excaliburReplica=true;
+          core.authorizedMaxEntryCents=100;
+          core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Date.now()+60_000);
           core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,copiedConcept:concept,wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
           const command=sealAthenaFireCommand(core);
           return this.strategy.createHunter(concept, q, stake, 0, {

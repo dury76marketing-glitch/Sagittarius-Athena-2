@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-BOLT-DIRECT-R3-EXCALIBUR-12-2026-09-22';
+export const RELEASE = 'SAGITTARIUS-BOLT-DIRECT-R4-EXCALIBUR-ALL-ATTACKS-12-2026-09-22';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),

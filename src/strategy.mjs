@@ -413,6 +413,14 @@ export function boltDirectAttackCard(concept,q,settings,crashState=null){
   return{ok:true,reason:'bolt_direct_card_qualified',crashCents:crash,reboundCents:rebound,upwardTicks:ticks,minCrashCents:needCrash,minReboundCents:needRebound,minUpwardTicks:needTicks,bid:band.bid,ask:band.ask};
 }
 
+export function isExcaliburReplicaCommand(command){
+  if(!command||typeof command!=='object')return false;
+  if(command.excaliburReplica===true)return true;
+  if(String(command.authorizationId||'').startsWith('EXCALIBUR:'))return true;
+  const evidence=command.decisionEvidence;
+  return Boolean(evidence&&typeof evidence==='object'&&evidence.excalibur&&typeof evidence.excalibur==='object');
+}
+
 export function validateBoltDirectFireCommand(command,{concept,q,settings,now=Date.now()}={}){
   if(!command||typeof command!=='object')return{ok:false,reason:'bolt_direct_fire_required'};
   if(!verifyAthenaFireCommandHash(command))return{ok:false,reason:'bolt_direct_fire_hash_invalid'};
@@ -432,9 +440,11 @@ export function validateBoltDirectFireCommand(command,{concept,q,settings,now=Da
   if(!(configuredStake>0)||Math.abs(commandedStake-configuredStake)>1e-9)return{ok:false,reason:'bolt_direct_stake_mismatch',expectedStakeCents:configuredStake};
   const ask=Number(q?.yesAsk||0),bid=Number(q?.yesBid||0);
   if(!(ask>0)||!(bid>0)||bid>ask)return{ok:false,reason:'invalid_quote'};
-  if(ask<envelope.minEntryCents||ask>envelope.maxEntryCents)return{ok:false,reason:'entry_band'};
+  const replica=isExcaliburReplicaCommand(command);
+  if(!replica && (ask<envelope.minEntryCents||ask>envelope.maxEntryCents))return{ok:false,reason:'entry_band'};
   const sharedSpread=Number(settings?.maxSpreadCents??3);if(ask-bid>sharedSpread)return{ok:false,reason:'shared_spread_safety'};
-  return{ok:true,reason:'bolt_direct_fire_valid',envelope,stakeCents:commandedStake,authorizedMaxEntryCents:Number(envelope.maxEntryCents)};
+  const authorizedMax=replica?100:Number(envelope.maxEntryCents);
+  return{ok:true,reason:replica?'bolt_direct_excalibur_replica_valid':'bolt_direct_fire_valid',envelope,stakeCents:commandedStake,authorizedMaxEntryCents:authorizedMax,excaliburReplica:replica===true};
 }
 
 // R17/GCA1 shared safety gate. A timestamp alone is never authoritative: every
@@ -2256,11 +2266,14 @@ export class StrategyEngine {
         if(boltDirectEntry){
           const bdFire=validateBoltDirectFireCommand(athenaFireCommand,{concept,q:executionQuote,settings:s,now:Date.now()});
           if(!bdFire.ok){trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED',bdFire.reason,bdFire);await this.audit('bolt_direct_fresh_execution_blocked',{concept,ticker:q.ticker,eventTicker:expectedEventTicker,boltId:athenaFireCommand?.boltId||null,reason:bdFire.reason});return null;}
-          const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);if(!boundary.ok){trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED',boundary.reason,boundary);return null;}
-          const authorizedMax=Number(athenaFireCommand.authorizedMaxEntryCents||bdFire.authorizedMaxEntryCents||0);
-          if(Number(plan.bestAskCents||executionQuote.yesAsk)>authorizedMax+1e-9||Number(plan.averagePriceCents||0)>authorizedMax+1e-9){
-            trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED','bolt_direct_strike_price_exceeded',{authorizedMaxEntryCents:authorizedMax});
-            return null;
+          const replica=isExcaliburReplicaCommand(athenaFireCommand);
+          if(!replica){
+            const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);if(!boundary.ok){trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED',boundary.reason,boundary);return null;}
+            const authorizedMax=Number(athenaFireCommand.authorizedMaxEntryCents||bdFire.authorizedMaxEntryCents||0);
+            if(Number(plan.bestAskCents||executionQuote.yesAsk)>authorizedMax+1e-9||Number(plan.averagePriceCents||0)>authorizedMax+1e-9){
+              trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED','bolt_direct_strike_price_exceeded',{authorizedMaxEntryCents:authorizedMax});
+              return null;
+            }
           }
           trace('BOLT_DIRECT_EXECUTION_ENVELOPE','PASS','bolt_and_attack_card_still_executable',{boltId:athenaFireCommand.boltId,selectedAttack:concept});
         }else if(megaWaveSaintEntry){
@@ -2362,7 +2375,8 @@ export class StrategyEngine {
       // never be decided concurrently from the same stale ledger
       // view. Serialize only this final commit window; the earlier structural
       // qualification/exposure lock remains concept-scoped when GE is ON.
-      localEntryCommitKey = `commit:${exactTicker}`;
+      const commitScope=this.hunterConcurrencyLockKey(concept, exactTicker, s)||exactTicker;
+      localEntryCommitKey = `commit:${commitScope}`;
       if (this.hunterEntryCommitLocks.has(localEntryCommitKey)) {
         trace('ENTRY_COMMIT_LOCK','BLOCKED','local_entry_commit_lock_busy');
         await this.audit('hunter_entry_commit_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker});
@@ -2405,7 +2419,7 @@ export class StrategyEngine {
       // Wall's overlay exemption applies only to the parent/other Attack; a
       // second Crystal Wall on the same ticker remains blocked.
       const finalSpecialistStage=crystalWallIndependentEntry?'crystal_wall_commit':justiceArrowIndependentEntry?'justice_arrow_commit':newGenerationEntry?'post_fire_commit':'legacy_commit';
-      const finalEntryPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:finalSpecialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry,starlightReentry});
+      const finalEntryPolicy=await this.hunterEntryPolicyDecision(concept,q,{requireClock:false,includeCooldown:true,stage:finalSpecialistStage,crystalWallOverlay:independentCrashRecoveryEntry,megaWaveAuthorized:megaWaveAthenaEntry||megaWaveSaintEntry,starlightReentry,boltDirectAuthorized:boltDirectEntry});
       if(!finalEntryPolicy.ok){trace('FINAL_ENTRY_POLICY','BLOCKED',finalEntryPolicy.reason,finalEntryPolicy);return null;}
       trace('FINAL_ENTRY_POLICY','PASS',finalEntryPolicy.reason,finalEntryPolicy);
 
