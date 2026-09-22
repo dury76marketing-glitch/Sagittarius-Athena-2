@@ -5,6 +5,7 @@ import { RELEASE, originalSettings, freshInstallSettings, CANONICAL_NUMERIC_SETT
 import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, EXECUTABLE_HUNTER_CONCEPTS, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
+import { atomicThunderBoltFeatures, atomicThunderBoltDecision } from '../src/opportunity.mjs';
 import { COSMOS_IDS } from '../src/constellation.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
@@ -1300,4 +1301,114 @@ test('Excalibur copies the opened attack onto free cosmosses',async()=>{
   assert.ok(copied.every((row)=>row.conceptName==='Scarlet Needle'));
   assert.equal(copied.some((row)=>row.systemName==='ARIES'),false);
   assert.equal(new Set(copied.map((row)=>row.systemName)).size,copied.length);
+});
+
+function overnightAthenaOnly(overrides={}){
+  return settings({
+    athenaExclamationEnabled:true,
+    scarletNeedleEnabled:false,
+    justiceArrowEnabled:false,
+    momentumHunterEnabled:false,
+    waveSurferEnabled:false,
+    crashRecoveryHunterEnabled:false,
+    lightningPlasmaEnabled:false,
+    recoveryHunterEnabled:false,
+    galacticExplosionEnabled:false,
+    excaliburEnabled:true,
+    athenaExclamationFollowUpAttacks:0,
+    athenaExclamationMinCrashCents:0,
+    athenaExclamationMinReboundCents:0,
+    athenaExclamationMinUpwardTicks:0,
+    athenaExclamationMinEntryCents:35,
+    athenaExclamationMaxEntryCents:92,
+    infinityBreakMinNetPerOriginalContractCents:4,
+    atomicThunderGreenTriggerCents:1,
+    ...overrides,
+  });
+}
+
+test('Athena-only Bolt Direct does not wait for three Saints',()=>{
+  const s=overnightAthenaOnly();
+  const quote=q('ATP-LIVE',50,51);
+  const shadow={id:'peg-1',conceptName:'Pegasus',ticker:'ATP-LIVE',status:'open',entryPriceCents:49,active:true,openedAtMs:Date.now()-8_000};
+  const features=atomicThunderBoltFeatures({q:quote,history:[{t:Date.now()-1000,ask:51,bid:50}],settings:s,cosmos:[shadow],fieldContext:{},now:Date.now()});
+  assert.deepEqual(features.eligibleAttacks.map((x)=>x.concept),['Athena Exclamation']);
+  const decision=atomicThunderBoltDecision(features,s);
+  assert.equal(decision.detected,true,decision.reason);
+  assert.equal(decision.reason,'cosmo_green');
+});
+
+test('each Bolt Direct attack alone is an eligible band',()=>{
+  for(const concept of BOLT_DIRECT.attacks){
+    const off={
+      athenaExclamationEnabled:false,scarletNeedleEnabled:false,justiceArrowEnabled:false,
+      momentumHunterEnabled:false,waveSurferEnabled:false,lightningPlasmaEnabled:false,recoveryHunterEnabled:false,
+    };
+    const flag={
+      'Athena Exclamation':'athenaExclamationEnabled','Scarlet Needle':'scarletNeedleEnabled',
+      'Sagittarius Justice Arrow':'justiceArrowEnabled','Momentum Hunter':'momentumHunterEnabled',
+      'Wave Surfer':'waveSurferEnabled','Lightning Plasma':'lightningPlasmaEnabled','Recovery Hunter':'recoveryHunterEnabled',
+    }[concept];
+    const s=settings({...off,[flag]:true,athenaExclamationMinCrashCents:0,galacticExplosionEnabled:false});
+    const features=atomicThunderBoltFeatures({q:q('SOLO',50,51),history:[],settings:s,cosmos:[{id:'s1',conceptName:'Dragon',ticker:'SOLO',status:'open',entryPriceCents:48,openedAtMs:1}],now:Date.now()});
+    assert.deepEqual(features.eligibleAttacks.map((x)=>x.concept),[concept],concept);
+    assert.equal(atomicThunderBoltDecision(features,s).detected,true,concept);
+  }
+});
+
+test('Athena-only SIM opens on the bolt and stamps Infinity then Aurora close authority',async()=>{
+  const s=overnightAthenaOnly({mode:'SIMULATION'});
+  const db=memoryDb([]);
+  const quote=q('SIM-A2Z',48,49);
+  const st=new StrategyEngine({db,kalshi:{},market:{
+    async refreshTicker(){return quote;},
+    getHistory(){return [];},
+    executableAsk(){return {filled:2,avgCents:quote.yesAsk,bestCents:quote.yesAsk};},
+    executableBid(){return {filled:2,avgCents:quote.yesBid,bestCents:quote.yesBid};},
+  },learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const opened=await st.executeBoltDirectFire(quote,{id:'ATG-A2Z',ticker:quote.ticker,eventTicker:quote.eventTicker,fingerprint:'fp',greenTrigger:{shadowTradeId:'sh',moveCents:2}},'Athena Exclamation',{});
+  assert.ok(opened,st.lastAthenaFireAbort||'athena did not open');
+  assert.equal(opened.conceptName,'Athena Exclamation');
+  assert.equal(opened.mode,'SIMULATION');
+  assert.equal(opened.status,'open');
+  const target=attackInfinityNetTargetCents(s,'Athena Exclamation');
+  assert.ok(Number(target)>0,String(target));
+  const snap=attackProfitAuthoritySnapshot(s,'Athena Exclamation');
+  assert.ok(snap);
+});
+
+test('LIVE path refuses a bolt fire when liveReady is false and allows it when liveReady is true',async()=>{
+  const quote=q('LIVE-A2Z',48,49);
+  const market={async refreshTicker(){return quote;},getHistory(){return [];},executableAsk(){return {filled:2,avgCents:quote.yesAsk,bestCents:quote.yesAsk};},executableBid(){return {filled:2,avgCents:quote.yesBid,bestCents:quote.yesBid};}};
+  const kalshi={buildClientOrderId:()=>'cid-live',async createOrder(){return {order:{order_id:'oid-live',status:'executed',count:2,yes_price:quote.yesAsk}};},async getOrder(){return {order:{order_id:'oid-live',status:'executed',count:2,yes_price:quote.yesAsk}};}};
+  const liveOff=overnightAthenaOnly({mode:'LIVE',liveArmed:true});
+  const blocked=new StrategyEngine({db:memoryDb([]),kalshi,market,learning:{},getSettings:()=>liveOff,getLiveReady:()=>false,random:()=>0});
+  const denied=await blocked.executeBoltDirectFire(quote,{id:'ATG-LIVE-OFF',ticker:quote.ticker,eventTicker:quote.eventTicker,fingerprint:'fp',greenTrigger:{moveCents:1}},'Athena Exclamation',{});
+  assert.equal(denied,null);
+  const liveOn=overnightAthenaOnly({mode:'LIVE',liveArmed:true});
+  const allowed=new StrategyEngine({db:memoryDb([]),kalshi,market,learning:{},getSettings:()=>liveOn,getLiveReady:()=>true,random:()=>0});
+  const row=await allowed.executeBoltDirectFire(quote,{id:'ATG-LIVE-ON',ticker:quote.ticker,eventTicker:quote.eventTicker,fingerprint:'fp',greenTrigger:{moveCents:1}},'Athena Exclamation',{});
+  assert.ok(row,allowed.lastAthenaFireAbort||'live ready should open');
+  assert.equal(row.mode,'LIVE');
+});
+
+test('Excalibur OFF does not copy the opened attack onto other cosmosses',async()=>{
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings={excaliburEnabled:false,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:false,athenaExclamationStakeCents:100,systemName:'ARIES'};
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.db={loadCosmosSettings:async(id,host)=>({...host,systemName:id}),audit:async()=>{}};
+  engine.strategy={createHunter:async()=>{throw new Error('excalibur off must not create copies');}};
+  engine.rememberCosmosBookEntry=()=>{};
+  const source={id:'src-ae',systemName:'ARIES',conceptName:'Athena Exclamation',ticker:'EX-OFF',entryConfig:{athenaFire:{version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,selectedAttack:'Athena Exclamation',ticker:'EX-OFF',stakeCents:100,commandHash:'x'}}};
+  const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,{ticker:'EX-OFF',eventTicker:'EX-OFF',yesBid:50,yesAsk:51,status:'active'});
+  assert.deepEqual(copied,[]);
+});
+
+test('Galactic OFF keeps one ticker one hunter after the first Bolt Direct seat',async()=>{
+  const s=overnightAthenaOnly({galacticExplosionEnabled:false,scarletNeedleEnabled:true,athenaExclamationMinCrashCents:0,scarletNeedleMinCrashCents:0,scarletNeedleMinReboundCents:0,scarletNeedleMinUpwardTicks:0});
+  const now=Date.now();
+  const occupied=new StrategyEngine({db:memoryDb([{id:'ae-open',systemName:'SAGITTARIUS',ownerId:'mw-test',conceptName:'Athena Exclamation',ticker:'GE-OFF',eventTicker:'GE-OFF',mode:'SIMULATION',status:'open',openedAtMs:now-1_000,entryPriceCents:50,remainingCount:1}]),kalshi:{},market:{},learning:{},getSettings:()=>s,getLiveReady:()=>false,random:()=>0});
+  const join=await occupied.hunterEntryPolicyDecision('Scarlet Needle',q('GE-OFF',50,51),{requireClock:false,includeCooldown:true,stage:'sim',boltDirectAuthorized:true});
+  assert.equal(join.ok,false);
+  assert.equal(join.reason,'ticker_lock');
 });

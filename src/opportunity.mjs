@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, INFINITY_BREAK, ATHENA_EXCLAMATION, EXECUTION_ATTACK_DISPLAY, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
+import { ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, INFINITY_BREAK, EXECUTION_ATTACK_DISPLAY, BOLT_DIRECT, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
 
 const finite=(v,d=null)=>Number.isFinite(Number(v))?Number(v):d;
 const clamp=(v,lo=0,hi=100)=>Math.max(lo,Math.min(hi,Number(v)||0));
@@ -145,21 +145,21 @@ function economicTargetForAttack({askCents=0,stakeCents=0,settings={}}={}){
   const requiredTargetBidCents=Math.ceil(targetBid-1e-9),requiredGrossMoveCents=requiredTargetBidCents-ask;
   return{targetNetPerOriginalContractCents:target,count,estimatedEntryFeePerContractCents:Number(entryFeePerContract.toFixed(6)),estimatedExitFeePerContractCents:Number(exitFeePerContract.toFixed(6)),requiredTargetBidCents,requiredGrossMoveCents,targetFeasible:requiredTargetBidCents<=99,targetHeadroomCents:Math.max(0,99-ask)};
 }
+const BOLT_DIRECT_BAND_KEYS=Object.freeze({
+  'Momentum Hunter':['momentumHunterEnabled','momentumMinEntryCents','momentumMaxEntryCents','momentumStakeCents'],
+  'Wave Surfer':['waveSurferEnabled','waveMinEntryCents','waveMaxEntryCents','waveStakeCents'],
+  'Athena Exclamation':['athenaExclamationEnabled','athenaExclamationMinEntryCents','athenaExclamationMaxEntryCents','athenaExclamationStakeCents'],
+  'Scarlet Needle':['scarletNeedleEnabled','scarletNeedleMinEntryCents','scarletNeedleMaxEntryCents','scarletNeedleStakeCents'],
+  'Sagittarius Justice Arrow':['justiceArrowEnabled','justiceArrowMinEntryCents','justiceArrowMaxEntryCents','justiceArrowStakeCents'],
+  'Lightning Plasma':['lightningPlasmaEnabled','lightningPlasmaMinEntryCents','lightningPlasmaMaxEntryCents','lightningPlasmaFieldStakeCents'],
+  'Recovery Hunter':['recoveryHunterEnabled','recoveryMinEntryCents','recoveryMaxEntryCents','recoveryStakeCents'],
+});
+
 function enabledAttackBands(settings={},askCents=0,{recoveryContext=null,fieldContext=null}={}){
-  const rows=[
-    ['Momentum Hunter','momentumHunterEnabled','momentumMinEntryCents','momentumMaxEntryCents','momentumStakeCents'],
-    ['Wave Surfer','waveSurferEnabled','waveMinEntryCents','waveMaxEntryCents','waveStakeCents'],
-    ['Crash Recovery Hunter','crashRecoveryHunterEnabled','crashRecoveryMinEntryCents','crashRecoveryMaxEntryCents','crashRecoveryStakeCents'],
-    ['Athena Exclamation','athenaExclamationEnabled','athenaExclamationMinEntryCents','athenaExclamationMaxEntryCents','athenaExclamationStakeCents'],
-  ];
+  const rows=(BOLT_DIRECT.attacks||[]).map((concept)=>[concept,...(BOLT_DIRECT_BAND_KEYS[concept]||[])]).filter((row)=>row.length===5);
   return rows.filter(([concept,flag])=>{
     if(settings?.[flag]!==true)return false;
-    // Lightning Plasma is Gemini follow-on only (LP2). Cosmo GREEN must never
-    // rank it. Athena Exclamation still needs the frozen three-Saint context.
-    if(concept==='Athena Exclamation'){
-      const candidate=fieldContext?.athenaExclamationCandidate||null;
-      if(!candidate||finite(candidate?.saintCount,0)<ATHENA_EXCLAMATION.minimumSaints)return false;
-    }
+    if(!BOLT_DIRECT.attacks.includes(concept))return false;
     return true;
   }).map(([concept,flag,min,max,stake])=>{
     const minEntryCents=finite(settings[min],0),maxEntryCents=finite(settings[max],100),stakeCents=finite(settings[stake],0);
@@ -324,7 +324,10 @@ export class AtomicThunderBoltEngine{
     if(!ticker)return null;
     const active=this.activeByTicker.get(ticker);
     if(active&&now<=Number(active.expiresAtMs||0)){active.features=features;active.score=d.score??active.score;active.updatedAtMs=now;return active;}
-    if(!d.detected)return null;
+    if(!d.detected){
+      this.candidateStage({candidateId:`ATB-MISS:${ticker}`,ticker,eventTicker:String(features?.eventTicker||q?.eventTicker||ticker),stage:'BOLT',status:'BLOCKED',reason:d.reason||'bolt_not_detected',eligibleAttackCount:Array.isArray(features?.eligibleAttacks)?features.eligibleAttacks.length:0,greenSourceCount:Number(features?.greenSourceCount||0)});
+      return null;
+    }
     const candidates=(features.greenSources||[]).filter(x=>!x.priorBoltId&&!this.boltedShadowIds.has(String(x.shadowTradeId||''))).sort((a,b)=>finite(b.moveCents,0)-finite(a.moveCents,0)||finite(a.openedAtMs,0)-finite(b.openedAtMs,0));
     const trigger=candidates[0]||null;
     if(!trigger)return null;
