@@ -1446,3 +1446,49 @@ test('Excalibur source claim plus fan-out yields one seat per cosmos',async()=>{
   assert.equal(new Set(['ARIES',...copied.map((row)=>row.systemName)]).size,12);
   assert.equal(SagittariusEngine.prototype.claimExcaliburSource.call(engine,'EX-12','Athena Exclamation','TAURUS'),false);
 });
+
+test('homepage and trading log exclude feeder zeros from win rate and closed book',async()=>{
+  const e=Object.create(SagittariusEngine.prototype);
+  e.settings={systemName:'ARIES',ownerId:'sagittarius-main',mode:'SIMULATION',resetTimestampMs:0,startingCapitalCents:100000,simFeeCents:2};
+  e.quoteView=()=>({priceCents:50});e.openUnrealized=()=>0;e.portfolioValueCentsForMode=(v)=>v;
+  e.strategy={async simulationAvailableCashCents(){return 100000;}};
+  e.decorateEntry=(row)=>row;
+  e.db={
+    async performanceAggregate(){throw new Error('host-only aggregate must not score');},
+    async openEntries(){throw new Error('host-only open reader must not score');},
+    async recentClosedHunters(){throw new Error('host-only closed reader must not score');},
+    async conceptStatsAggregate(){return[];},
+    async performanceAggregateFleet(){return{closed_hunters:84,open_hunters:12,wins:49,losses:0,scratches:35,closed_realized_cents:229,partial_realized_cents:0,day_realized_cents:229,week_realized_cents:229,month_realized_cents:229,year_realized_cents:229,simulation_ledger_pnl_cents:229};},
+    async dashboardOpenEntriesFleet(){return[{conceptName:'Athena Exclamation',status:'open',pnlCents:0,mode:'SIMULATION',count:1,remainingCount:1,entryPriceCents:75,entryFeeCents:2,updatedAtMs:2}];},
+    async dashboardRecentClosedHuntersFleet(){return[
+      {conceptName:'Athena Exclamation',status:'closed',pnlCents:4,closedAtMs:2,ticker:'WIN'},
+      {conceptName:'Phoenix',status:'closed',pnlCents:0,closedAtMs:2,ticker:'FEED',closeReason:'phoenix_signal_expired'},
+    ];},
+    async conceptStatsAggregateFleet(){return{portfolio:[],signals:[],linked:[]};},
+    async tradingLogRowsFleet(){return[
+      {conceptName:'Athena Exclamation',status:'closed',archived:false,pnlCents:4,ticker:'WIN',openedAtMs:1,closedAtMs:2,mode:'SIMULATION'},
+      {conceptName:'Phoenix',status:'closed',archived:false,pnlCents:0,ticker:'FEED',openedAtMs:1,closedAtMs:2,mode:'SIMULATION',closeReason:'phoenix_signal_expired'},
+      {conceptName:'Dragon',status:'closed',archived:false,pnlCents:0,ticker:'FEED2',openedAtMs:1,closedAtMs:2,mode:'SIMULATION'},
+    ];},
+  };
+  const dash=await e.performance({dashboard:true});
+  assert.equal(dash.closed.some((row)=>row.conceptName==='Phoenix'),false);
+  assert.equal(dash.winRate,1);
+  const hist=await e.performance({fullHistory:true});
+  assert.equal(hist.hunters.every((row)=>row.conceptName==='Athena Exclamation'),true);
+  assert.equal(hist.wins,1);
+  assert.equal(hist.scratches,0);
+  assert.equal(hist.winRate,1);
+  const log=await e.tradingLogText();
+  assert.equal(log.includes('Phoenix'),false);
+  assert.equal(log.includes('Dragon'),false);
+  assert.equal(log.includes('WIN'),true);
+  assert.equal(log.includes('feeders excluded'),true);
+});
+
+test('homepage closed table source drops feeder concept names',async()=>{
+  const app=await readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  assert.ok(app.includes("FEEDER_TABLE=new Set(['Pegasus','Dragon','Phoenix'"));
+  assert.ok(app.includes('closed=(s.closedHunters||[]).filter'));
+});
+

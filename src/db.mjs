@@ -922,14 +922,14 @@ export class Database {
   }
   async tradingLogRows(systemName,{limit=5000}={}){
     const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||5000)));
-    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false order by opened_at_ms desc limit $2`,[String(systemName),lim]);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and concept_name = any($3::text[]) order by opened_at_ms desc limit $2`,[String(systemName),lim,EXECUTABLE_HUNTER_CONCEPT_NAMES]);
     return r.rows.map(rowEntry);
   }
   async tradingLogRowsFleet({ownerId,mode,systemName,limit=5000,resetTimestampMs=0}={}){
     const f=this.fleetBookFilter({ownerId,mode,systemName});
     const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||5000)));
     const reset=Math.max(0,Number(resetTimestampMs)||0);
-    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and ($4::bigint=0 or opened_at_ms >= $4 or closed_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery')) order by opened_at_ms desc limit $5`,[f.owner,f.mode,f.ids,reset,lim]);
+    const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where archived=false and owner_id=$1 and mode=$2 and system_name = any($3::text[]) and concept_name = any($6::text[]) and ($4::bigint=0 or opened_at_ms >= $4 or closed_at_ms >= $4 or status in ('open','entry_pending','exit_pending','pending_recovery')) order by opened_at_ms desc limit $5`,[f.owner,f.mode,f.ids,reset,lim,EXECUTABLE_HUNTER_CONCEPT_NAMES]);
     return r.rows.map(rowEntry);
   }
   // R54/RGM3 trade-priority readers: execution and Athena hot paths must never

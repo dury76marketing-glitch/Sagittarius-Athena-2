@@ -1,6 +1,6 @@
-# SAGITTARIUS — Bolt Direct R3 Excalibur 12 + Closed Table 500
+# SAGITTARIUS — Bolt Direct R3 Closed Table 500 + Feeder Scoreboard Isolation
 
-Release: `SAGITTARIUS-BOLT-DIRECT-R3-CLOSED-TABLE-500-2026-09-22`
+Release: `SAGITTARIUS-BOLT-DIRECT-R3-FEEDER-SCOREBOARD-2026-09-22`
 
 Package version: `3.3.2`
 
@@ -67,5 +67,7 @@ Start: `npm start`
 Gate: `npm test && npm run check`
 
 Homepage closed-trades table shows the latest 500 executable rows in the existing scroll box. Backend OPI1 already fetched 500; only the UI slice was still 30.
+
+Feeder signals (Pegasus / Dragon / Phoenix) are excluded from the homepage closed table, the trading-log executable book, and the headline win rate. Win rate is wins / (wins + losses). A $0 scratch on a real executable close can still appear in the table, but it does not pull the win rate down.
 
 Simulation-validated. Not LIVE-certified until a live cohort is scored after this deploy.

@@ -4662,7 +4662,7 @@ export class SagittariusEngine {
       // Legacy/in-memory fallback: preserve deterministic period fields even
       // when the optimized PostgreSQL aggregate is unavailable. Production
       // uses the database's Europe/Madrid calendar boundaries below.
-      return {entries,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closed.length?wins/closed.length:0,openHunters:open.length,closedHunters:closed.length,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate:null,operationalHistory:false};
+      return {entries,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:(wins+losses)?wins/(wins+losses):0,openHunters:open.length,closedHunters:closed.length,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate:null,operationalHistory:false};
     }
 
     const reset = Number(this.settings.resetTimestampMs || 0);
@@ -4692,7 +4692,7 @@ export class SagittariusEngine {
     const closedRealized=Number(aggregate?.closed_realized_cents||0),partialRealized=Number(aggregate?.partial_realized_cents||0),realized=closedRealized+partialRealized;
     const simulationCashCents=Number(this.settings.startingCapitalCents||0)+Number(aggregate?.simulation_ledger_pnl_cents||0)-reserved;
     const wins=Number(aggregate?.wins||0),losses=Number(aggregate?.losses||0),scratches=Number(aggregate?.scratches||0),closedHunters=Number(aggregate?.closed_hunters||0),openHunters=Number(aggregate?.open_hunters||open.length);
-    return {entries:active,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:Number(aggregate?.day_realized_cents||0),weekRealizedCents:Number(aggregate?.week_realized_cents||0),monthRealizedCents:Number(aggregate?.month_realized_cents||0),yearRealizedCents:Number(aggregate?.year_realized_cents||0),hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:closedHunters?wins/closedHunters:0,openHunters,closedHunters,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate,operationalHistory:true};
+    return {entries:active,active,hunters,closed,open,wins,losses,scratches,hunterRealizedCents:realized,closedRealizedCents:closedRealized,partialRealizedCents:partialRealized,dayRealizedCents:Number(aggregate?.day_realized_cents||0),weekRealizedCents:Number(aggregate?.week_realized_cents||0),monthRealizedCents:Number(aggregate?.month_realized_cents||0),yearRealizedCents:Number(aggregate?.year_realized_cents||0),hunterUnrealizedCents:unrealized,feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,winRate:(wins+losses)?wins/(wins+losses):0,openHunters,closedHunters,portfolioValueCents:this.portfolioValueCentsForMode(this.settings.startingCapitalCents+realized+unrealized),portfolioValueSource:this.settings?.mode==='LIVE'?'kalshi':'simulation',simulationCashCents,conceptAggregate,operationalHistory:true};
   }
 
   buildAuroraSummary(entries = []) {
@@ -5676,7 +5676,7 @@ export class SagittariusEngine {
         closed,
         wins,
         losses,
-        winRate: closed ? wins / closed : 0,
+        winRate: (wins + losses) ? wins / (wins + losses) : 0,
         pnlCents: Number(st.pnlCents || 0),
         avgEntryCents: Number(st.avgEntryCents || 0),
         total: Number(st.total || 0),
@@ -5709,7 +5709,7 @@ export class SagittariusEngine {
           continue;
         }
         const r=portfolio.get(name)||{},closed=Number(r.closed||0),wins=Number(r.wins||0),losses=Number(r.losses||0);
-        out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:Number(r.total||0),open:Number(r.open||0),closed,wins,losses,winRate:closed?wins/closed:0,pnlCents:Number(r.pnl_cents||r.pnlCents||0),avgEntryCents:Math.round(Number(r.avg_entry_cents||r.avgEntryCents||0)),avgCurrentCents:Math.round(Number(r.avg_current_cents||0)),avgLiquidity:Number(r.avg_liquidity||0),fedHunters:null});
+        out.push({name,displayName:EXECUTION_ATTACK_DISPLAY[name]?.name||name,legacyName:EXECUTION_ATTACK_DISPLAY[name]?.legacy||name,total:Number(r.total||0),open:Number(r.open||0),closed,wins,losses,winRate:(wins+losses)?wins/(wins+losses):0,pnlCents:Number(r.pnl_cents||r.pnlCents||0),avgEntryCents:Math.round(Number(r.avg_entry_cents||r.avgEntryCents||0)),avgCurrentCents:Math.round(Number(r.avg_current_cents||0)),avgLiquidity:Number(r.avg_liquidity||0),fedHunters:null});
       }
     }
     return out.sort((a,b)=>b.pnlCents-a.pnlCents);
@@ -5765,7 +5765,7 @@ export class SagittariusEngine {
         open: rows.filter((e) => openLike(e.status)).length,
         closed: closed.length,
         wins, losses,
-        winRate: closed.length ? wins / closed.length : 0,
+        winRate: (wins + losses) ? wins / (wins + losses) : 0,
         pnlCents: closed.reduce((sum, e) => sum + e.pnlCents, 0),
         avgEntryCents: rows.length ? Math.round(rows.reduce((sum, e) => sum + e.entryPriceCents, 0) / rows.length) : 0,
         avgCurrentCents: rows.length ? Math.round(rows.reduce((sum, e) => sum + this.quoteView(e).priceCents, 0) / rows.length) : 0,
@@ -5894,14 +5894,14 @@ export class SagittariusEngine {
     const money=(v)=>`$${(Number(v||0)/100).toFixed(2)}`;
     const c=(v)=>v==null?'-':`${Number(v).toFixed(Number.isInteger(Number(v))?0:2)}c`;
     const ms=(v)=>v==null?'-':`${Math.round(Number(v)/1000)}s`;
-    const active=[...p.active].sort((a,b)=>{
+    const active=[...p.hunters].sort((a,b)=>{
       const ao=openLike(a.status)?1:0,bo=openLike(b.status)?1:0;
       if(ao!==bo)return bo-ao;
       return Number(b.updatedAtMs||b.closedAtMs||b.openedAtMs||0)-Number(a.updatedAtMs||a.closedAtMs||a.openedAtMs||0);
     });
     const lines = [
       '=== SAGITTARIUS TRADING LOGS ===',
-      'Scope: combined twelve-cosmos executable book after Reset',
+      'Scope: combined twelve-cosmos executable book after Reset (feeders excluded)',
       `Generated: ${new Date().toISOString()}`,
       `Release: ${RELEASE}`,
       'Format: TLX1 compact analysis log | Server hard cap: 2000000 UTF-8 bytes',

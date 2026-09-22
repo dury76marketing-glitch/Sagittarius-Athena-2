@@ -66,7 +66,8 @@ function renderInfinity(s){const x=s.infinityBreak||{};setText('infinityStatus',
 function renderAurora(s){const a=s.auroraExecution||{};setText('auroraStatus',a.version||'AURORA-V2');$('auroraStatus').className='pill green';const inp=$('auroraDamagePercent');if(inp&&!inp.matches(':focus'))inp.value=s.settings?.auroraDamageControlPercent??a.damageControlPercent??45;setText('auroraProtected',a.protectedHunters||0);setText('auroraActive',a.activeAuroraPositions||0);setText('auroraExits',a.auroraExits||0);setText('auroraAverageStop',pc(a.averageAuroraStopCents));setText('auroraAveragePct',a.averageEconomicLossRatio==null?'-':`${(Number(a.averageEconomicLossRatio)*100).toFixed(1)}%`);setPnl('auroraRealized',a.realizedAuroraPnlCents);setPnl('auroraAverageLoss',a.averageAuroraLossCents);setText('auroraRecovered',a.recoveredAfterAuroraExit||0);}
 function cosmosName(e){return String(e?.systemName||e?.cosmos||'').toUpperCase()||'-';}
 function renderTrades(s){
-  const open=s.openHunters||[],closed=s.closedHunters||[],allFeed=s.cosmoShadowTrades||s.openFeeders||[],feed=COSMO_FILTER==='ALL'?allFeed:allFeed.filter(e=>e.conceptName===COSMO_FILTER),gemini=s.geminiTrades||[],crystal=s.crystalWallTrades||[];
+  const FEEDER_TABLE=new Set(['Pegasus','Dragon','Phoenix','Sagittarius','Golden Dragon']);
+  const open=s.openHunters||[],closed=(s.closedHunters||[]).filter(e=>!FEEDER_TABLE.has(String(e.conceptName||e.executionAttackName||''))),allFeed=s.cosmoShadowTrades||s.openFeeders||[],feed=COSMO_FILTER==='ALL'?allFeed:allFeed.filter(e=>e.conceptName===COSMO_FILTER),gemini=s.geminiTrades||[],crystal=s.crystalWallTrades||[];
   setText('openHunterCount',`(${open.length})`);
   setText('hunterSummary',`${open.length} open · per-position frozen profit authority · Aurora loss side`);
   $('openHunterBody').innerHTML=open.map(e=>{
