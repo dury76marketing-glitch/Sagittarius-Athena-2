@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { RELEASE, originalSettings, freshInstallSettings, CANONICAL_NUMERIC_SETTINGS, CANONICAL_BOOLEAN_SETTINGS, sanitizeRuntimeSettings } from '../src/config.mjs';
-import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand, isExcaliburReplicaCommand } from '../src/strategy.mjs';
+import { StrategyEngine, megaWaveSaintSignalState, attackProfitAuthoritySnapshot, entryConfigSnapshot, attackInfinityNetTargetCents, crystalWallSignalState, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, fullConfiguredSizeClassification, boltDirectAttackCard, boltDirectEnabledAttacks, validateBoltDirectFireCommand, isExcaliburReplicaCommand, sealedAttackEnvelope, EXCALIBUR_REPLICA_GRANT_TTL_MS } from '../src/strategy.mjs';
 import { SagittariusEngine, entryAdmissionDecision, entryChainAdmissionDecision } from '../src/engine.mjs';
 import { MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, ATHENA_EXCLAMATION, CRYSTAL_WALL, INFINITY_BREAK, PROTECTED_RUNNER_INTELLIGENCE, GALACTIC_EXPLOSION, BOLT_DIRECT, EXECUTABLE_HUNTER_CONCEPTS, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from '../src/doctrine.mjs';
 import { atomicThunderBoltFeatures, atomicThunderBoltDecision } from '../src/opportunity.mjs';
@@ -58,7 +58,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-CW4-R3-BOLT-OUTCOME-FUNNEL-2026-09-22');
+  assert.equal(RELEASE,'SAGITTARIUS-CW4-R4-EXCALIBUR-SEALED-ENVELOPE-2026-09-23');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -1313,7 +1313,7 @@ test('Excalibur copies the opened attack onto free cosmosses',async()=>{
   assert.equal(new Set(copied.map((row)=>row.systemName)).size,copied.length);
 });
 
-test('Excalibur replica keeps live band from aborting late Scarlet/Justice/Athena copies',()=>{
+test('Excalibur replica cannot leave the sealed source band after a late price drift',()=>{
   const s=settings({
     excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:true,
     scarletNeedleEnabled:true,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:70,
@@ -1346,7 +1346,8 @@ test('Excalibur replica keeps live band from aborting late Scarlet/Justice/Athen
   });
   assert.equal(isExcaliburReplicaCommand(replica),true);
   const copy=validateBoltDirectFireCommand(replica,{concept:'Scarlet Needle',q:q(base.ticker,92,liveAsk),settings:s});
-  assert.equal(copy.ok,true,copy.reason);
+  assert.equal(copy.ok,false,copy.reason);
+  assert.equal(copy.reason,'entry_band');
   assert.equal(copy.excaliburReplica,true);
 });
 
@@ -1363,23 +1364,17 @@ test('Excalibur commit lock is per ticker+attack+cosmos so twelve rooms can open
   assert.notEqual(`commit:${ariesScarlet}`,`commit:${taurusScarlet}`);
 });
 
-test('Excalibur fan-out copies Scarlet onto every free cosmos after the live quote leaves the source band',async()=>{
-  const host={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:true,athenaExclamationStakeCents:100,scarletNeedleStakeCents:100,systemName:'ARIES'};
+test('Excalibur fan-out blocks copies after the live quote leaves the sealed source band',async()=>{
+  const host={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:true,athenaExclamationStakeCents:100,scarletNeedleStakeCents:100,systemName:'ARIES',scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3};
   const engine=Object.create(SagittariusEngine.prototype);
   engine.settings=host;
   engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
-  engine.db={loadCosmosSettings:async(id)=>({...host,systemName:id,scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:70}),audit:async()=>{}};
-  const created=[];
+  engine.db={loadCosmosSettings:async(id)=>({...host,systemName:id,scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69}),audit:async()=>{}};
   engine.strategy={
-    createHunter:async(concept,q,stake, _sl, opts={})=>{
-      const command=opts.athenaFireCommand||{};
-      const s={...host,systemName:engine.settings.systemName,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:70,scarletNeedleStakeCents:100};
-      const verdict=validateBoltDirectFireCommand(command,{concept,q,settings:s});
-      if(!verdict.ok) throw new Error(verdict.reason);
-      return {id:`${engine.settings.systemName}-${concept}`,systemName:engine.settings.systemName,conceptName:concept,ticker:q.ticker,status:'open',stakeCents:stake};
-    },
+    createHunter:async()=>{throw new Error('out-of-band replica must not createHunter');},
   };
-  engine.rememberCosmosBookEntry=(row)=>{engine.cosmosBooks[row.systemName]=[...(engine.cosmosBooks[row.systemName]||[]),row];created.push(row);};
+  engine.rememberCosmosBookEntry=()=>{};
+  const now=Date.now();
   const sourceFire=sealAthenaFireCommand({
     version:BOLT_DIRECT.version,
     policyRevision:BOLT_DIRECT.policyRevision,
@@ -1387,18 +1382,19 @@ test('Excalibur fan-out copies Scarlet onto every free cosmos after the live quo
     selectedAttack:'Scarlet Needle',
     ticker:'EX-DRIFT',
     stakeCents:100,
-    decidedAtMs:Date.now()-20,
-    expiresAtMs:Date.now()+5_000,
+    decidedAtMs:now-20,
+    expiresAtMs:now+60_000,
     systemName:'ARIES',
     authorizationId:'SRC-SCARLET',
+    operatorMinEntryCents:60,
+    operatorMaxEntryCents:69,
+    entryPriceCents:65,
+    authorizedMaxEntryCents:69,
   });
   const source={id:'src-sc',systemName:'ARIES',conceptName:'Scarlet Needle',ticker:'EX-DRIFT',entryConfig:{athenaFire:sourceFire}};
-  const drifted={ticker:'EX-DRIFT',eventTicker:'EX-DRIFT',yesBid:92,yesAsk:93,status:'active'};
+  const drifted={ticker:'EX-DRIFT',eventTicker:'EX-DRIFT',yesBid:72,yesAsk:72,status:'active'};
   const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,drifted);
-  assert.equal(copied.length,COSMOS_IDS.length-1,`copied ${copied.length} expected ${COSMOS_IDS.length-1}`);
-  assert.ok(copied.every((row)=>row.conceptName==='Scarlet Needle'));
-  assert.equal(copied.some((row)=>row.systemName==='ARIES'),false);
-  assert.equal(new Set(copied.map((row)=>row.systemName)).size,copied.length);
+  assert.equal(copied.length,0,`copied ${copied.length} expected 0 outside sealed 60-69`);
 });
 
 
@@ -1705,4 +1701,132 @@ test('allowed family inside the operator band can still detect a bolt',()=>{
   const features=atomicThunderBoltFeatures({q:quote,history:[],settings:s,cosmos:[{id:'s1',conceptName:'Phoenix',ticker:quote.ticker,status:'open',entryPriceCents:61,openedAtMs:1}],now:Date.now()});
   const decision=atomicThunderBoltDecision(features,s);
   assert.equal(decision.detected,true,decision.reason);
+});
+
+test('Excalibur replica at 65 inside sealed 60-69 stays valid',()=>{
+  const now=Date.now();
+  const command=sealAthenaFireCommand({
+    version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,
+    selectedAttack:'Scarlet Needle',ticker:'EX-BAND',stakeCents:100,decidedAtMs:now-10,expiresAtMs:now+60_000,
+    systemName:'TAURUS',authorizationId:'EXCALIBUR:src:TAURUS:Scarlet Needle',excaliburReplica:true,
+    operatorMinEntryCents:60,operatorMaxEntryCents:69,entryPriceCents:65,authorizedMaxEntryCents:69,
+  });
+  assert.equal(isExcaliburReplicaCommand(command),true);
+  const s={systemName:'TAURUS',scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3,andromedaThunderWaveEnabled:false};
+  const verdict=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-BAND',64,65),settings:s,now});
+  assert.equal(verdict.ok,true,verdict.reason);
+  assert.equal(verdict.authorizedMaxEntryCents,69);
+  assert.notEqual(verdict.authorizedMaxEntryCents,100);
+});
+
+test('Excalibur replica at 72 is blocked by sealed 60-69 envelope',()=>{
+  const now=Date.now();
+  const command=sealAthenaFireCommand({
+    version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,
+    selectedAttack:'Scarlet Needle',ticker:'EX-BAND',stakeCents:100,decidedAtMs:now-10,expiresAtMs:now+60_000,
+    systemName:'TAURUS',authorizationId:'EXCALIBUR:src:TAURUS:Scarlet Needle',excaliburReplica:true,
+    operatorMinEntryCents:60,operatorMaxEntryCents:69,entryPriceCents:65,authorizedMaxEntryCents:100,
+  });
+  const s={systemName:'TAURUS',scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3,andromedaThunderWaveEnabled:false};
+  const high=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-BAND',71,72),settings:s,now});
+  assert.equal(high.ok,false);
+  assert.equal(high.reason,'entry_band');
+  const low=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-BAND',58,59),settings:s,now});
+  assert.equal(low.ok,false);
+  assert.equal(low.reason,'entry_band');
+});
+
+test('Excalibur replica blocked by spread at 65 may pass when spread tightens inside the same band',()=>{
+  const now=Date.now();
+  const command=sealAthenaFireCommand({
+    version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,
+    selectedAttack:'Scarlet Needle',ticker:'EX-SPREAD',stakeCents:100,decidedAtMs:now-10,expiresAtMs:now+60_000,
+    systemName:'GEMINI',authorizationId:'EXCALIBUR:src:GEMINI:Scarlet Needle',excaliburReplica:true,
+    operatorMinEntryCents:60,operatorMaxEntryCents:69,entryPriceCents:65,authorizedMaxEntryCents:69,
+  });
+  const s={systemName:'GEMINI',scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3,andromedaThunderWaveEnabled:false};
+  const wide=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-SPREAD',60,65),settings:s,now});
+  assert.equal(wide.ok,false);
+  assert.equal(wide.reason,'shared_spread_safety');
+  const tight=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-SPREAD',64,65),settings:s,now});
+  assert.equal(tight.ok,true,tight.reason);
+});
+
+test('Excalibur replica blocked by spread at 65 cannot later execute at 72',()=>{
+  const now=Date.now();
+  const command=sealAthenaFireCommand({
+    version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,
+    selectedAttack:'Scarlet Needle',ticker:'EX-MIGRATE',stakeCents:100,decidedAtMs:now-10,expiresAtMs:now+60_000,
+    systemName:'CANCER',authorizationId:'EXCALIBUR:src:CANCER:Scarlet Needle',excaliburReplica:true,
+    operatorMinEntryCents:60,operatorMaxEntryCents:69,entryPriceCents:65,authorizedMaxEntryCents:69,
+  });
+  const s={systemName:'CANCER',scarletNeedleEnabled:true,scarletNeedleStakeCents:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3,andromedaThunderWaveEnabled:false};
+  const first=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:q('EX-MIGRATE',60,65),settings:s,now});
+  assert.equal(first.reason,'shared_spread_safety');
+  const later=validateBoltDirectFireCommand(command,{concept:'Scarlet Needle',q:{...q('EX-MIGRATE',71,72),status:'active'},settings:s,now:now+20_000});
+  assert.equal(later.ok,false);
+  assert.equal(later.reason,'entry_band');
+});
+
+test('Excalibur still fans out across free cosmosses while the fresh quote stays inside the sealed band',async()=>{
+  const host={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,galacticExplosionEnabled:true,athenaExclamationStakeCents:100,scarletNeedleStakeCents:100,systemName:'ARIES',scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69,maxSpreadCents:3};
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings=host;
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.db={loadCosmosSettings:async(id)=>({...host,systemName:id,scarletNeedleEnabled:true,scarletNeedleStakeCents:id==='PISCES'?200:100,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69}),audit:async()=>{}};
+  const created=[];
+  engine.strategy={
+    createHunter:async(concept,quote,stake,_sl,opts={})=>{
+      const command=opts.athenaFireCommand||{};
+      const s={...host,systemName:engine.settings.systemName,scarletNeedleStakeCents:stake,scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69};
+      const verdict=validateBoltDirectFireCommand(command,{concept,q:quote,settings:s});
+      if(!verdict.ok) throw new Error(verdict.reason);
+      assert.equal(verdict.authorizedMaxEntryCents,69);
+      return {id:`${engine.settings.systemName}-${concept}`,systemName:engine.settings.systemName,conceptName:concept,ticker:quote.ticker,status:'open',stakeCents:stake};
+    },
+  };
+  engine.rememberCosmosBookEntry=(row)=>{engine.cosmosBooks[row.systemName]=[...(engine.cosmosBooks[row.systemName]||[]),row];created.push(row);};
+  const now=Date.now();
+  const sourceFire=sealAthenaFireCommand({
+    version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,
+    selectedAttack:'Scarlet Needle',ticker:'EX-INBAND',stakeCents:100,decidedAtMs:now-20,expiresAtMs:now+60_000,
+    systemName:'ARIES',authorizationId:'SRC-SCARLET',operatorMinEntryCents:60,operatorMaxEntryCents:69,entryPriceCents:65,authorizedMaxEntryCents:69,
+  });
+  const source={id:'src-in',systemName:'ARIES',conceptName:'Scarlet Needle',ticker:'EX-INBAND',entryConfig:{athenaFire:sourceFire}};
+  const live={ticker:'EX-INBAND',eventTicker:'EX-INBAND',yesBid:64,yesAsk:65,status:'active'};
+  const copied=await SagittariusEngine.prototype.fanOutExcalibur.call(engine,source,live);
+  assert.equal(copied.length,COSMOS_IDS.length-1,`copied ${copied.length}`);
+  assert.ok(copied.every((row)=>row.conceptName==='Scarlet Needle'));
+  assert.equal(copied.some((row)=>row.systemName==='ARIES'),false);
+  assert.equal(new Set(copied.map((row)=>row.systemName)).size,copied.length);
+  const pisces=copied.find((row)=>row.systemName==='PISCES');
+  assert.equal(pisces.stakeCents,200);
+});
+
+test('sealedAttackEnvelope never promotes a replica ceiling to 100 cents',()=>{
+  const envelope=sealedAttackEnvelope({operatorMinEntryCents:60,operatorMaxEntryCents:69,authorizedMaxEntryCents:100,entryPriceCents:65},{scarletNeedleMinEntryCents:60,scarletNeedleMaxEntryCents:69},'Scarlet Needle');
+  assert.equal(envelope.maxEntryCents,69);
+  assert.equal(envelope.minEntryCents,60);
+});
+
+test('expired Excalibur grant cannot open a replica after TTL',async()=>{
+  const host={excaliburEnabled:true,rozanHyakuRyuHaEnabled:false,systemName:'ARIES',scarletNeedleStakeCents:100};
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings=host;
+  engine.excaliburGrants=new Map();
+  engine.excaliburSourceClaims=new Map();
+  engine.excaliburFanoutLocks=new Map();
+  engine.excaliburInFlight=new Set();
+  engine.cosmosBooks=Object.fromEntries(COSMOS_IDS.map((id)=>[id,[]]));
+  engine.db={audit:async()=>{}};
+  engine.strategy={createHunter:async()=>{throw new Error('expired grant must not fire');}};
+  const grant={
+    ticker:'EX-TTL',concept:'Scarlet Needle',grantKey:'EX-TTL|Scarlet Needle',sourceCosmos:'ARIES',
+    sourceFire:{},grantedAtMs:Date.now()-EXCALIBUR_REPLICA_GRANT_TTL_MS-1000,expiresAtMs:Date.now()-10,
+    sealedMinEntryCents:60,sealedMaxEntryCents:69,rooms:new Map(),
+  };
+  engine.excaliburGrants.set(grant.grantKey,grant);
+  const opened=await SagittariusEngine.prototype.observeExcaliburGrant.call(engine,{ticker:'EX-TTL',yesBid:64,yesAsk:65,status:'active'},grant);
+  assert.equal(opened.length,0);
+  assert.equal(engine.excaliburGrants.has(grant.grantKey),false);
 });

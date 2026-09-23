@@ -396,7 +396,7 @@ export const ROZAN_HYAKU_RYU_HA = Object.freeze({
 
 export const EXCALIBUR = Object.freeze({
   version:'EXCALIBUR-V2',
-  policyRevision:'EXC-R2-ROOM-CRYSTAL-WALL',
+  policyRevision:'EXC-R3-SEALED-SOURCE-ENVELOPE',
   saint:'CAPRICORN',
   displayName:'Excalibur',
   role:'one_authorized_real_fire_unlocks_ticker_each_cosmos_must_print_own_crystal_wall',

@@ -443,8 +443,32 @@ export function validateCrystalWallFollowFireCommand(command,{concept,q,settings
   if(!(configuredStake>0)||Math.abs(commandedStake-configuredStake)>1e-9)return{ok:false,reason:'crystal_wall_follow_stake_mismatch',expectedStakeCents:configuredStake};
   const ask=Number(q?.yesAsk||0),bid=Number(q?.yesBid||0);
   if(!(ask>0)||!(bid>0)||bid>ask)return{ok:false,reason:'invalid_quote'};
-  if(!replica && (ask<envelope.minEntryCents||ask>envelope.maxEntryCents))return{ok:false,reason:'entry_band'};
-  return{ok:true,reason:'crystal_wall_follow_valid',envelope,stakeCents:commandedStake,authorizedMaxEntryCents:Number(command.authorizedMaxEntryCents||envelope.maxEntryCents)};
+  const sealed=sealedAttackEnvelope(command,settings,'Recovery Hunter');
+  if(ask<sealed.minEntryCents||ask>sealed.maxEntryCents)return{ok:false,reason:'entry_band',ask,bid,sealedMinEntryCents:sealed.minEntryCents,sealedMaxEntryCents:sealed.maxEntryCents,sourceEntryPriceCents:sealed.sourceEntryPriceCents,excaliburReplica:replica===true};
+  return{ok:true,reason:'crystal_wall_follow_valid',envelope:sealed,stakeCents:commandedStake,authorizedMaxEntryCents:sealed.maxEntryCents,excaliburReplica:replica===true};
+}
+
+
+export const EXCALIBUR_REPLICA_GRANT_TTL_MS = 60_000;
+
+export function sealedAttackEnvelope(command, settings, concept){
+  const live=hunterEntryEnvelope(settings,concept)||{};
+  const cmdMin=Number(command?.operatorMinEntryCents);
+  const cmdMax=Number(command?.operatorMaxEntryCents);
+  const cmdAuth=Number(command?.authorizedMaxEntryCents);
+  let minEntryCents=Number.isFinite(cmdMin)?cmdMin:Number(live.minEntryCents);
+  let maxEntryCents=Number.isFinite(cmdMax)?cmdMax:Number(live.maxEntryCents);
+  if(!Number.isFinite(minEntryCents)) minEntryCents=1;
+  if(!Number.isFinite(maxEntryCents)) maxEntryCents=99;
+  if(Number.isFinite(cmdAuth) && cmdAuth>0 && cmdAuth<100) maxEntryCents=Math.min(maxEntryCents, cmdAuth);
+  return{
+    minEntryCents,
+    maxEntryCents,
+    maxSpreadCents:Number(live.maxSpreadCents??settings?.maxSpreadCents??3),
+    sourceEntryPriceCents:Number(command?.entryPriceCents||0),
+    sourceOperatorMinEntryCents:minEntryCents,
+    sourceOperatorMaxEntryCents:maxEntryCents,
+  };
 }
 
 export function isExcaliburReplicaCommand(command){
@@ -475,10 +499,10 @@ export function validateBoltDirectFireCommand(command,{concept,q,settings,now=Da
   const ask=Number(q?.yesAsk||0),bid=Number(q?.yesBid||0);
   if(!(ask>0)||!(bid>0)||bid>ask)return{ok:false,reason:'invalid_quote'};
   const replica=isExcaliburReplicaCommand(command);
-  if(!replica && (ask<envelope.minEntryCents||ask>envelope.maxEntryCents))return{ok:false,reason:'entry_band'};
-  const sharedSpread=Number(settings?.maxSpreadCents??3);if(ask-bid>sharedSpread)return{ok:false,reason:'shared_spread_safety'};
-  const authorizedMax=replica?100:Number(envelope.maxEntryCents);
-  return{ok:true,reason:replica?'bolt_direct_excalibur_replica_valid':'bolt_direct_fire_valid',envelope,stakeCents:commandedStake,authorizedMaxEntryCents:authorizedMax,excaliburReplica:replica===true};
+  const sealed=sealedAttackEnvelope(command,settings,concept);
+  if(ask<sealed.minEntryCents||ask>sealed.maxEntryCents)return{ok:false,reason:'entry_band',ask,bid,sealedMinEntryCents:sealed.minEntryCents,sealedMaxEntryCents:sealed.maxEntryCents,sourceEntryPriceCents:sealed.sourceEntryPriceCents,excaliburReplica:replica===true};
+  const sharedSpread=Number(settings?.maxSpreadCents??3);if(ask-bid>sharedSpread)return{ok:false,reason:'shared_spread_safety',ask,bid,spreadCents:ask-bid,maxSpreadCents:sharedSpread,excaliburReplica:replica===true};
+  return{ok:true,reason:replica?'bolt_direct_excalibur_replica_valid':'bolt_direct_fire_valid',envelope:sealed,stakeCents:commandedStake,authorizedMaxEntryCents:sealed.maxEntryCents,excaliburReplica:replica===true,freshAskCents:ask,freshBidCents:bid};
 }
 
 // R17/GCA1 shared safety gate. A timestamp alone is never authoritative: every
@@ -2311,20 +2335,26 @@ export class StrategyEngine {
           const replica=isExcaliburReplicaCommand(athenaFireCommand);
           const card=crystalWallFollowUpCard(executionQuote,s,entryQualificationSnapshot?.crashState||entryQualificationSnapshot?.crystalWallGeometry||null);
           if(!replica && !card.ok){trace('CRYSTAL_WALL_FOLLOW_ENVELOPE','BLOCKED',card.reason,card);return null;}
-          const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);
-          if(!replica && !boundary.ok){trace('CRYSTAL_WALL_FOLLOW_ENVELOPE','BLOCKED',boundary.reason,boundary);return null;}
+          const followFire=validateCrystalWallFollowFireCommand(athenaFireCommand,{concept,q:executionQuote,settings:s,now:Date.now()});
+          if(!followFire.ok){trace('CRYSTAL_WALL_FOLLOW_ENVELOPE','BLOCKED',followFire.reason,followFire);return null;}
+          const sealed=sealedAttackEnvelope(athenaFireCommand,s,concept);
+          const ask=Number(plan.bestAskCents||executionQuote.yesAsk||0);
+          if(ask<sealed.minEntryCents||ask>sealed.maxEntryCents){trace('CRYSTAL_WALL_FOLLOW_ENVELOPE','BLOCKED','entry_band',{ask,...sealed});return null;}
           trace('CRYSTAL_WALL_FOLLOW_ENVELOPE','PASS','infinity_parent_follow_still_executable');
         }else if(boltDirectEntry){
           const bdFire=validateBoltDirectFireCommand(athenaFireCommand,{concept,q:executionQuote,settings:s,now:Date.now()});
           if(!bdFire.ok){trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED',bdFire.reason,bdFire);await this.audit('bolt_direct_fresh_execution_blocked',{concept,ticker:q.ticker,eventTicker:expectedEventTicker,boltId:athenaFireCommand?.boltId||null,reason:bdFire.reason});return null;}
-          const replica=isExcaliburReplicaCommand(athenaFireCommand);
-          if(!replica){
-            const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);if(!boundary.ok){trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED',boundary.reason,boundary);return null;}
-            const authorizedMax=Number(athenaFireCommand.authorizedMaxEntryCents||bdFire.authorizedMaxEntryCents||0);
-            if(Number(plan.bestAskCents||executionQuote.yesAsk)>authorizedMax+1e-9||Number(plan.averagePriceCents||0)>authorizedMax+1e-9){
-              trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED','bolt_direct_strike_price_exceeded',{authorizedMaxEntryCents:authorizedMax});
-              return null;
-            }
+          const sealed=sealedAttackEnvelope(athenaFireCommand,s,concept);
+          const ask=Number(plan.bestAskCents||executionQuote.yesAsk||0);
+          const avg=Number(plan.averagePriceCents||0);
+          if(ask<sealed.minEntryCents||ask>sealed.maxEntryCents||(avg>0 && (avg<sealed.minEntryCents||avg>sealed.maxEntryCents))){
+            trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED','entry_band',{ask,averagePriceCents:avg,...sealed,excaliburReplica:isExcaliburReplicaCommand(athenaFireCommand)});
+            return null;
+          }
+          const authorizedMax=Number(sealed.maxEntryCents);
+          if(ask>authorizedMax+1e-9||(avg>0 && avg>authorizedMax+1e-9)){
+            trace('BOLT_DIRECT_EXECUTION_ENVELOPE','BLOCKED','bolt_direct_strike_price_exceeded',{authorizedMaxEntryCents:authorizedMax,ask,averagePriceCents:avg});
+            return null;
           }
           trace('BOLT_DIRECT_EXECUTION_ENVELOPE','PASS','bolt_and_attack_card_still_executable',{boltId:athenaFireCommand.boltId,selectedAttack:concept});
         }else if(megaWaveSaintEntry){

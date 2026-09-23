@@ -6,7 +6,7 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled, boltDirectEnabledAttacks, boltDirectAttackCard, crystalWallFollowUpCard, attackConfiguredStakeCents } from './strategy.mjs';
+import { StrategyEngine, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, crystalWallGeometryReady, crystalWallStageGeometry, crystalWallRequiredProofCount, crystalWallNextProofStage, crystalWallProofIdentitiesValid, crystalWallProofsBelongToResetEpoch, snapshotEventClockMinutes, justiceArrowSignalState, recoverySignalState, plasmaSignalState, megaWaveSaintSignalState, isModelEnabled, boltDirectEnabledAttacks, boltDirectAttackCard, crystalWallFollowUpCard, attackConfiguredStakeCents, sealedAttackEnvelope, EXCALIBUR_REPLICA_GRANT_TTL_MS, validateBoltDirectFireCommand, validateCrystalWallFollowFireCommand, isExcaliburReplicaCommand } from './strategy.mjs';
 import { ProfitGuard } from './profitGuard.mjs';
 import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
@@ -3597,6 +3597,7 @@ export class SagittariusEngine {
     const geometry=this.seedExcaliburGeometry(ticker,q);
     const grantKey=this.excaliburGrantKey(ticker,concept);
     const prior=grants.get(grantKey);
+    const sealedEnvelope=sealedAttackEnvelope(sealed, host, concept);
     const grant={
       ticker,
       concept,
@@ -3605,7 +3606,11 @@ export class SagittariusEngine {
       sourceEntryId:String(sourceEntry.id||''),
       sourceCosmos:sourceRoom,
       sourceFire:structuredClone(sealed),
-      grantedAtMs:Date.now(),
+      grantedAtMs:Number(prior?.grantedAtMs||Date.now()),
+      expiresAtMs:Number(prior?.expiresAtMs||Date.now()+EXCALIBUR_REPLICA_GRANT_TTL_MS),
+      sealedMinEntryCents:Number(prior?.sealedMinEntryCents||sealedEnvelope.minEntryCents),
+      sealedMaxEntryCents:Number(prior?.sealedMaxEntryCents||sealedEnvelope.maxEntryCents),
+      sourceEntryPriceCents:Number(prior?.sourceEntryPriceCents||sealed.entryPriceCents||q?.yesAsk||0),
       preCrashPeakCents:Math.max(Number(prior?.preCrashPeakCents||0),Number(geometry.preCrashPeakCents||0)),
       troughCents:Number(geometry.troughCents||0),
       crashDepthCents:Math.max(Number(prior?.crashDepthCents||0),Number(geometry.crashDepthCents||0)),
@@ -3668,6 +3673,12 @@ export class SagittariusEngine {
       return [];
     }
     const concept=String(grant.concept||grant.sourceFire?.selectedAttack||'Athena Exclamation');
+    const nowMs=Date.now();
+    if(Number(grant.expiresAtMs||0)>0 && nowMs>Number(grant.expiresAtMs)){
+      if(grant.grantKey) grants.delete(grant.grantKey);
+      await this.db?.audit?.('info','excalibur_grant_expired',{ticker,concept,grantedAtMs:grant.grantedAtMs,expiresAtMs:grant.expiresAtMs,grantAgeMs:nowMs-Number(grant.grantedAtMs||nowMs)}).catch(()=>{});
+      return [];
+    }
     const opened=[];
     for(const id of COSMOS_IDS){
       if(id===grant.sourceCosmos) continue;
@@ -3705,11 +3716,53 @@ export class SagittariusEngine {
           core.selectedAttack=concept;
           core.authorizationId=`EXCALIBUR:${grant.sourceEntryId||'fire'}:${id}:${concept}`;
           core.excaliburReplica=true;
-          core.authorizedMaxEntryCents=100;
-          core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Date.now()+60_000);
-          core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,copiedConcept:concept,wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
+          const sealedMin=Number(grant.sealedMinEntryCents||core.operatorMinEntryCents||0);
+          const sealedMax=Number(grant.sealedMaxEntryCents||core.operatorMaxEntryCents||0);
+          core.operatorMinEntryCents=sealedMin;
+          core.operatorMaxEntryCents=sealedMax;
+          core.authorizedMaxEntryCents=sealedMax;
+          core.decidedAtMs=Number(core.decidedAtMs||grant.grantedAtMs||Date.now());
+          core.expiresAtMs=Math.max(Number(core.expiresAtMs||0), Number(grant.expiresAtMs||Date.now()+EXCALIBUR_REPLICA_GRANT_TTL_MS));
+          const freshAsk=Number(q?.yesAsk||0);
+          const freshBid=Number(q?.yesBid||0);
+          const grantAgeMs=Date.now()-Number(grant.grantedAtMs||Date.now());
+          room.retryCount=Math.max(0,Number(room.retryCount||0))+1;
+          const envelopeVerdict=sealedAttackEnvelope(core,bound,concept);
+          const outsideBand=Number.isFinite(envelopeVerdict.minEntryCents)&&Number.isFinite(envelopeVerdict.maxEntryCents)&&!(freshAsk>=envelopeVerdict.minEntryCents && freshAsk<=envelopeVerdict.maxEntryCents);
+          const wideSpread=(freshAsk>0 && freshBid>0 && (freshAsk-freshBid)>Number(bound.maxSpreadCents??host.maxSpreadCents??3));
+          if(outsideBand || wideSpread){
+            room.status='BLOCKED';
+            room.lastBlockReason=outsideBand?'entry_band':'shared_spread_safety';
+            room.watch=geometry;
+            grant.rooms.set(id,room);
+            await this.db?.audit?.('info','excalibur_replica_envelope_blocked',{
+              ticker,concept,targetCosmos:id,sourceCosmos:grant.sourceCosmos,
+              sourceEntryPriceCents:Number(grant.sourceEntryPriceCents||0),
+              sourceOperatorMinEntryCents:sealedMin,
+              sourceOperatorMaxEntryCents:sealedMax,
+              freshReplicaPriceCents:freshAsk,
+              freshReplicaBidCents:freshBid,
+              grantAgeMs,retryCount:room.retryCount,
+              initialBlockReason:room.lastBlockReason,
+              freshEnvelopeResult:room.lastBlockReason,
+              finalBlockReason:room.lastBlockReason,
+            }).catch(()=>{});
+            return null;
+          }
+          core.decisionEvidence={...(core.decisionEvidence&&typeof core.decisionEvidence==='object'?core.decisionEvidence:{}),excalibur:{version:EXCALIBUR.version,policyRevision:EXCALIBUR.policyRevision,sourceCosmos:grant.sourceCosmos,targetCosmos:id,parentEntryId:grant.sourceEntryId,copiedConcept:concept,sourceEntryPriceCents:Number(grant.sourceEntryPriceCents||0),sourceOperatorMinEntryCents:sealedMin,sourceOperatorMaxEntryCents:sealedMax,freshReplicaPriceCents:freshAsk,grantAgeMs,retryCount:room.retryCount,freshEnvelopeResult:'PASS',wall:{minCrashCents:geometry.minCrashCents,minReboundCents:geometry.minReboundCents,minUpwardTicks:geometry.minUpwardTicks,crashDepthCents:geometry.crashDepthCents,reboundCents:geometry.reboundCents,upwardTicks:geometry.upwardTicks}}};
           const command=sealAthenaFireCommand(core);
-          const followCopy=concept===CRYSTAL_WALL.conceptName;
+          const preflight=boltDirectCopy
+            ? validateBoltDirectFireCommand(command,{concept,q,settings:bound,now:Date.now()})
+            : followCopy
+              ? validateCrystalWallFollowFireCommand(command,{concept,q,settings:bound,now:Date.now()})
+              : {ok:true,reason:'excalibur_wall_copy'};
+          if(!preflight.ok){
+            room.status='BLOCKED';
+            room.lastBlockReason=preflight.reason||'excalibur_replica_preflight';
+            grant.rooms.set(id,room);
+            await this.db?.audit?.('info','excalibur_replica_preflight_blocked',{ticker,concept,targetCosmos:id,reason:preflight.reason,freshReplicaPriceCents:freshAsk,grantAgeMs,retryCount:room.retryCount}).catch(()=>{});
+            return null;
+          }
           return this.strategy.createHunter(concept, q, stake, 0, {
             athenaFireCommand:command,
             boltDirectAuthorization:boltDirectCopy?{version:BOLT_DIRECT.version,policyRevision:BOLT_DIRECT.policyRevision,authorityMode:BOLT_DIRECT.strategicEntryAuthority,boltId:String(command.boltId||''),ticker,selectedAttack:concept}:null,
