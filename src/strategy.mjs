@@ -45,6 +45,7 @@ import {
   estimateTimeLeftMs,
 } from './doctrine.mjs';
 import { RELEASE, crystalWallProofSettingKeys } from './config.mjs';
+import { sessionShutdownState, gameClockEntryDecision } from './operatorSession.mjs';
 import { authoritativeClockSnapshot, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { EVENT_CLOCK_ANCHOR, eventClockEpisodeId, isExecutableLeadingEventClock, projectEventClock, stampEventClockRecord } from './eventClockAnchor.mjs';
 import { AthenaExclamationEngine, ATHENA_EXCLAMATION, athenaExclamationPrimeReview, isGoldSaintConcept } from './athenaExclamation.mjs';
@@ -2099,6 +2100,13 @@ export class StrategyEngine {
       return null;
     }
     trace('MODE_AUTHORIZATION','PASS',s.mode === 'LIVE' ? 'live_ready' : 'simulation');
+    const session=sessionShutdownState(s, Date.now());
+    if(session.entriesAuthorized!==true){
+      trace('OPERATOR_SESSION','BLOCKED',session.reason,{wall:session.wall,schedule:session.schedule});
+      await this.audit('operator_session_entry_blocked',{concept,ticker:exactTicker,reason:session.reason,clockLabel:session.wall?.clockLabel,stop:session.schedule?.stopLabel,start:session.schedule?.startLabel});
+      return null;
+    }
+    trace('OPERATOR_SESSION','PASS',session.reason,{clockLabel:session.wall?.clockLabel,timeZone:session.wall?.timeZone});
     // R13/MFE1 universal execution backstop. Shadow/research paths do not use createHunter().
     const marketFamilyExclusion=executionMarketFamilyExclusion(exactTicker,s);
     if(marketFamilyExclusion.blocked){
@@ -2229,12 +2237,15 @@ export class StrategyEngine {
       if(!preExecutionPolicy.ok){trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','BLOCKED',preExecutionPolicy.reason,preExecutionPolicy);return null;}
       trace(newGenerationEntry?'EXECUTION_POLICY':'STATIC_POLICY','PASS',preExecutionPolicy.reason,preExecutionPolicy);
 
-      // Game Clock is historical telemetry only. Elapsed minutes never veto
-      // createHunter. Closed/settled books are still rejected by prepareEntryExecution.
-      const executionMinGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 0));
-      const executionMaxGameMinutes = Math.max(0, Number(s.maxGameMinutes ?? 0));
+      // Game Clock stays retired unless the operator turns the entry gate ON.
+      // Closed/settled books are still rejected by prepareEntryExecution.
       const executionElapsed=this.resolveRealAttackElapsedMinutes(q).elapsedMinutes;
-      trace('GAME_CLOCK','PASS','clock_authority_retired',{elapsedMinutes:executionElapsed,minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes,clockAuthority:'NONE'});
+      const clockDecision=gameClockEntryDecision({settings:s,elapsedMinutes:executionElapsed});
+      trace('GAME_CLOCK',clockDecision.status,clockDecision.reason,clockDecision);
+      if(clockDecision.ok!==true){
+        await this.audit('game_clock_entry_blocked',{concept,ticker:q.ticker,eventTicker:q?.eventTicker||q.ticker,...clockDecision});
+        return null;
+      }
 
       // Refresh market + orderbook AFTER the authority call so execution depth,
       // exact event identity and lifecycle are newer than the evidence request.

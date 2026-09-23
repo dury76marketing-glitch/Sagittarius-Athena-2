@@ -14,6 +14,7 @@ import { PhoenixCosmoEngine } from './phoenix.mjs';
 import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, BOLT_DIRECT, ROZAN_HYAKU_RYU_HA, EXCALIBUR, MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH, MARKET_FAMILY_EXECUTION_EXCLUSION, executionMarketFamilyExclusion } from './doctrine.mjs';
 import { sealAthenaFireCommand } from './authority.mjs';
 import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
+import { sessionShutdownState, sessionIdleMaintenancePlan, gameClockEntryDecision, OPERATOR_SESSION } from './operatorSession.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
 import { ConstellationHost, CONSTELLATION, COSMOS_IDS, normalizeCosmosId, cosmosSettingsKey, isolateBook, emptyCosmosBooks, FairScanScheduler, inCosmosClockWindow, watchdogDiscoveryTokens, watchdogMayDiscover } from './constellation.mjs';
 
@@ -3581,6 +3582,7 @@ export class SagittariusEngine {
   async fanOutExcalibur(sourceEntry, q) {
     const host=this.settings||{};
     if (host.excaliburEnabled!==true) return [];
+    if(this.currentOperatorSession().entriesAuthorized!==true) return [];
     if (host.rozanHyakuRyuHaEnabled===true) return [];
     const concept=String(sourceEntry?.conceptName||'');
     if (!BOLT_DIRECT.attacks.includes(concept) && concept!==CRYSTAL_WALL.conceptName) return [];
@@ -4495,9 +4497,30 @@ export class SagittariusEngine {
     return created;
   }
 
+  currentOperatorSession(nowMs=Date.now()) {
+    const state=sessionShutdownState(this.settings||{}, nowMs);
+    this.operatorSession=state;
+    return state;
+  }
+
+  async runSessionIdleMaintenance(state=null) {
+    const snap=state||this.currentOperatorSession();
+    const plan=sessionIdleMaintenancePlan(snap);
+    if(plan.runMaintenance!==true) return plan;
+    try{ this.applyResourceGovernance?.(true); }catch{}
+    try{ this.market?.maintainRuntime?.(this.resourcePressureState||'TRADE_PRIORITY'); }catch{}
+    await this.db?.audit?.('info','operator_session_maintenance',{reason:snap.reason,clockLabel:snap.wall?.clockLabel,tasks:plan.tasks}).catch(()=>{});
+    return plan;
+  }
+
   async evaluateEntryChain(markets, trackerMap, marketMap) {
     const created=[];
     if(!this.referenceSignalGate().allowed)return created;
+    const session=this.currentOperatorSession();
+    if(session.entriesAuthorized!==true){
+      await this.runSessionIdleMaintenance(session);
+      return created;
+    }
     const simulationToken=this.settings?.mode==='SIMULATION'?this.simulationMutationGate.capture():null;
     let releaseSimulationWork=null;
     if(this.settings?.mode==='SIMULATION'){
@@ -5285,6 +5308,7 @@ export class SagittariusEngine {
         gameClockExactActiveMarketRevalidation: true,
         gameClockFallbackFreshTradeEvidenceRequired: true,
         gameClockPbpEntryAuthorization: 'requires_fresh_exact_trade_plus_current_official_window',
+        operatorSession: this.currentOperatorSession(),
         entryAdmissionControl: ENTRY_ADMISSION_CONTROL.version,
         entryAdmissionRole: ENTRY_ADMISSION_CONTROL.role,
         entryAdmissionUnknownProbeIntervalMs: ENTRY_ADMISSION_CONTROL.unknownProbeIntervalMs,

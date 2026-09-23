@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-CW4-R4-EXCALIBUR-SEALED-ENVELOPE-2026-09-23';
+export const RELEASE = 'SAGITTARIUS-OS1-MADRID-SESSION-GAME-CLOCK-GATE-2026-09-23';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -36,6 +36,10 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'repeatCooldownMinutes',
   'minGameMinutes',
   'maxGameMinutes',
+  'sessionStopHour',
+  'sessionStopMinute',
+  'sessionStartHour',
+  'sessionStartMinute',
   'eventCooldownMinutes',
   'maxSpreadCents',
   'startingCapitalCents',
@@ -195,6 +199,8 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'crashRecoveryPri1R2Enabled',
   'lightningPlasmaPri1R2Enabled',
   'recoveryPri1R2Enabled',
+  'gameClockEntryGateEnabled',
+  'sessionShutdownEnabled',
 ]);
 
 export const CRYSTAL_WALL_PROOF_STAGES = Object.freeze([1,2,3,4,5]);
@@ -259,6 +265,12 @@ export function originalSettings() {
     repeatCooldownMinutes: 3,
     minGameMinutes: 30,
     maxGameMinutes: 60,
+    gameClockEntryGateEnabled: false,
+    sessionShutdownEnabled: false,
+    sessionStopHour: 1,
+    sessionStopMinute: 0,
+    sessionStartHour: 7,
+    sessionStartMinute: 0,
     eventCooldownMinutes: 3,
     maxSpreadCents: 3,
     startingCapitalCents: 100000,
@@ -438,6 +450,12 @@ export function freshInstallSettings() {
     repeatCooldownMinutes:3,
     minGameMinutes:30,
     maxGameMinutes:55,
+    gameClockEntryGateEnabled:false,
+    sessionShutdownEnabled:false,
+    sessionStopHour:1,
+    sessionStopMinute:0,
+    sessionStartHour:7,
+    sessionStartMinute:0,
     eventCooldownMinutes:3,
     maxSpreadCents:3,
     startingCapitalCents:1_000_000,
@@ -718,6 +736,13 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
     out[key] = Math.max(0.01, Math.min(99, Number(out[key]) || 0.01));
   }
   out.recoveryPri1R2TrailCents = Math.max(1, Math.min(4, Number(out.recoveryPri1R2TrailCents) || 1));
+  out.sessionStopHour = Math.max(0, Math.min(23, Math.floor(Number.isFinite(Number(out.sessionStopHour))?Number(out.sessionStopHour):1)));
+  out.sessionStopMinute = Math.max(0, Math.min(59, Math.floor(Number.isFinite(Number(out.sessionStopMinute))?Number(out.sessionStopMinute):0)));
+  out.sessionStartHour = Math.max(0, Math.min(23, Math.floor(Number.isFinite(Number(out.sessionStartHour))?Number(out.sessionStartHour):7)));
+  out.sessionStartMinute = Math.max(0, Math.min(59, Math.floor(Number.isFinite(Number(out.sessionStartMinute))?Number(out.sessionStartMinute):0)));
+  out.gameClockEntryGateEnabled = out.gameClockEntryGateEnabled===true;
+  out.sessionShutdownEnabled = out.sessionShutdownEnabled===true;
+
   out.recoveryPri1R2Enabled = out.recoveryPri1R2Enabled===true;
 
   // R63 simulation/live parity: persisted legacy probabilities are neutralized.

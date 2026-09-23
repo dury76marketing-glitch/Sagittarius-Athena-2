@@ -10,6 +10,7 @@ import { COSMOS_IDS } from '../src/constellation.mjs';
 import { stampEventClockRecord, projectEventClock, isExecutableLeadingEventClock } from '../src/eventClockAnchor.mjs';
 import { sealAthenaFireCommand } from '../src/authority.mjs';
 import { GameClockAuthority, reconstructCurrentEpochStart, extractOfficialElapsedMs } from '../src/gameClock.mjs';
+import { sessionShutdownState, gameClockEntryDecision } from '../src/operatorSession.mjs';
 
 const downstream=['Scarlet Needle','Sagittarius Justice Arrow','Momentum Hunter','Wave Surfer','Lightning Plasma'];
 const q=(ticker='MW-T',bid=55,ask=56)=>({ticker,eventTicker:ticker,title:ticker,sport:'Tennis',yesBid:bid,yesAsk:ask,volume24h:10000,status:'active',result:'',updatedAtMs:Date.now(),closeTimeMs:Date.now()+60*60_000});
@@ -58,7 +59,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-CW4-R4-EXCALIBUR-SEALED-ENVELOPE-2026-09-23');
+  assert.equal(RELEASE,'SAGITTARIUS-OS1-MADRID-SESSION-GAME-CLOCK-GATE-2026-09-23');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -1829,4 +1830,40 @@ test('expired Excalibur grant cannot open a replica after TTL',async()=>{
   const opened=await SagittariusEngine.prototype.observeExcaliburGrant.call(engine,{ticker:'EX-TTL',yesBid:64,yesAsk:65,status:'active'},grant);
   assert.equal(opened.length,0);
   assert.equal(engine.excaliburGrants.has(grant.grantKey),false);
+});
+
+test('night shutdown blocks evaluateEntryChain new attacks and still plans maintenance', async () => {
+  const { sessionShutdownState, sessionIdleMaintenancePlan } = await import('../src/operatorSession.mjs');
+  const engine=Object.create(SagittariusEngine.prototype);
+  engine.settings={sessionShutdownEnabled:true,sessionStopHour:1,sessionStartHour:7,mode:'SIMULATION'};
+  engine.referenceSignalGate=()=>({allowed:true});
+  engine.simulationMutationGate={capture:()=>({epoch:0}),enter:()=>()=>{}};
+  engine.strategy={evaluateDragon:async()=>['dragon'],evaluateFeeders:async()=>['feeder']};
+  engine.refreshFeederPriorityTickers=async()=>{};
+  engine.evaluateNewGenerationOpportunities=async()=>{throw new Error('new attacks must not run during shutdown');};
+  engine.applyResourceGovernance=()=>{engine._maint=true;};
+  engine.db={audit:async()=>{}};
+  const closedAt=Date.parse('2026-09-23T01:15:00Z'); // 03:15 Madrid CEST
+  const state=sessionShutdownState(engine.settings, closedAt);
+  assert.equal(state.shutdown,true);
+  engine.currentOperatorSession=()=>state;
+  engine.runSessionIdleMaintenance=SagittariusEngine.prototype.runSessionIdleMaintenance;
+  const created=await SagittariusEngine.prototype.evaluateEntryChain.call(engine,[],new Map(),new Map());
+  assert.deepEqual(created,[]);
+  assert.equal(engine._maint,true);
+  assert.equal(sessionIdleMaintenancePlan(state).allowProtection,true);
+});
+
+test('daytime Madrid session keeps entries authorized while night window blocks', () => {
+  const settings={sessionShutdownEnabled:true,sessionStopHour:1,sessionStopMinute:0,sessionStartHour:7,sessionStartMinute:0};
+  const night=sessionShutdownState(settings, Date.parse('2026-09-23T01:15:00Z'));
+  const day=sessionShutdownState(settings, Date.parse('2026-09-23T07:32:00Z'));
+  assert.equal(night.shutdown,true);
+  assert.equal(day.shutdown,false);
+  assert.equal(day.wall.hour,9);
+  const retired=gameClockEntryDecision({settings:{gameClockEntryGateEnabled:false,minGameMinutes:30,maxGameMinutes:55},elapsedMinutes:82});
+  assert.equal(retired.ok,true);
+  const gated=gameClockEntryDecision({settings:{gameClockEntryGateEnabled:true,minGameMinutes:30,maxGameMinutes:55},elapsedMinutes:82});
+  assert.equal(gated.ok,false);
+  assert.equal(gated.reason,'maximum_game_time');
 });
