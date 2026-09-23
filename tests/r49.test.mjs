@@ -59,7 +59,7 @@ function engineHarness(rows=[],s=settings()){
 }
 
 test('MW Railway identity and architecture contract are exact',async()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-BOR1-R3-SHARED-ACCOUNT-COVERED-EXIT-2026-09-23');
+  assert.equal(RELEASE,'SAGITTARIUS-SE1-R2-STOP-LOSS-NOTIFY-STARLIGHT-2026-09-23');
   assert.equal(MEGA_WAVE.version,'MEGA-WAVE-MW1-MW2-MW3');assert.equal(MEGA_WAVE.maximumFollowUpAttacks,12);assert.deepEqual([...MEGA_WAVE.downstreamSaints],downstream);
   assert.equal(ATHENA_EXCLAMATION.requiredParentConcept,CRYSTAL_WALL.shadowConceptName);assert.equal(ATHENA_EXCLAMATION.requiredConsecutiveProfitableShadowProofs,3);assert.equal(ATHENA_EXCLAMATION.strategicEntryAuthority,MEGA_WAVE.entryAuthority);
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');assert.equal(GALACTIC_EXPLOSION.sameAttackDuplicatesAllowed,false);
@@ -538,6 +538,28 @@ test('SE1 Starlight executes after parent stop when crash/rebound/ticks qualify 
   db.rows.set('starlight-1',{id:'starlight-1',conceptName:'Crash Recovery Hunter',ticker:parent.ticker,sourceTradeId:parent.id,status:'open'});
   const second=await strategy.executeStarlightExtinction(q(parent.ticker,46,47),parent,authorization,watch);
   assert.equal(second,null);
+});
+
+test('SE1-R2 operator 0/0/0 Starlight qualifies immediately after a stop inside the band',()=>{
+  const s=settings({crashRecoveryMinCrashCents:0,crashRecoveryMinReboundCents:0,crashRecoveryMinUpwardTicks:0,crashRecoveryMinEntryCents:40,crashRecoveryMaxEntryCents:75});
+  const first=megaWaveSaintSignalState('Crash Recovery Hunter',{parentEntryPriceCents:66,parentExitPriceCents:52,peakCents:67,lastBidCents:52,ticker:'SE1-ZERO'},q('SE1-ZERO',61,62),s);
+  assert.equal(first.watch.minCrashCents,0);
+  assert.equal(first.watch.minReboundCents,0);
+  assert.equal(first.watch.minUpwardTicks,0);
+  assert.equal(first.qualified,true,first.reason);
+});
+
+test('SE1-R2 Profit Guard hard-stop notify arms Starlight and keeps the ticker wanted',async()=>{
+  const s=settings({crashRecoveryHunterEnabled:true,crashRecoveryMinCrashCents:0,crashRecoveryMinReboundCents:0,crashRecoveryMinUpwardTicks:0,crashRecoveryMinEntryCents:40,crashRecoveryMaxEntryCents:75});
+  const parent={id:'notify-stop',systemName:s.systemName,ownerId:s.ownerId,conceptName:'Athena Exclamation',ticker:'SE1-NOTIFY',eventTicker:'SE1-NOTIFY',mode:s.mode,status:'closed',remainingCount:0,pnlCents:-18,closeReason:'hard_stop_loss',entryPriceCents:66,exitPriceCents:52,peakPriceCents:67,openedAtMs:1,closedAtMs:2};
+  const h=engineHarness([parent],s);
+  h.e.settings=s;
+  const wanted=[];
+  h.e.market={getQuote:(ticker)=>ticker===parent.ticker?q(parent.ticker,61,62):null,wanted:[],setWanted:(list)=>{wanted.splice(0,wanted.length,...list);}};
+  const armed=await h.e.armStarlightStopLossWatch(parent);
+  assert.equal(armed.status,'ARMED',armed.reason);
+  assert.equal(h.e.starlightWatches.size,1);
+  assert.ok(wanted.includes(parent.ticker));
 });
 
 test('CW ladder Proof-stage settings beat the old shared Crystal Wall crash/rebound/ticks',()=>{

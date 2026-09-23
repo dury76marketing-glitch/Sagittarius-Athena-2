@@ -153,7 +153,7 @@ export const MEGA_WAVE = Object.freeze({
 
 export const STARLIGHT_EXTINCTION = Object.freeze({
   version:'STARLIGHT-EXTINCTION-SE1',
-  policyRevision:'SE1-R1-STOP-LOSS-SAME-COSMOS-REENTRY',
+  policyRevision:'SE1-R2-STOP-LOSS-NOTIFY-AND-ZERO-GEOMETRY',
   conceptName:'Crash Recovery Hunter',
   displayName:'Starlight Extinction',
   role:'same_cosmos_stop_loss_reentry_only',

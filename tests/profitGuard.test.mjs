@@ -229,7 +229,9 @@ test('R61 post-profit handoff: only a fully closed positive Infinity fill notifi
   const loss=guardHarness({bid:20,onPositionClosed:async(entry)=>{lossHanded.push(entry);},entryOverrides:r61FrozenAuroraEntry({infinity:true,count:10})});
   await loss.guard.applyExitFill(loss.row(),{action:'hard_stop',reason:'hard_stop_loss',peakPriceCents:44,stopPriceCents:29},{fillCount:10,fillPriceCents:20,exitFeeCents:20});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(lossHanded.length,0);
+  assert.equal(lossHanded.length,1,'SE1-R2 must notify Starlight on a fully closed hard stop');
+  assert.equal(lossHanded[0].closeReason,'hard_stop_loss');
+  assert.ok(lossHanded[0].pnlCents<0);
 });
 
 test('MW HF6 profitable Athena PRI1-R2 close releases the strategic handoff only after the full durable close',async()=>{
@@ -1538,7 +1540,7 @@ test('R33 Gate 1 PLI1 promotes runner breathing room in contract-cent units only
   assert.equal(recommendProfitRunnerGivebackCents({totalObservations:30,oneTickPullbacks:20,oneTickRecoveries:3,collapseCount:20,avgPostExitRegretRate:0}),2);
 });
 
-test("R38 Gate 1 creation-time snapshot freezes GE1-R2 only on new real Hunters while legacy X1/PRI1 stay compatible",async()=>{const {RELEASE,originalSettings,CANONICAL_NUMERIC_SETTINGS,CANONICAL_BOOLEAN_SETTINGS,sanitizeRuntimeSettings,normalizeStartupExecutionMode}=await import('../src/config.mjs');const D=await import('../src/doctrine.mjs');const {readFile,readdir,stat}=await import('node:fs/promises');const strategy=await readFile(new URL('../src/strategy.mjs',import.meta.url),'utf8');assert.equal(RELEASE,'SAGITTARIUS-BOR1-R3-SHARED-ACCOUNT-COVERED-EXIT-2026-09-23');assert.equal(D.ATOMIC_THUNDER_BOLT.entryAuthority,false);assert.equal(D.ATHENA_COMMANDER.entryDecisionAuthority,true);assert.equal(D.INFINITY_BREAK.authority,'PROFIT_EXIT');assert.equal(D.AURORA_EXECUTION.lossAuthority,'U-SG1');assert.ok(strategy.includes('validateAthenaFireCommand'));});
+test("R38 Gate 1 creation-time snapshot freezes GE1-R2 only on new real Hunters while legacy X1/PRI1 stay compatible",async()=>{const {RELEASE,originalSettings,CANONICAL_NUMERIC_SETTINGS,CANONICAL_BOOLEAN_SETTINGS,sanitizeRuntimeSettings,normalizeStartupExecutionMode}=await import('../src/config.mjs');const D=await import('../src/doctrine.mjs');const {readFile,readdir,stat}=await import('node:fs/promises');const strategy=await readFile(new URL('../src/strategy.mjs',import.meta.url),'utf8');assert.equal(RELEASE,'SAGITTARIUS-SE1-R2-STOP-LOSS-NOTIFY-STARLIGHT-2026-09-23');assert.equal(D.ATOMIC_THUNDER_BOLT.entryAuthority,false);assert.equal(D.ATHENA_COMMANDER.entryDecisionAuthority,true);assert.equal(D.INFINITY_BREAK.authority,'PROFIT_EXIT');assert.equal(D.AURORA_EXECUTION.lossAuthority,'U-SG1');assert.ok(strategy.includes('validateAthenaFireCommand'));});
 
 test('R33 Gate 2 +1c net is CAPITAL_SAFE telemetry only and a normal one-tick pullback cannot scratch the runner',async()=>{
   const h=guardHarness({bid:85,pri1R2Enabled:true}); // 80 entry + 4c fees => +1c net/original.

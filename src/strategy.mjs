@@ -817,10 +817,10 @@ function scarletContinuationAuthorizedMaxEntryCents({handoffAskCents=0,stakeCent
 
 export function saintConfirmationParameters(concept, settings={}){
   const s=settings||{};
-  const pack=(crashKey,reboundKey,tickKey)=>({
-    minCrashCents:Math.max(1,Number(s[crashKey]??15)),
-    minReboundCents:Math.max(1,Number(s[reboundKey]??5)),
-    minUpwardTicks:Math.max(1,Number(s[tickKey]??2)),
+  const pack=(crashKey,reboundKey,tickKey, {allowZero=false}={})=>({
+    minCrashCents:Math.max(allowZero?0:1,Number(s[crashKey]??15)),
+    minReboundCents:Math.max(allowZero?0:1,Number(s[reboundKey]??5)),
+    minUpwardTicks:Math.max(allowZero?0:1,Number(s[tickKey]??2)),
   });
   if(concept==='Sagittarius Justice Arrow')return pack('justiceArrowMinCrashCents','justiceArrowMinReboundCents','justiceArrowMinUpwardTicks');
   if(concept==='Athena Exclamation')return pack('athenaExclamationMinCrashCents','athenaExclamationMinReboundCents','athenaExclamationMinUpwardTicks');
@@ -828,7 +828,7 @@ export function saintConfirmationParameters(concept, settings={}){
   if(concept==='Wave Surfer')return pack('waveMinCrashCents','waveMinReboundCents','waveMinUpwardTicks');
   if(concept==='Lightning Plasma')return pack('lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks');
   if(concept==='Momentum Hunter')return pack('momentumMinCrashCents','momentumMinReboundCents','momentumMinUpwardTicks');
-  if(concept==='Crash Recovery Hunter')return pack('crashRecoveryMinCrashCents','crashRecoveryMinReboundCents','crashRecoveryMinUpwardTicks');
+  if(concept==='Crash Recovery Hunter')return pack('crashRecoveryMinCrashCents','crashRecoveryMinReboundCents','crashRecoveryMinUpwardTicks',{allowZero:true});
   return null;
 }
 

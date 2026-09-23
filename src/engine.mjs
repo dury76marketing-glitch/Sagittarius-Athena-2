@@ -861,7 +861,11 @@ export class SagittariusEngine {
       startedAtMs:Number(durable?.closedAtMs||entry?.closedAtMs||Date.now()),
     });
     stats.armed+=1;stats.lastEvent={status:'ARMED',atMs:Date.now(),parentEntryId:id,ticker,systemName:cosmos,parentConcept:String(durable?.conceptName||entry?.conceptName||'')};
+    if(this.recoveryPriorityTickers instanceof Set)this.recoveryPriorityTickers.add(ticker);
+    if(this.market?.setWanted){const wanted=new Set(this.market?.wanted||[]);wanted.add(ticker);this.market.setWanted([...wanted]);}
     await this.db?.audit?.('info','starlight_stop_loss_watch_armed',{parentEntryId:id,ticker,systemName:cosmos,parentConcept:String(durable?.conceptName||''),closeReason:String(durable?.closeReason||'')}).catch(()=>{});
+    const liveQuote=this.market?.getQuote?.(ticker);
+    if(liveQuote && this.entryEvaluationQueue)this.observeStarlightQuote(liveQuote);
     return{status:'ARMED',grantId:key};
   }
 
@@ -880,6 +884,7 @@ export class SagittariusEngine {
   }
 
   queueStarlightAttempt(grantId){
+    if(!this.entryEvaluationQueue?.enqueue)return false;
     return this.entryEvaluationQueue.enqueue(`starlight-attempt:${grantId}`,()=>this.attemptStarlightExtinction(grantId));
   }
 

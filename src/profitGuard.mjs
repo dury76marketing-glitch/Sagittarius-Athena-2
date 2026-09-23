@@ -1,4 +1,4 @@
-import { FEEDER_CONCEPTS, PORTFOLIO_CONCEPTS, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, stopLossWatchdogThresholdsForStakeCents, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, INFINITY_BREAK, AURORA_EXECUTION, POST_EXIT_RESEARCH, LEGACY_STOP_LOSS_CENTS, SCARLET_NEEDLE, MEGA_WAVE, calculateAuroraSnapshotFromFeeModel, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
+import { FEEDER_CONCEPTS, PORTFOLIO_CONCEPTS, EXECUTABLE_HUNTER_CONCEPTS, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, stopLossWatchdogThresholdsForStakeCents, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, INFINITY_BREAK, AURORA_EXECUTION, POST_EXIT_RESEARCH, LEGACY_STOP_LOSS_CENTS, SCARLET_NEEDLE, MEGA_WAVE, STARLIGHT_EXTINCTION, isStarlightParentStopLoss, calculateAuroraSnapshotFromFeeModel, kalshiGeneralTakerFeeEstimateCents } from './doctrine.mjs';
 import { advanceAthenaExitState, athenaExitTelemetry } from './athenaExit.mjs';
 import { assessAthenaBrain } from './athena.mjs';
 import { classifyDeterministic } from './learning.mjs';
@@ -1598,7 +1598,15 @@ export class ProfitGuard {
   }
 
   shouldNotifyPositionClosed(entry, decision = null) {
-    if (String(entry?.status || '') !== 'closed' || remainingCount(entry) > 1e-9 || !(n(entry?.pnlCents) > 0)) return false;
+    if (String(entry?.status || '') !== 'closed' || remainingCount(entry) > 1e-9) return false;
+    // SE1-R2: Starlight arms from a same-cosmos stop-loss. Those parents are
+    // red by definition. The profitable-only gate below must not swallow them.
+    if (
+      EXECUTABLE_HUNTER_CONCEPTS.has(String(entry?.conceptName || ''))
+      && String(entry?.conceptName || '') !== STARLIGHT_EXTINCTION.conceptName
+      && isStarlightParentStopLoss(entry?.closeReason || decision?.reason)
+    ) return true;
+    if (!(n(entry?.pnlCents) > 0)) return false;
     // MW3 authority is economic, not executor-specific: any durably profitable
     // Athena Exclamation close releases the Saint wave. PRI1-R2, Infinity Break
     // and settlement are alternative profit executors and must converge here.
