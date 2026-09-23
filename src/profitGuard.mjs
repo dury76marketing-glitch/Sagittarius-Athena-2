@@ -556,9 +556,19 @@ export class ProfitGuard {
       const raw=Number(p?.position_fp??p?.position??p?.market_position??0);
       return sum+(Number.isFinite(raw)?Math.abs(raw):0);
     },0);
-    if(brokerCount+1e-9<ownedRemaining)return{ok:false,reason:'broker_below_owned_ledger',brokerCount,ownedRemaining,ownedRows:owned.length,ownedEntries:owned};
-    if(remainingCount(entry)>ownedRemaining+1e-9)return{ok:false,reason:'entry_exceeds_owned_ledger',brokerCount,ownedRemaining,entryRemaining:remainingCount(entry),ownedEntries:owned};
-    return{ok:true,brokerCount,ownedRemaining,ownedRows:owned.length,ownedEntries:owned};
+    const entryRemaining=remainingCount(entry);
+    if(entryRemaining>ownedRemaining+1e-9)return{ok:false,reason:'entry_exceeds_owned_ledger',brokerCount,ownedRemaining,entryRemaining,ownedEntries:owned};
+    // Shared-account / Excalibur case: 12 rooms can post 10 LIVE rows while the
+    // one Kalshi account only filled 9. Blocking every SELL leaves the real 9
+    // stuck. Ticker exit lock serializes sells. Never offer more than brokerCount.
+    if(brokerCount+1e-9<ownedRemaining){
+      const maxSellable=Math.max(0,Math.min(entryRemaining,brokerCount));
+      if(maxSellable>1e-9){
+        return{ok:true,reason:'broker_covers_this_exit_ledger_surplus',brokerCount,ownedRemaining,entryRemaining,maxSellable,ledgerSurplus:ownedRemaining-brokerCount,ownedRows:owned.length,ownedEntries:owned};
+      }
+      return{ok:false,reason:'broker_below_owned_ledger',brokerCount,ownedRemaining,entryRemaining,maxSellable:0,ownedRows:owned.length,ownedEntries:owned};
+    }
+    return{ok:true,brokerCount,ownedRemaining,entryRemaining,maxSellable:entryRemaining,ownedRows:owned.length,ownedEntries:owned};
   }
 
   async recoverHistoricalExitFill(entry, { auditContext='ownership_reconciliation' }={}) {
@@ -3644,7 +3654,7 @@ export class ProfitGuard {
       await this.audit('infinity_break_exit_window_lost',{id:entry.id,ticker:entry.ticker,mode:'LIVE',bidCents:bid,profitFloorCents:exitFloorCents,remaining:remain,targetNetCents:preliminaryInfinityTarget,executableNetCents:preliminaryInfinityNet,executableBidCents:exec?.avgCents??null,lowestConsumedCents:exec?.lowestConsumedCents??null,reason:!exec?.full?'insufficient_full_position_depth':'net_below_threshold'},'warning');
       return{closed:false,pending:false,remaining:remain,skipped:'infinity_break_revalidation_failed'};
     }
-    const submitCount = fullPositionExit && exec?.full && n(exec.filled) + 1e-9 >= remain ? remain : Math.max(0, n(exec?.filled));
+    let submitCount = fullPositionExit && exec?.full && n(exec.filled) + 1e-9 >= remain ? remain : Math.max(0, n(exec?.filled));
     if (submitCount <= 0) {
       if (atomicThunderExit) {
         await this.audit(infinityBreakExit?'infinity_break_exit_waiting_executable_book':'atomic_thunder_exit_waiting_executable_book', { id:entry.id, ticker:entry.ticker, mode:'LIVE', bidCents:bid, profitFloorCents:exitFloorCents, remaining:remain, reason:'no_executable_bid' }, 'warning');
@@ -3694,6 +3704,9 @@ export class ProfitGuard {
         entry=current;
         ownership=await this.liveTickerOwnershipSnapshot(entry);
       }
+    }
+    if(ownership.ok&&ownership.reason==='broker_covers_this_exit_ledger_surplus'){
+      await this.audit('live_exit_ownership_ledger_surplus_capped',{id:entry.id,ticker:entry.ticker,concept:entry.conceptName,reason:ownership.reason,brokerCount:ownership.brokerCount??null,ownedRemaining:ownership.ownedRemaining??null,entryRemaining:remainingCount(entry),maxSellable:ownership.maxSellable??null,ledgerSurplus:ownership.ledgerSurplus??null},'warning');
     }
     if(!ownership.ok){
       await this.audit('live_exit_ownership_reconciliation_blocked',{id:entry.id,ticker:entry.ticker,concept:entry.conceptName,reason:ownership.reason,brokerCount:ownership.brokerCount??null,ownedRemaining:ownership.ownedRemaining??null,entryRemaining:remainingCount(entry),message:ownership.message||null},'error');
@@ -3766,6 +3779,11 @@ export class ProfitGuard {
     const exchangeIndex = routedExchangeIndex!=null&&String(routedExchangeIndex).trim()!==''&&Number.isFinite(Number(routedExchangeIndex))
       ? Math.trunc(Number(routedExchangeIndex))
       : quoteExchangeIndex!=null&&String(quoteExchangeIndex).trim()!==''&&Number.isFinite(Number(quoteExchangeIndex)) ? Math.trunc(Number(quoteExchangeIndex)) : null;
+    if(Number.isFinite(Number(ownership?.maxSellable))) submitCount=Math.max(0,Math.min(submitCount,Number(ownership.maxSellable)));
+    if(submitCount<=0){
+      await this.audit('live_exit_ownership_reconciliation_blocked',{id:entry.id,ticker:entry.ticker,concept:entry.conceptName,reason:ownership?.reason||'broker_below_owned_ledger',brokerCount:ownership?.brokerCount??null,ownedRemaining:ownership?.ownedRemaining??null,entryRemaining:remain},'error');
+      return{closed:false,pending:false,remaining:remain,skipped:ownership?.reason||'broker_below_owned_ledger'};
+    }
     const r = await this.kalshi.placeOrder({ ticker: entry.ticker, action: 'sell', count: submitCount, priceCents: orderLimitCents, clientOrderId: client, exchangeIndex });
     if (r.fillCount > 0) {
       const fillPx=n(r.averageFillPriceCents,bid);

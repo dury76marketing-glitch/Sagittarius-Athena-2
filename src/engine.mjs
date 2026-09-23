@@ -68,8 +68,8 @@ export const ENTRY_ADMISSION_CONTROL = Object.freeze({
 
 export const BROKER_OWNERSHIP_RECONCILIATION = Object.freeze({
   version:'BOR1',
-  policyRevision:'BOR1-R2-ZERO-INVENTORY-ORPHAN-QUARANTINE',
-  role:'owner_wide_exact_exit_receipt_recovery_plus_zero_inventory_orphan_quarantine_without_pnl_inference',
+  policyRevision:'BOR1-R3-SHARED-ACCOUNT-COVERED-EXIT',
+  role:'owner_wide_exact_exit_receipt_recovery_plus_zero_inventory_orphan_quarantine_plus_shared_account_covered_exit',
 });
 
 const REFERENCE_SIGNAL_SWEEP_MS = DATABASE_PRESSURE_ISOLATION.referenceSignalSweepMs;
@@ -4196,11 +4196,19 @@ export class SagittariusEngine {
           entriesByTicker.get(e.ticker).push(e);
         }
         const shortages=[];
+        const surplusWarnings=[];
         for(const [ticker,required] of requiredByTicker){
           const broker=byTicker.get(ticker)||0;
-          if(broker+1e-6<required){ok=false;shortages.push({ticker,required,broker,entries:entriesByTicker.get(ticker)||[]});}
+          if(broker+1e-6<required){
+            if(broker>1e-6){
+              surplusWarnings.push({ticker,required,broker,entries:entriesByTicker.get(ticker)||[]});
+            }else{
+              ok=false;
+              shortages.push({ticker,required,broker,entries:entriesByTicker.get(ticker)||[]});
+            }
+          }
         }
-        return{ok,byTicker,requiredByTicker,shortages};
+        return{ok,byTicker,requiredByTicker,shortages,surplusWarnings};
       };
 
       let summary=summarize(positions,owned);
@@ -4228,6 +4236,9 @@ export class SagittariusEngine {
 
       if(summary.shortages.length){
         await this.db.audit('error','live_broker_ownership_reconciliation_unresolved',{policyRevision:BROKER_OWNERSHIP_RECONCILIATION.policyRevision,shortages:summary.shortages.map((x)=>({ticker:x.ticker,brokerCount:x.broker,ownedRemaining:x.required,ownedRows:x.entries.length}))}).catch(()=>{});
+      }
+      if((summary.surplusWarnings||[]).length){
+        await this.db.audit('warning','live_broker_ownership_ledger_surplus',{policyRevision:BROKER_OWNERSHIP_RECONCILIATION.policyRevision,warnings:summary.surplusWarnings.map((x)=>({ticker:x.ticker,brokerCount:x.broker,ownedRemaining:x.required,ownedRows:x.entries.length}))}).catch(()=>{});
       }
       this.health.reconciliationOk=summary.ok;
       this.recomputeHealth();

@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-OS1-MADRID-SESSION-GAME-CLOCK-GATE-2026-09-23';
+export const RELEASE = 'SAGITTARIUS-BOR1-R3-SHARED-ACCOUNT-COVERED-EXIT-2026-09-23';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),

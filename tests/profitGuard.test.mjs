@@ -1538,7 +1538,7 @@ test('R33 Gate 1 PLI1 promotes runner breathing room in contract-cent units only
   assert.equal(recommendProfitRunnerGivebackCents({totalObservations:30,oneTickPullbacks:20,oneTickRecoveries:3,collapseCount:20,avgPostExitRegretRate:0}),2);
 });
 
-test("R38 Gate 1 creation-time snapshot freezes GE1-R2 only on new real Hunters while legacy X1/PRI1 stay compatible",async()=>{const {RELEASE,originalSettings,CANONICAL_NUMERIC_SETTINGS,CANONICAL_BOOLEAN_SETTINGS,sanitizeRuntimeSettings,normalizeStartupExecutionMode}=await import('../src/config.mjs');const D=await import('../src/doctrine.mjs');const {readFile,readdir,stat}=await import('node:fs/promises');const strategy=await readFile(new URL('../src/strategy.mjs',import.meta.url),'utf8');assert.equal(RELEASE,'SAGITTARIUS-OS1-MADRID-SESSION-GAME-CLOCK-GATE-2026-09-23');assert.equal(D.ATOMIC_THUNDER_BOLT.entryAuthority,false);assert.equal(D.ATHENA_COMMANDER.entryDecisionAuthority,true);assert.equal(D.INFINITY_BREAK.authority,'PROFIT_EXIT');assert.equal(D.AURORA_EXECUTION.lossAuthority,'U-SG1');assert.ok(strategy.includes('validateAthenaFireCommand'));});
+test("R38 Gate 1 creation-time snapshot freezes GE1-R2 only on new real Hunters while legacy X1/PRI1 stay compatible",async()=>{const {RELEASE,originalSettings,CANONICAL_NUMERIC_SETTINGS,CANONICAL_BOOLEAN_SETTINGS,sanitizeRuntimeSettings,normalizeStartupExecutionMode}=await import('../src/config.mjs');const D=await import('../src/doctrine.mjs');const {readFile,readdir,stat}=await import('node:fs/promises');const strategy=await readFile(new URL('../src/strategy.mjs',import.meta.url),'utf8');assert.equal(RELEASE,'SAGITTARIUS-BOR1-R3-SHARED-ACCOUNT-COVERED-EXIT-2026-09-23');assert.equal(D.ATOMIC_THUNDER_BOLT.entryAuthority,false);assert.equal(D.ATHENA_COMMANDER.entryDecisionAuthority,true);assert.equal(D.INFINITY_BREAK.authority,'PROFIT_EXIT');assert.equal(D.AURORA_EXECUTION.lossAuthority,'U-SG1');assert.ok(strategy.includes('validateAthenaFireCommand'));});
 
 test('R33 Gate 2 +1c net is CAPITAL_SAFE telemetry only and a normal one-tick pullback cannot scratch the runner',async()=>{
   const h=guardHarness({bid:85,pri1R2Enabled:true}); // 80 entry + 4c fees => +1c net/original.
@@ -3264,4 +3264,40 @@ test('IB1-R2 restart reconciliation preserves committed Infinity economics throu
   const out=await guard.reconcileExistingExitIntent(entry,{action:'infinity_break',reason:'infinity_break',infinityBreak:INFINITY_BREAK.version,peakPriceCents:92,stopPriceCents:1});
   assert.equal(out.closed,true);const closed=await db.entryById(entry.id);assert.equal(closed.status,'closed');assert.equal(closed.closeReason,'infinity_break');
   assert.equal(closed.profitGuardState.phase,'INFINITY_BREAK_EXIT_FILLED');assert.equal(closed.profitGuardState.targetNetCents,10);assert.equal(closed.profitGuardState.executableNetCents,29);assert.equal(closed.profitGuardState.lowestConsumedCents,87);assert.equal(closed.profitGuardState.exitOrderId,'ib-r2-restart-fill');assert.ok(closed.profitGuardState.realizedNetCents>0);
+});
+
+test('BOR1-R3 shared-account surplus still authorizes a capped live exit', async () => {
+  const ticker='KXITFMATCH-26SEP23IAKWAL-WAL';
+  const rows=[
+    {id:'ghost',ticker,conceptName:'Athena Exclamation',ownerId:'sagittarius-main',mode:'LIVE',status:'open',count:1,remainingCount:1},
+    {id:'real',ticker,conceptName:'Athena Exclamation',ownerId:'sagittarius-main',mode:'LIVE',status:'open',count:1,remainingCount:1},
+  ];
+  // 10 ledger vs 9 broker reproduction at smaller scale: 2 vs 1
+  for(let i=0;i<8;i+=1) rows.push({id:`r${i}`,ticker,conceptName:'Scarlet Needle',ownerId:'sagittarius-main',mode:'LIVE',status:'open',count:1,remainingCount:1});
+  const db={
+    async liveOpenHunterEntries(){return rows;},
+    async audit(){},
+    async updateEntry(){},
+    async acquireHunterTickerLock(){return async()=>{};},
+  };
+  const kalshi={getPositions:async()=>[{ticker,position_fp:9}]};
+  const guard=new ProfitGuard({db,kalshi,market:{},learning:{},getSettings:()=>({mode:'LIVE',ownerId:'sagittarius-main',systemName:'LIBRA'})});
+  const snap=await guard.liveTickerOwnershipSnapshot(rows[1]);
+  assert.equal(snap.ok,true);
+  assert.equal(snap.reason,'broker_covers_this_exit_ledger_surplus');
+  assert.equal(snap.brokerCount,9);
+  assert.equal(snap.ownedRemaining,10);
+  assert.equal(snap.maxSellable,1);
+});
+
+test('BOR1-R3 still blocks a live exit when the broker is at zero against a live ledger', async () => {
+  const ticker='KXITFMATCH-26SEP23IAKWAL-WAL';
+  const entry={id:'ghost',ticker,conceptName:'Athena Exclamation',ownerId:'sagittarius-main',mode:'LIVE',status:'open',count:1,remainingCount:1};
+  const db={async liveOpenHunterEntries(){return [entry];},async audit(){}};
+  const kalshi={getPositions:async()=>[{ticker,position_fp:0}]};
+  const guard=new ProfitGuard({db,kalshi,market:{},learning:{},getSettings:()=>({mode:'LIVE',ownerId:'sagittarius-main',systemName:'LIBRA'})});
+  const snap=await guard.liveTickerOwnershipSnapshot(entry);
+  assert.equal(snap.ok,false);
+  assert.equal(snap.reason,'broker_below_owned_ledger');
+  assert.equal(snap.maxSellable,0);
 });
