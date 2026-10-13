@@ -6,7 +6,7 @@ import { CI1_WALL_CLONE, ATHENA_EXCLAMATION, COSMO_ROUTING } from '../src/doctri
 import { independentCi1SignalState, hunterEntryEnvelope, attackConfiguredStakeCents, StrategyEngine, ci1EpisodeConsumptionKey, ci1EpisodeEntryConsumes } from '../src/strategy.mjs';
 
 test('CI1-R1 doctrine makes every saint a Wall-style first entry including Athena Exclamation',()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA1-R2-CLONE-PATH-CLOSED-2026-10-13');
+  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA1-R3-RAILWAY-BUILD-2026-10-13');
   assert.equal(CI1_WALL_CLONE.policyRevision,'CI1-R1-WALL-CLONE-ALL-SAINTS');
   assert.equal(CI1_WALL_CLONE.stakeCents,500);
   assert.equal(CI1_WALL_CLONE.minEntryCents,90);

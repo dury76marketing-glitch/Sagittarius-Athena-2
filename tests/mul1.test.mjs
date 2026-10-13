@@ -74,7 +74,7 @@ function fire(q,concept='Momentum Hunter'){
 }
 
 test('MUL1 factory Multiply clamps 0→1, 99→20',()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA1-R2-CLONE-PATH-CLOSED-2026-10-13');
+  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA1-R3-RAILWAY-BUILD-2026-10-13');
   const s=sanitizeRuntimeSettings({...originalSettings(),momentumHunterMultiply:0,scarletNeedleMultiply:99});
   assert.equal(s.momentumHunterMultiply,1);
   assert.equal(s.scarletNeedleMultiply,20);

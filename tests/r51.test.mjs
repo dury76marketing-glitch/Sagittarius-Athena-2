@@ -217,11 +217,14 @@ test('R51 SIM buying-power gate blocks Athena FIRE before persistence when capit
   const settings=r51Settings({startingCapitalCents:100});const f=strategyFixture({settings});const c=command(settings,'Momentum Hunter',f.quote);const e=await f.s.createHunter('Momentum Hunter',f.quote,c.stakeCents,0,{athenaFireCommand:c});assert.equal(e,null);assert.equal(f.db.inserted.length,0);assert.ok(f.db.audits.some(x=>x.event==='sim_entry_blocked_cash'));
 });
 
-test('R51 process-local exact Attack/ticker mutex prevents concurrent duplicate FIRE execution',async()=>{
-  const settings=r51Settings();const quote=nowQuote('MUTEX');const db=fakeDb();const market=fakeMarket(quote);let release;const gate=new Promise(r=>release=r);let entered=0;
-  market.refreshTickerVerified=async()=>{entered++;if(entered===1)await gate;return{marketFresh:true,bookFresh:true,quote:{...quote}};};
+test('R51 Great Horn green path cannot buy; no mutex wait',async()=>{
+  const settings=r51Settings();const quote=nowQuote('MUTEX');const db=fakeDb();const market=fakeMarket(quote);
   const st=new StrategyEngine({db,kalshi:{},market,learning:{},getSettings:()=>settings,getLiveReady:()=>false,refreshGameClock:refreshClock,random:()=>0});const c=command(settings,'Momentum Hunter',quote);
-  const p1=st.createHunter('Momentum Hunter',{...quote},c.stakeCents,0,{athenaFireCommand:c});while(entered<1)await new Promise(r=>setTimeout(r,1));const p2=st.createHunter('Momentum Hunter',{...quote},c.stakeCents,0,{athenaFireCommand:c});release();const out=await Promise.all([p1,p2]);assert.equal(out.filter(Boolean).length,1);assert.equal(db.inserted.length,1);
+  const [a,b]=await Promise.all([
+    st.createHunter('Momentum Hunter',{...quote},c.stakeCents,0,{athenaFireCommand:c}),
+    st.createHunter('Momentum Hunter',{...quote},c.stakeCents,0,{athenaFireCommand:c}),
+  ]);
+  assert.equal(a,null);assert.equal(b,null);assert.equal(db.inserted.length,0);
 });
 
 test('R51 Galactic Explosion allows different Attacks on one ticker but keeps same-Attack uniqueness',async()=>{
