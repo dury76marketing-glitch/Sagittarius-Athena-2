@@ -2840,6 +2840,7 @@ export class StrategyEngine {
   }
 
   async executeCrystalWallAttack(q, watch = {}) {
+    return null; // SA2-R2 Crystal Wall removed
     const s=this.getSettings();
     if(s.recoveryHunterEnabled!==true)return null;
     const ticker=String(q?.ticker||''),crashEpisodeId=String(watch?.crashEpisodeId||'');
@@ -2946,6 +2947,7 @@ export class StrategyEngine {
   async executeJusticeArrowContinuation() { return null; }
 
   async executeIndependentCi1Attack(concept, q, watch = {}) {
+    return null; // SA2-R2 Wall clone door removed
     const s=this.getSettings();
     if(!CI1_WALL_CLONE.saints.includes(String(concept||'')))return null;
     if(concept==='Recovery Hunter'||concept==='Sagittarius Justice Arrow')return null;

@@ -96,7 +96,7 @@ function momCommand(s,q){
 }
 
 test('GE-R4 doctrine keeps OFF as one-ticker-one-hunter and ON as card-join',()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-SHADOW-LOSS-REAL-CLONES-2026-10-13');
+  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13');
   assert.equal(GALACTIC_EXPLOSION.policyRevision,'GE-R4-OPEN-TICKER-CARD-JOIN');
   assert.equal(GALACTIC_EXPLOSION.disabledLockScope,'exact_ticker');
   assert.equal(GALACTIC_EXPLOSION.enabledLockScope,'exact_ticker_plus_attack_identity');

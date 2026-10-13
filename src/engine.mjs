@@ -1999,6 +1999,7 @@ export class SagittariusEngine {
   }
 
   observeCi1WallCloneQuotes(q, crashState) {
+    return false; // SA2-R2 Wall clone door removed
     const s=this.settings||{};
     if(!q?.ticker)return false;
     if(!(this.ci1CloneWatches instanceof Map))this.ci1CloneWatches=new Map();

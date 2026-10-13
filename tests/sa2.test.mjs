@@ -61,3 +61,9 @@ test('SA2 a shadow win is not a signal', () => {
   win.closeReason = 'infinity_break';
   assert.equal(e.armStarlightRecovery(win), false);
 });
+
+test('SA2-R2 Wall clone and Crystal Wall cannot open', async () => {
+  const s = new StrategyEngine({ db:{audit:async()=>{}}, kalshi:{}, market:{}, learning:{}, getSettings:settings, getLiveReady:()=>true });
+  assert.equal(await s.executeCrystalWallAttack({ticker:'T', yesAsk:40}, {crashEpisodeId:'e1', authorizationId:'w1', ticker:'T'}), null);
+  assert.equal(await s.executeIndependentCi1Attack('Scarlet Needle', {ticker:'T', yesAsk:40}, {crashEpisodeId:'e1', authorizationId:'c1', ticker:'T'}), null);
+});

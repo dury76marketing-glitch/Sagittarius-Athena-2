@@ -4,7 +4,7 @@ import { rankAthenaAttacks } from '../src/athena.mjs';
 import { RELEASE } from '../src/config.mjs';
 
 test('SE2 Starlight does not rank on a normal bolt without a stop-loss recovery context', () => {
-  assert.equal(RELEASE, 'SAGITTARIUS-AU2-SA2-SHADOW-LOSS-REAL-CLONES-2026-10-13');
+  assert.equal(RELEASE, 'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13');
   const bolt = {
     features: {
       eligibleAttacks: [

@@ -37,4 +37,4 @@ collect('src');collect('public');
 files.push('package.json','package-lock.json','railway.json');
 const hash=createHash('sha256');
 for(const file of files.sort()){hash.update(file);hash.update('\0');hash.update(readFileSync(join(root,file)));hash.update('\0');}
-export const BUILD_INFO=Object.freeze({id:'SAGITTARIUS-AU2-SA2-SHADOW-LOSS-REAL-CLONES-2026-10-13',sourceSha256:hash.digest('hex'),railwayCommit:process.env.RAILWAY_GIT_COMMIT_SHA||null});
+export const BUILD_INFO=Object.freeze({id:'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13',sourceSha256:hash.digest('hex'),railwayCommit:process.env.RAILWAY_GIT_COMMIT_SHA||null});

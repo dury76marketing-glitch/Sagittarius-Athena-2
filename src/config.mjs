@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-AU2-SA2-SHADOW-LOSS-REAL-CLONES-2026-10-13';
+export const RELEASE = 'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -709,6 +709,8 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.infinityBreakConfirmationWindowMs = Math.max(250, Math.floor(Number(out.infinityBreakConfirmationWindowMs) || 250));
   out.auroraDamageControlPercent = Math.max(1, Math.min(95, Number(out.auroraDamageControlPercent) || 45));
   out.crashRecoveryHunterAuroraDamageControlPercent = Math.max(1, Math.min(95, Number(out.crashRecoveryHunterAuroraDamageControlPercent) || out.auroraDamageControlPercent || 45));
+  out.athenaExclamationEnabled = false;
+  out.recoveryHunterEnabled = false;
   out.momentumHunterAuroraDamageControlPercent = Math.max(1, Math.min(95, Number(out.momentumHunterAuroraDamageControlPercent) || out.auroraDamageControlPercent || 45));
   out.lightningPlasmaAuroraDamageControlPercent = Math.max(1, Math.min(95, Number(out.lightningPlasmaAuroraDamageControlPercent) || out.auroraDamageControlPercent || 45));
   out.scarletNeedleInfinityNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.scarletNeedleInfinityNetPerOriginalContractCents) || 1));
