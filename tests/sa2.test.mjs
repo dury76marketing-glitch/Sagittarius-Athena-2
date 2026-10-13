@@ -67,3 +67,11 @@ test('SA2-R2 Wall clone and Crystal Wall cannot open', async () => {
   assert.equal(await s.executeCrystalWallAttack({ticker:'T', yesAsk:40}, {crashEpisodeId:'e1', authorizationId:'w1', ticker:'T'}), null);
   assert.equal(await s.executeIndependentCi1Attack('Scarlet Needle', {ticker:'T', yesAsk:40}, {crashEpisodeId:'e1', authorizationId:'c1', ticker:'T'}), null);
 });
+
+import { readFileSync } from 'node:fs';
+test('SA2-R3 Horn and Plasma cards have the same Link button as Starlight', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  for (const key of ['crashRecoveryHunterLinkEnabled','momentumHunterLinkEnabled','lightningPlasmaLinkEnabled']) {
+    assert.ok(app.includes(key), key);
+  }
+});

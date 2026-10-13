@@ -100,7 +100,7 @@ async function commander(s=settings(),db=memoryDb()){
 
 // Doctrine / settings contract.
 test('R60 identity freezes the simplified Cosmos GREEN command chain',()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13');
+  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-R3-CLONE-LINK-BUTTONS-2026-10-13');
   assert.equal(COSMO_SHADOW_TRADING.brokerOrderAuthority,false);assert.equal(COSMO_SHADOW_TRADING.portfolioCapitalAuthority,false);assert.equal(COSMO_SHADOW_TRADING.oneBoltPerShadowTrade,true);
   assert.equal(ATOMIC_THUNDER_BOLT.authority,'SIGNAL_ONLY');assert.equal(ATOMIC_THUNDER_BOLT.entryAuthority,false);assert.equal(ATOMIC_THUNDER_BOLT.orderAuthority,false);
   assert.equal(ATOMIC_THUNDER_PATTERN_GUARDIAN.authority,'RESEARCH_ONLY');assert.equal(ARAYASHIKI.authority,'RESEARCH_ONLY');

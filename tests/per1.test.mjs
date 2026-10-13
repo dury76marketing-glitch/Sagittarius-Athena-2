@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { originalSettings, freshInstallSettings, sanitizeRuntimeSettings, RELEASE } from '../src/config.mjs';
 
 test('PER1 factory saint card is the 2026-10-06 confirmed card',()=>{
-  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-R2-ATHENA-WALL-REMOVED-2026-10-13');
+  assert.equal(RELEASE,'SAGITTARIUS-AU2-SA2-R3-CLONE-LINK-BUTTONS-2026-10-13');
   const s=freshInstallSettings();
   const expected = {
     momentumMinEntryCents:74,momentumMaxEntryCents:88,
