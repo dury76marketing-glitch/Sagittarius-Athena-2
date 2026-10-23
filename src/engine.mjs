@@ -1,3 +1,4 @@
+import {MemoryTelemetry,MEMORY_REPAIR_VERSION} from './runtimeMemory.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_VERSION} from './athenaStarlightTrigger.mjs';
 import {BUILD_INFO} from './authority.mjs';
 import {STARLIGHT_SHADOW_VERSION} from './shadowStarlight.mjs';
@@ -1748,12 +1749,51 @@ export class SagittariusEngine {
   // losing the operator-required tick count when PostgreSQL commits were slow.
   // Persist each bounded, ordered batch as ONE revisioned geometry update;
   // final execution still revalidates only the newest committed fresh quote.
-  async observeStarlightRecoveryQuote(q){
+  // OOM1: quote callbacks must not await an already-running watch task.
+  // One worker owns each watch; following quotes append bounded evidence,
+  // without building a new Promise.all/reaction graph for every market tick.
+  bufferStarlightRecoveryQuote(id,q){
+    const pending=this.starlightRecoveryPendingQuotes.get(id)||[],last=pending.at(-1);
+    const terminal=Boolean(q.result)||['finalized','settled','closed','determined'].includes(String(q.status||q.liveStatus||'').toLowerCase());
+    const order=last?starlightRecoveryQuoteOrder({lastQuoteAtMs:Number(last.quoteAtMs||last.updatedAtMs||last.quoteObservation?.observedAtMs||0),lastQuoteEpoch:String(last.quoteObservation?.epoch||''),lastQuoteRevision:Number(last.quoteObservation?.revision||0)},q):1;
+    if(last&&order<=0&&!terminal){this.starlightRecoveryStats.pendingQuoteReorders=(this.starlightRecoveryStats.pendingQuoteReorders||0)+1;return false;}
+    // Exact fields consumed by the ORIGINAL recovery reducer and ordering check.
+    const compact={};for(const key of ['ticker','yesBid','yesAsk','status','liveStatus','result','quoteAtMs','updatedAtMs','bookInvalid'])compact[key]=q[key];
+    compact.quoteObservation=q.quoteObservation?{...q.quoteObservation}:null;
+    pending.push(compact);
+    if(pending.length>128){pending.shift();this.starlightRecoveryStats.pendingQuoteOverflows=(this.starlightRecoveryStats.pendingQuoteOverflows||0)+1;}
+    this.starlightRecoveryPendingQuotes.set(id,pending);return true;
+  }
+
+  enqueueStarlightRecoveryQuote(q){
+    if(!q?.ticker||this.settings?.crashRecoveryHunterEnabled!==true)return false;
+    this.starlightRecoveryRuntime();
+    const terminal=Boolean(q.result)||['finalized','settled','closed','determined'].includes(String(q.status||q.liveStatus||'').toLowerCase());
+    const link=this.settings.crashRecoveryHunterLinkEnabled===true;
+    this.starlightTerminalQuoteJobs||=new Map();
+    let accepted=false;
+    for(const [id,w] of this.starlightRecoveryWatches){
+      if(String(w.ticker)!==String(q.ticker)||!this.starlightScopeMatches(w)||['CONSUMED','EXPIRED','BLOCKED'].includes(String(w.status)))continue;
+      if(link&&!terminal){if(['ARMED','WATCHING'].includes(String(w.status)))this.scheduleStarlightLink(id);continue;}
+      const jobs=link?this.starlightTerminalQuoteJobs:this.starlightRecoveryQuoteJobs;
+      if(jobs.has(id)){if(!link)this.bufferStarlightRecoveryQuote(id,q);accepted=true;continue;}
+      const task=this.observeStarlightRecoveryQuote(q,{onlyId:id});
+      if(link)jobs.set(id,task);
+      // One error observer per WORKER, not per incoming quote.
+      void task.catch(error=>{this.starlightRecoveryStats.lastError=String(error?.message||error).slice(0,500);
+        return this.db?.audit?.('error','starlight_quote_worker_failed',{id,message:this.starlightRecoveryStats.lastError}).catch?.(()=>{});
+      }).finally(()=>{if(link&&jobs.get(id)===task)jobs.delete(id);});
+      accepted=true;
+    }
+    return accepted;
+  }
+
+  async observeStarlightRecoveryQuote(q,{onlyId=null}={}){
     if(this.settings?.crashRecoveryHunterLinkEnabled===true){
       const ticker=String(q?.ticker||'');
       const terminal=Boolean(q?.result)||['finalized','settled','closed','determined'].includes(String(q?.status||q?.liveStatus||'').toLowerCase());
       for(const watch of [...(this.starlightRecoveryWatches?.values?.()||[])]){
-        if(String(watch.ticker)!==ticker||!this.starlightScopeMatches(watch))continue;
+        if((onlyId&&String(watch.authorizationId)!==String(onlyId))||String(watch.ticker)!==ticker||!this.starlightScopeMatches(watch))continue;
         if(terminal && !['CONSUMED','BLOCKED','EXPIRED'].includes(String(watch.status))){
           const blocked={...watch,status:'BLOCKED',terminalReason:'market_finalized',terminalAtMs:Date.now(),lastAttemptReason:'market_finalized'};
           if(typeof this.db?.updateStarlightWatch==='function' && Number(watch.revision)>0){
@@ -1772,34 +1812,14 @@ export class SagittariusEngine {
     this.starlightRecoveryRuntime();
     const ticker=String(q.ticker);
     const ids=[...this.starlightRecoveryWatches.values()]
-      .filter(w=>String(w.ticker)===ticker&&this.starlightScopeMatches(w)
+      .filter(w=>(!onlyId||String(w.authorizationId)===String(onlyId))&&String(w.ticker)===ticker&&this.starlightScopeMatches(w)
         &&!['CONSUMED','EXPIRED','BLOCKED'].includes(String(w.status))
         &&(w.status!=='EXECUTING'||(w.virtualGroupVersion===STARLIGHT_SHADOW_VERSION&&!this.starlightRecoveryInFlight.has(w.authorizationId))))
       .map(w=>String(w.authorizationId));
     if(!ids.length)return false;
     const cap=128;
     await Promise.all(ids.map(async id=>{
-      const pending=this.starlightRecoveryPendingQuotes.get(id)||[];
-      const last=pending[pending.length-1];
-      // A delayed REST update must never replace a newer uncommitted WS quote.
-      const terminal=Boolean(q.result)||['finalized','settled','closed','determined'].includes(String(q.status||q.liveStatus||'').toLowerCase());
-      const pendingOrder=last?starlightRecoveryQuoteOrder({
-        lastQuoteAtMs:Number(last.quoteAtMs||last.updatedAtMs||last.quoteObservation?.observedAtMs||0),
-        lastQuoteEpoch:String(last.quoteObservation?.epoch||''),
-        lastQuoteRevision:Number(last.quoteObservation?.revision||0),
-      },q):1;
-      if(last && pendingOrder<=0 && !terminal){
-        this.starlightRecoveryStats.pendingQuoteReorders=(this.starlightRecoveryStats.pendingQuoteReorders||0)+1;
-        return;
-      }
-      pending.push(q);
-      if(pending.length>cap){
-        // Explicit, bounded overload: do not invent ticks. Retain the most
-        // recent evidence and expose any loss to operator diagnostics.
-        pending.shift();
-        this.starlightRecoveryStats.pendingQuoteOverflows=(this.starlightRecoveryStats.pendingQuoteOverflows||0)+1;
-      }
-      this.starlightRecoveryPendingQuotes.set(id,pending);
+      if(!this.bufferStarlightRecoveryQuote(id,q))return;
       if(this.starlightRecoveryQuoteJobs.has(id))return this.starlightRecoveryQuoteJobs.get(id);
       const task=(async()=>{
         const arm=this.starlightRecoveryArmWrites.get(id);
@@ -1883,7 +1903,7 @@ export class SagittariusEngine {
         const trailing=this.starlightRecoveryPendingQuotes.get(id);
         if(trailing?.length){
           this.starlightRecoveryPendingQuotes.delete(id);
-          for(const item of trailing)await this.observeStarlightRecoveryQuote(item);
+          for(const item of trailing)await this.observeStarlightRecoveryQuote(item,{onlyId:id});
         }
       }
     }));
@@ -2125,7 +2145,7 @@ export class SagittariusEngine {
     const signal=starlightRecoverySignalState(watch,quote,s,Date.now());
     if(!signal.qualified){
       if(signal.reason==='unpersisted_price_change')
-        void this.observeStarlightRecoveryQuote(quote).catch(error=>this.db?.audit?.('error','starlight_refresh_persist_failed',{id,message:String(error?.message||error)}).catch?.(()=>{}));
+        this.enqueueStarlightRecoveryQuote(quote);
       return {status:'WATCHING',reason:signal.reason};
     }
     // The DB claim is a CAS. Only one worker can enter EXECUTING, regardless
@@ -2788,7 +2808,7 @@ export class SagittariusEngine {
         // SE2-R6: this is an independent post-stop-loss watcher, not a
         // subscriber to CI1 crash-learning admissibility. CI1 may be absent,
         // stale, or resetting while Starlight still must observe the quote.
-        if(q?.ticker)void this.observeStarlightRecoveryQuote(q).catch((error)=>this.db?.audit?.('error','starlight_quote_error',{ticker:q.ticker,message:String(error?.message||error)}).catch?.(()=>{}));
+        if(q?.ticker)this.enqueueStarlightRecoveryQuote(q);
         // R59/CI1-F1: update causal crash state before the quote is allowed to
         // wake Atomic Thunder/A8. R58 queued Athena first and only then updated
         // CI1, which let a fresh market quote race a stale crash-state snapshot.
@@ -4521,8 +4541,7 @@ export class SagittariusEngine {
     // full tracker-history JSON is unnecessary here. Legacy test adapters that
     // lack gameClockStates keep the old fallback semantics on a bounded set.
     const oldRows = typeof this.db?.gameClockStates==='function'?[]:await this.db.trackers(this.settings.systemName,100);
-    const open = await this.db.openEntries(this.settings.systemName);
-    const entered = new Set(open.map((e) => e.ticker));
+    const entered = new Set(await this.openMemoryPriorityTickers());
     const recoveryRequired = new Set((additionalRequiredTickers || []).map(String).filter(Boolean));
     const requiredTickers = new Set([...entered, ...recoveryRequired]);
     const bands = [];
@@ -4737,14 +4756,23 @@ export class SagittariusEngine {
     }finally{try{releaseSimulationWork?.();}catch{}}
   }
 
+  async openMemoryPriorityTickers(){
+    if(typeof this.db.openEntryTickers==='function')return this.db.openEntryTickers(this.settings.systemName);
+    return (await this.db.openEntries(this.settings.systemName)).map(x=>x.ticker);
+  }
+  async openMemoryHunterCount(){
+    if(typeof this.db.openHunterCount==='function')return this.db.openHunterCount(this.settings.systemName);
+    return (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter(x=>PORTFOLIO_CONCEPTS.has(x.conceptName)).length;
+  }
+
   async fullScan() {
     const start = Date.now();
     this.speed = { ...this.speed, mode: 'fullScan', lastLoopMs: start, checksCompleted: 0, closedThisLoop: 0, fetchFailures: 0 };
     try {
-      const open = await this.db.openEntries(this.settings.systemName);
+      const openTickers = await this.openMemoryPriorityTickers();
       await this.refreshRecoveryPriorityTickers();
       this.refreshCrashPriorityTickers();
-      const priority = [...new Set([...open.map((x) => x.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers,...(this.lightningPriorityTickers?.keys?.()||[])])];
+      const priority = [...new Set([...openTickers, ...this.recoveryPriorityTickers, ...this.crashPriorityTickers,...(this.lightningPriorityTickers?.keys?.()||[])])];
       const markets = await this.market.discover(priority);
       for (const q of markets) if (!q.quoteAtMs) q.quoteAtMs = Number(q.updatedAtMs || 0) || Date.now();
       this.lastScanMarkets = markets;
@@ -4768,9 +4796,9 @@ export class SagittariusEngine {
       // Recovery is a rescue path, so it gets first claim on capacity/cash.
       // Protection runs before all new exposure; newly stopped sources are then
       // added to the recovery-priority set and evaluated before Momentum/Wave.
-      const before = (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName)).length;
+      const before = await this.openMemoryHunterCount();
       await this.runProtectionSweep('full_scan');
-      const after = (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName)).length;
+      const after = await this.openMemoryHunterCount();
       this.speed.closedThisLoop = Math.max(0, before - after);
       await this.refreshRecoveryPriorityTickers();
       // Independent SE2-R9 recovery maintenance runs on dedicated bounded
@@ -4821,10 +4849,10 @@ export class SagittariusEngine {
       try {
         if (first) {
           const trackers = await this.db.trackers(this.settings.systemName, 500);
-          const openEntries = await this.db.openEntries(this.settings.systemName);
+          const openTickers = await this.openMemoryPriorityTickers();
           await this.refreshRecoveryPriorityTickers();
           this.refreshCrashPriorityTickers();
-          const requiredTickers = new Set([...openEntries.map((e) => e.ticker), ...this.recoveryPriorityTickers, ...this.crashPriorityTickers]);
+          const requiredTickers = new Set([...openTickers, ...this.recoveryPriorityTickers, ...this.crashPriorityTickers]);
           const requiredTrackers = trackers.filter((tr) => requiredTickers.has(tr.ticker));
           const optionalTrackers = trackers.filter((tr) => !requiredTickers.has(tr.ticker)).slice(0, Math.max(0, 50 - requiredTrackers.length));
           const activeTrackers = [...requiredTrackers, ...optionalTrackers];
@@ -4846,9 +4874,9 @@ export class SagittariusEngine {
           await this.evaluateEntryChain(marketList, trackerMap, map);
           first = false;
         }
-        const before = (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName)).length;
+        const before = await this.openMemoryHunterCount();
         await this.runProtectionSweep('fast_phase');
-        const after = (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName)).length;
+        const after = await this.openMemoryHunterCount();
         closed += Math.max(0, before - after);
         // A new stop-loss can arm mid-cycle. Recovery has a bounded independent
         // REST/READY wakeup, rather than waiting for another 5-minute discovery.
@@ -5117,6 +5145,20 @@ export class SagittariusEngine {
     let marketMaintenance=null;
     try{marketMaintenance=this.market?.maintenance?.({now:at,pressureState:next})||null;}catch(error){marketMaintenance={error:String(error?.message||error)};}
     if(this.resourceResearchDeferred){this.stateSnapshotCache=null;this.stateSnapshotAtMs=0;}
+    this.learning?.retryProfitObservations?.();
+    this.memoryTelemetry ||= new MemoryTelemetry();
+    const sample=this.memoryTelemetry.sample({
+      entryQueue:this.entryEvaluationQueue?.snapshot?.(),protectionQueue:this.quoteProtectionQueue?.snapshot?.(),
+      starlight:{watches:this.starlightRecoveryWatches?.size||0,activeQuoteWorkers:this.starlightRecoveryQuoteJobs?.size||0,
+        pendingQuoteWatches:this.starlightRecoveryPendingQuotes?.size||0,quoteOverflows:this.starlightRecoveryStats?.pendingQuoteOverflows||0},
+      learning:this.learning?.resourceSnapshot?.(),database:this.db?.resourceSnapshot?.(),
+      export:this.ledgerExportMemory||null,
+      market:{quotes:this.market?.quotes?.size||0,books:this.market?.books?.size||0,histories:this.market?.histories?.size||0,wanted:this.market?.wanted?.size||0},
+      protection:this.profitGuard?.resourceSnapshot?.(),
+    });
+    if(!this.memoryLastLogAtMs||at-this.memoryLastLogAtMs>=30000){
+      this.memoryLastLogAtMs=at;console.log(JSON.stringify({event:'sag_memory_sample',...sample}));
+    }
     this.resourceGovernorActions+=1;
     this.resourceGovernorLastActionAtMs=at;
     this.resourceGovernorLastResult={pressureState:next,priorPressureState:prior,rssBytes,crash,phoenix,fsi,marketMaintenance,researchDeferred:this.resourceResearchDeferred,protectedCrashTickers:protectedTickers.size,suppressedDuplicateAction:false,sampledAtMs:at};
@@ -5139,7 +5181,7 @@ export class SagittariusEngine {
     const status=rssBytes>=RUNTIME_RESOURCE_GOVERNOR.criticalRssMiB*MiB?'HIGH':rssBytes>=RUNTIME_RESOURCE_GOVERNOR.warningRssMiB*MiB?'WATCH':'NORMAL';
     const pressureState=this.resourcePressureForRss(rssBytes);
     return {
-      version:RUNTIME_RESOURCE_GOVERNOR.version,status,sampledAtMs:Date.now(),
+      version:RUNTIME_RESOURCE_GOVERNOR.version,memoryRepairVersion:MEMORY_REPAIR_VERSION,memoryTelemetry:this.memoryTelemetry?.last||null,status,sampledAtMs:Date.now(),
       preferredRssCeilingMiB:RUNTIME_RESOURCE_GOVERNOR.preferredRssCeilingMiB,
       warningRssMiB:RUNTIME_RESOURCE_GOVERNOR.warningRssMiB,
       criticalRssMiB:RUNTIME_RESOURCE_GOVERNOR.criticalRssMiB,hardCeilingMiB:RUNTIME_RESOURCE_GOVERNOR.hardCeilingMiB,
@@ -6227,6 +6269,7 @@ export class SagittariusEngine {
     this.stopStarlightRecoveryMaintenance();
     if(this.resourceGovernorTimer)clearInterval(this.resourceGovernorTimer);
     this.resourceGovernorTimer=null;
+    this.memoryTelemetry?.close?.();
     for (const timer of this.quoteProtectionTimers.values()) clearTimeout(timer);
     this.quoteProtectionTimers.clear();
     if (this.goldenEyeTimer) clearTimeout(this.goldenEyeTimer);
@@ -6257,6 +6300,7 @@ export class SagittariusEngine {
     // before closing PostgreSQL; shutdown can never wait indefinitely on
     // learning I/O.
     await this.profitGuard?.flushProfitLearningQueues?.(2000).catch(()=>false);
+    await this.learning?.flushProfitProfileRebuild?.(2000).catch(()=>false);
     await this.profitGuard?.flushPostExitPersistence?.(2000).catch(()=>false);
     await this.feederSignalIntel?.flush?.(2000).catch(()=>false);
     await this.learning?.flushCrashPersistence?.(2000).catch(()=>false);

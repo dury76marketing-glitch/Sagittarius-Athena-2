@@ -20,6 +20,8 @@ export const TRADING_LOG_COLLECTION_TIMEOUT_MS=5_000;
 export const EXPORT_FILE_LIMIT_BYTES=1_000_000;
 export const EXPORT_PART_MAX_BYTES=999_999;
 export const EXPORT_PACKAGE_MAX_BYTES=1_000_000;
+// Diagnostics may refuse an oversized window; trading rows remain untouched.
+export const LEDGER_EXPORT_MEMORY_MAX_BYTES=64*1024*1024;
 export const LEDGER_EXPORT_SCHEMA='LEDGER-EXPORT-V3-COMBINED-EXECUTION';
 const EXPORT_COUNTING_RULES='Each retained sag_entries row is one ledger record. Rejected and unfilled intents are not open positions. A clone group is the shared parent or crash episode, not an independent event. Multiply does not divide counts. Dashboard closed table is the latest 60 rows only and is not the ledger.';
 
@@ -168,13 +170,20 @@ export function reconcileLedger(records){
     positions:records.length,confirmedPositions:open+closed,cloneGroups:groups.size,marketAttackEvents:events.size,byAttack:attacks,countingRules:EXPORT_COUNTING_RULES};
 }
 
+export function compactLedgerExportRecord(row,snapshotCutoffMs){
+  // Raw proof/book trees have never been included by this exporter. Project
+  // immediately after each DB page, before retaining the resumable job.
+  const f=frozenSnapshot(row.entryConfig||{});
+  return {memoryProjectionVersion:'OOM1',record:projectLedgerRecord(row,snapshotCutoffMs),frozenId:f.id,frozen:f.snap};
+}
+
 export function buildLedgerExportPackage({records,meta,maxBytes=EXPORT_PART_MAX_BYTES}){
   const cap=Math.max(1000,Math.min(EXPORT_PART_MAX_BYTES,Math.floor(Number(maxBytes)||EXPORT_PART_MAX_BYTES)));
   if(cap>=EXPORT_FILE_LIMIT_BYTES)throw new Error('export_cap_must_be_below_1000000');
   const cutoff=Number(meta.snapshotCutoffMs)||0;
-  const projected=records.map((r)=>projectLedgerRecord(r,cutoff)).filter((r)=>r.includedInSnapshot);
+  const projected=records.map(r=>r.memoryProjectionVersion==='OOM1'?r.record:projectLedgerRecord(r,cutoff)).filter(r=>r.includedInSnapshot);
   const snaps=new Map();
-  for(const raw of records){const f=frozenSnapshot(raw.entryConfig||{});if(!snaps.has(f.id))snaps.set(f.id,f.snap);}
+  for(const raw of records){const f=raw.memoryProjectionVersion==='OOM1'?{id:raw.frozenId,snap:raw.frozen}:frozenSnapshot(raw.entryConfig||{});if(!snaps.has(f.id))snaps.set(f.id,f.snap);}
   const primary=projected.filter(r=>EXECUTION_ATTACKS.includes(r.attack)&&r.executionClass==='CAPITAL'
     &&(!meta.ownerId||r.ownerId===meta.ownerId)&&(!meta.mode||r.mode===meta.mode)
     &&Number(r.openedAtMs)>=Number(meta.resetTimestampMs||0));
@@ -300,11 +309,15 @@ export function buildLedgerExportPackage({records,meta,maxBytes=EXPORT_PART_MAX_
 }
 
 export async function collectLedgerExport(engine,options={}){
-  // One collector owns the cursor at a time, including overlapping downloads.
-  const prior=engine.ledgerExportInFlight||Promise.resolve();
-  const task=prior.catch(()=>{}).then(()=>collectLedgerExportJob(engine,options));
-  engine.ledgerExportInFlight=task;
-  try{return await task;}finally{if(engine.ledgerExportInFlight===task)engine.ledgerExportInFlight=null;}
+  // Never build a promise tail for repeated downloads. Busy is explicit and
+  // retryable; the in-flight collection continues under its original scope.
+  if(engine.ledgerExportInFlight)throw new Error('ledger_export_busy_retry_after_current_download');
+  const task=collectLedgerExportJob(engine,options);engine.ledgerExportInFlight=task;
+  try{return await task;}finally{
+    if(engine.ledgerExportInFlight===task)engine.ledgerExportInFlight=null;
+    engine.ledgerExportMemory={...(engine.ledgerExportMemory||{}),active:false,
+      retainedRows:engine.ledgerExportJob?.rows?.length||0,retainedProjectedBytes:engine.ledgerExportJob?.rowsBytes||0};
+  }
 }
 
 async function collectLedgerExportJob(engine,{budgetMs=15000,pageLimit=80,maxPages=100,pressureAtRequest=false,fromMs=0,toMs=0}={}){
@@ -317,6 +330,8 @@ async function collectLedgerExportJob(engine,{budgetMs=15000,pageLimit=80,maxPag
   const mode=settings.mode||null;
   const exportId=existing?.exportId||`exp-${cutoff}`;
   const rows=Array.isArray(existing?.rows)?[...existing.rows]:[];
+  let rowsBytes=Number(existing?.rowsBytes||0);
+  engine.ledgerExportMemory={active:true,retainedRows:rows.length,retainedProjectedBytes:rowsBytes,maximumProjectedBytes:LEDGER_EXPORT_MEMORY_MAX_BYTES};
   // Compact market observations at the export cutoff, not prices obtained after
   // a later page/resume. A missing observation produces an explicit data gap.
   const quoteSnapshot=existing?.quoteSnapshot||new Map();
@@ -338,7 +353,18 @@ async function collectLedgerExportJob(engine,{budgetMs=15000,pageLimit=80,maxPag
     for(const row of page){
       if(PORTFOLIO_CONCEPTS.has(row.conceptName)&&!isShadowSaintEntry(row))row.reportValuation=executionValuation(row,quoteSnapshot.get(row.ticker)||null,settings,cutoff);
     }
-    rows.push(...page);const last=page[page.length-1];cursor={afterOpenedAtMs:Number(last.openedAtMs)||0,afterId:String(last.id)};
+    for(const row of page){
+      const compact=compactLedgerExportRecord(row,cutoff),bytes=Buffer.byteLength(JSON.stringify(compact),'utf8');
+      if(rowsBytes+bytes>LEDGER_EXPORT_MEMORY_MAX_BYTES){
+        // Fail clearly; never return misleading complete totals or delete DB
+        // records. Existing fromMs/toMs windows can export the same history.
+        engine.ledgerExportJob=null;
+        throw new Error('ledger_export_memory_window_too_large_use_smaller_fromMs_toMs');
+      }
+      rows.push(compact);rowsBytes+=bytes;
+    }
+    engine.ledgerExportMemory={active:true,retainedRows:rows.length,retainedProjectedBytes:rowsBytes,maximumProjectedBytes:LEDGER_EXPORT_MEMORY_MAX_BYTES};
+    const last=page[page.length-1];cursor={afterOpenedAtMs:Number(last.openedAtMs)||0,afterId:String(last.id)};
     if(page.length<limit){cursor=null;break;}
     await new Promise((resolve)=>setImmediate(resolve));
   }
@@ -361,7 +387,7 @@ async function collectLedgerExportJob(engine,{budgetMs=15000,pageLimit=80,maxPag
       entryPipeline:(()=>{const p=engine.strategy?.entryPipelineSummary?.()||null;return p?{...p,recent:(p.recent||[]).slice(0,24)}:null;})(),
       boltFilters:engine.atomicThunderBolt?.chokeDiagnosticSummary?.()||null,
     },gaps}});
-  engine.ledgerExportJob=incomplete?{status:'partial',exportId,snapshotCutoffMs:cutoff,cursor,rows,expected,contextKey:key,settings,quoteSnapshot}:{status:'complete',exportId,snapshotCutoffMs:cutoff};
+  engine.ledgerExportJob=incomplete?{status:'partial',exportId,snapshotCutoffMs:cutoff,cursor,rows,rowsBytes,expected,contextKey:key,settings,quoteSnapshot}:{status:'complete',exportId,snapshotCutoffMs:cutoff};
   return {built,incomplete,cursor:engine.ledgerExportJob.cursor||null,exportId};
 }
 

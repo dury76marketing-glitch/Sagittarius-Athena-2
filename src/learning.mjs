@@ -1,3 +1,4 @@
+import {LatestStateWriter,deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { observationOrder } from './authority.mjs';
 import { randomUUID } from 'node:crypto';
 import { RECOVERY_MARKET_DROP_CENTS, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, PROFIT_LEARNING_INTELLIGENCE, PROTECTED_RUNNER_INTELLIGENCE, goldenDragonStructureQualifiedAtQuote } from './doctrine.mjs';
@@ -702,6 +703,16 @@ export class LearningEngine {
     this.crashPersistMaxObservedPending = 0;
     this.crashPersistLastError = null;
     this.goldenDragonHistory = [];
+    this.profitObservationDirty=new Set();
+    this.profitObservationRevision=new Map();
+    this.profitObservationForce=new Set();
+    this.profitObservationEntries=new Map();
+    this.profitObservationErrors=new Map();
+    this.profitObservationWriter=new LatestStateWriter({concurrency:2,onError:(error,id)=>{
+      this.profitObservationDirty.add(id);this.profitObservationErrors.set(id,String(error?.message||error).slice(0,200));
+    }});
+    this.profitRebuildPromise=null;this.profitRebuildDirty=false;
+    this.profitRebuildStats={requested:0,runs:0,coalesced:0,active:0,maxActive:0,lastRows:0,lastMs:0};
     this.profitStates = new Map();
     this.profitMeta = new Map();
     this.profitLastPersistMs = new Map();
@@ -790,6 +801,8 @@ export class LearningEngine {
 
   resourceSnapshot() {
     return {
+      profitObservationPersistence:{...this.profitObservationWriter.snapshot(),dirty:this.profitObservationDirty.size,errors:this.profitObservationErrors.size,retainedEntrySummaries:this.profitObservationEntries.size},
+      profitProfileRebuild:{...this.profitRebuildStats},
       crashStates:this.crashStates.size,
       crashPersistClocks:this.crashLastPersistMs.size,
       crashPersistence:{
@@ -1450,13 +1463,70 @@ export class LearningEngine {
   }
 
   async persistProfitLearning(entry,state,{force=false,trackingComplete=null}={}){
-    if(typeof this.db.upsertProfitEpisode!=='function')return;
-    const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return;
+    if(typeof this.db.upsertProfitEpisode!=='function')return false;
+    const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return false;
     const now=Date.now(),id=meta.id,last=n(this.profitLastPersistMs.get(id));
-    if(!force&&now-last<PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs)return;
+    if(!force&&now-last<PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs)return false;
     const complete=trackingComplete==null?Boolean(state.trackingComplete):Boolean(trackingComplete);
     await this.db.upsertProfitEpisode({...meta,closedAtMs:entry.closedAtMs??meta.closedAtMs,trackingComplete:complete,state,updatedAtMs:now});
     this.profitLastPersistMs.set(id,now);
+    return true;
+  }
+
+  // OOM1: reduce every observation synchronously with the ORIGINAL reducer.
+  // Slow PostgreSQL holds only one active write plus the latest state per ID,
+  // rather than an unbounded promise chain retaining complete entry objects.
+  bufferProfitObservation(entry,observation={}){
+    const id=String(entry?.id||'');if(!id)return false;
+    const old=this.profitStates.get(id);
+    if(old?.trackingComplete || old?.phase==='POST_EXIT_TRACKING')return false;
+    const compact=profitLearningEntry(entry),sport=this.profitMeta.get(id)?.sport||old?.cohort?.sport||'Unknown';
+    const prior=old||initialProfitLearningState(compact,sport,Date.now());
+    const next=advanceProfitLearningState(prior,compact,{...observation,sport},Date.now());
+    this.profitStates.set(id,next);this.profitObservationEntries.set(id,compact);
+    this.profitObservationRevision.set(id,(this.profitObservationRevision.get(id)||0)+1);
+    if(n(next.maxExecutableNetCents)!==n(prior.maxExecutableNetCents)||n(next.oneTickPullbackCount)!==n(prior.oneTickPullbackCount)||n(next.oneTickRecoveryCount)!==n(prior.oneTickRecoveryCount))this.profitObservationForce.add(id);
+    this.profitObservationDirty.add(id);this.scheduleProfitObservation(id);return true;
+  }
+
+  scheduleProfitObservation(id){
+    if(!this.profitObservationDirty.has(id))return;
+    this.profitObservationWriter.enqueue(id,async()=>{
+      const entry=this.profitObservationEntries.get(id);if(!entry)return;
+      // Preserve authoritative sport/cohort metadata; only the geometry reducer
+      // runs before this optional historical lookup, and it does not use sport.
+      const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return;
+      const state=this.profitStates.get(id);if(!state||state.trackingComplete)return;
+      state.cohort={...state.cohort,sport:meta.sport};
+      const revision=this.profitObservationRevision.get(id),snapshot=structuredClone(state);
+      const force=this.profitObservationForce.has(id);
+      const persisted=await this.persistProfitLearning(entry,snapshot,{force});
+      // A throttled no-op is not a durable acknowledgement. Keep the latest
+      // revision dirty until a real write succeeds; normal cadence is unchanged.
+      if(persisted&&this.profitObservationRevision.get(id)===revision){this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);}
+    });
+  }
+
+  retryProfitObservations(){
+    if(this.profitRebuildDirty&&!this.profitRebuildPromise)this.requestProfitProfileRebuild();
+    for(const id of this.profitObservationDirty)
+      if(!this.profitObservationWriter.active.has(id)&&!this.profitObservationWriter.pending.has(id))this.scheduleProfitObservation(id);
+  }
+
+  async flushProfitObservation(id,timeoutMs=2000){
+    id=String(id);
+    // Explicit lifecycle/shutdown drains must persist the latest observation,
+    // even when the normal low-priority persistence interval has not elapsed.
+    if(this.profitObservationDirty.has(id))this.profitObservationForce.add(id);
+    this.scheduleProfitObservation(id);
+    const done=await deadline(this.profitObservationWriter.idle(id).then(()=>true),timeoutMs,false);
+    return done&&!this.profitObservationErrors.has(id)&&!this.profitObservationDirty.has(id);
+  }
+
+  async flushProfitObservations(timeoutMs=2000){
+    for(const id of this.profitObservationDirty){this.profitObservationForce.add(id);this.scheduleProfitObservation(id);}
+    const done=await this.profitObservationWriter.flush(timeoutMs);
+    return done&&this.profitObservationErrors.size===0&&this.profitObservationDirty.size===0;
   }
 
   async observeProfitOpportunity(entry,observation={}){
@@ -1510,16 +1580,53 @@ export class LearningEngine {
       }
       state.shadow=shadow;
     }
-    this.profitStates.set(id,state);await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true,trackingComplete:true});
-    await this.rebuildProfitProfiles().catch(()=>{});
+    // Publish completion only after its durable write. Failed finalization
+    // remains retryable, rather than leaving a falsely COMPLETE resident state.
+    await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true,trackingComplete:true});
+    this.profitObservationEntries.delete(id);this.profitObservationRevision.delete(id);this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);
     rememberBounded(this.completedProfitIds,id,LEARNING_RUNTIME_LIMITS.completedProfitIds);
     this.profitStates.delete(id);this.profitMeta.delete(id);this.profitLastPersistMs.delete(id);
+    // Aggregate from durable episodes. A burst of closes must NOT attach one
+    // waiter/entry snapshot per close to an indefinitely busy global rebuild.
+    this.requestProfitProfileRebuild();
     return structuredClone(state);
   }
 
-  async rebuildProfitProfiles(){
+  requestProfitProfileRebuild(){
+    this.profitRebuildDirty=true;
+    if(this.profitRebuildPromise){this.profitRebuildStats.requested++;this.profitRebuildStats.coalesced++;return false;}
+    void this.rebuildProfitProfiles().catch(error=>{this.profitRebuildStats.lastError=String(error?.message||error).slice(0,300);});
+    return true;
+  }
+
+  async flushProfitProfileRebuild(timeoutMs=2000){
+    if(this.profitRebuildDirty&&!this.profitRebuildPromise)this.requestProfitProfileRebuild();
+    if(!this.profitRebuildPromise)return !this.profitRebuildDirty;
+    return deadline(this.profitRebuildPromise.then(()=>true,()=>false),timeoutMs,false);
+  }
+
+  rebuildProfitProfiles(){
+    this.profitRebuildStats.requested++;this.profitRebuildDirty=true;
+    if(this.profitRebuildPromise){this.profitRebuildStats.coalesced++;return this.profitRebuildPromise;}
+    const run=(async()=>{let result=[];
+      // Calls arriving during a read request one further read, so a just-
+      // completed episode is not omitted from the final profile refresh.
+      while(this.profitRebuildDirty){this.profitRebuildDirty=false;
+        const started=Date.now();this.profitRebuildStats.active++;this.profitRebuildStats.maxActive=Math.max(this.profitRebuildStats.maxActive,this.profitRebuildStats.active);
+        try{result=await this._rebuildProfitProfiles();this.profitRebuildStats.runs++;this.profitRebuildStats.lastError=null;}
+        catch(error){this.profitRebuildDirty=true;this.profitRebuildStats.failures=(this.profitRebuildStats.failures||0)+1;throw error;}
+        finally{this.profitRebuildStats.active--;this.profitRebuildStats.lastMs=Date.now()-started;}
+      }return result;
+    })().finally(()=>{if(this.profitRebuildPromise===run)this.profitRebuildPromise=null;});
+    this.profitRebuildPromise=run;return run;
+  }
+
+  async _rebuildProfitProfiles(){
     if(typeof this.db.profitEpisodes!=='function'||typeof this.db.upsertProfitProfile!=='function')return [];
-    const rows=await this.db.profitEpisodes(this.systemName,{complete:true,limit:10000});
+    const rows=typeof this.db.profitProfileEpisodes==='function'
+      ?await this.db.profitProfileEpisodes(this.systemName,{limit:10000})
+      :await this.db.profitEpisodes(this.systemName,{complete:true,limit:10000});
+    this.profitRebuildStats.lastRows=rows.length;
     const buckets=new Map();
     for(const row of rows||[]){
       const state=row?.state&&typeof row.state==='object'?row.state:{};

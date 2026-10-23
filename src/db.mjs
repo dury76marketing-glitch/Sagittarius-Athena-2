@@ -142,7 +142,7 @@ export class Database {
   }
   resourceSnapshot(){
     const snap=(pool,max)=>({max,total:Number(pool?.totalCount||0),idle:Number(pool?.idleCount||0),waiting:Number(pool?.waitingCount||0)});
-    return {bounded:true,mainPool:snap(this.pool,8),lockPool:snap(this.lockPool,2),maximumConnections:10,lowPriorityPersistence:this.lowPriorityPersistenceGate?.snapshot?.()||null,starlightWatchPersistence:this.starlightPersistenceGate?.snapshot?.()||null};
+    return {bounded:true,memoryReads:{...(this.memoryReadStats||{})},mainPool:snap(this.pool,8),lockPool:snap(this.lockPool,2),maximumConnections:10,lowPriorityPersistence:this.lowPriorityPersistenceGate?.snapshot?.()||null,starlightWatchPersistence:this.starlightPersistenceGate?.snapshot?.()||null};
   }
   runLowPriorityPersistence(task){
     if(!this.lowPriorityPersistenceGate)return Promise.resolve().then(task);
@@ -1151,6 +1151,43 @@ export class Database {
       entryConfig:{sport:x.entry_sport||null,gameClockAuthority:{elapsedMinutes:x.game_elapsed_minutes},gameMinutes:x.game_minutes,release:x.release||null,sourceRelease:x.source_release||null,cohortId:x.cohort_id||null,resetTimestampMs:x.reset_timestamp_ms,infinityBreak:{minimumNetPerOriginalContractCents:x.infinity_target},atomicThunder:{minimumNetPerOriginalContractCents:x.atomic_target},athenaFire:x.arayashiki_status?{survivalCertificate:{status:x.arayashiki_status,version:x.arayashiki_version||null,policyRevision:x.arayashiki_policy_revision||null}}:null},
     }));
   }
+  // OOM1: scanners need ticker identities, not copies of every frozen
+  // command/book/evidence tree. No limit: every required open ticker survives.
+  async openEntryTickers(systemName){
+    const r=await this.pool.query("select distinct ticker from sag_entries where system_name=$1 and archived=false and status in ('open','entry_pending','exit_pending','pending_recovery')",[systemName]);
+    this.memoryReadStats||={};this.memoryReadStats.openTickerRows=r.rows.length;
+    return r.rows.map(x=>String(x.ticker));
+  }
+  async openHunterCount(systemName){
+    const r=await this.pool.query("select count(*)::int as memory_open_count from sag_entries where system_name=$1 and archived=false and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery')",[systemName,PORTFOLIO_CONCEPT_NAMES]);
+    return Number(r.rows[0]?.memory_open_count||0);
+  }
+  async openProtectionIndex(systemName,{ticker=null,reference=false}={}){
+    // Compact identity/economic projection preserves full-set pruning and
+    // Infinity wake registration before any position is protected. Full entry
+    // authority is NEVER reconstructed from this projection: pages read it fresh.
+    const r=await this.pool.query(`select id,system_name,owner_id,ticker,concept_name,mode,status,opened_at_ms,
+      count,remaining_count,entry_price_cents,entry_fee_cents,pnl_cents,
+      jsonb_build_object('infinityBreak',entry_config->'infinityBreak') as entry_config
+      from sag_entries where system_name=$1 and archived=false
+      and concept_name=any($2::text[]) and ($3::text is null or ticker=$3)
+      and ($4::boolean or (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT'))
+      and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc,id asc`,
+      [systemName,reference?FEEDER_CONCEPT_NAMES:PORTFOLIO_CONCEPT_NAMES,ticker,Boolean(reference)]);
+    this.memoryReadStats||={};this.memoryReadStats.protectionIndexRows=r.rows.length;
+    return r.rows.map(x=>({id:x.id,ticker:x.ticker,conceptName:x.concept_name,mode:x.mode,status:x.status,
+      count:n(x.count),remainingCount:n(x.remaining_count),entryPriceCents:n(x.entry_price_cents),entryFeeCents:n(x.entry_fee_cents),pnlCents:n(x.pnl_cents),entryConfig:x.entry_config||{}}));
+  }
+  async *openProtectionPages(systemName,index,{pageSize=64}={}){
+    const size=Math.max(1,Math.min(128,Math.floor(Number(pageSize)||64)));
+    for(let start=0;start<index.length;start+=size){
+      const ids=index.slice(start,start+size).map(x=>String(x.id));
+      const r=await this.pool.query("select * from sag_entries where system_name=$1 and id=any($2::text[]) and archived=false and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc,id asc",[systemName,ids]);
+      this.memoryReadStats||={};this.memoryReadStats.lastProtectionPageRows=r.rows.length;
+      this.memoryReadStats.maxProtectionPageRows=Math.max(this.memoryReadStats.maxProtectionPageRows||0,r.rows.length);
+      yield r.rows.map(rowEntry);
+    }
+  }
   async openEntries(systemName){const r=await this.pool.query("select * from sag_entries where system_name=$1 and archived=false and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc",[systemName]);return r.rows.map(rowEntry);}
   // R68/OPI1: dashboard/log readers intentionally project only the scalar
   // ledger truth and the small JSON fragments needed by the UI. The previous
@@ -1721,6 +1758,19 @@ export class Database {
     if(complete===null){const r=await this.pool.query('select * from sag_profit_episodes_v1 where system_name=$1 order by updated_at_ms desc limit $2',[systemName,lim]);return r.rows;}
     const r=await this.pool.query('select * from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=$2 order by updated_at_ms desc limit $3',[systemName,Boolean(complete),lim]);return r.rows;
   }
+  async profitProfileEpisodes(systemName,{limit=10000}={}){
+    const lim=Math.max(1,Math.min(10000,Math.floor(Number(limit)||10000)));
+    const r=await this.pool.query(`select id,concept_name,source_feeder,sport,entry_price_cents,
+      jsonb_build_object('version',state->'version','maxExecutableNetCents',state->'maxExecutableNetCents',
+       'postExitMaxExecutableNetCents',state->'postExitMaxExecutableNetCents',
+       'postExitMinExecutableNetCents',state->'postExitMinExecutableNetCents',
+       'terminalNetCents',state->'terminalNetCents','actualRealizedNetCents',state->'actualRealizedNetCents',
+       'oneTickPullbackCount',state->'oneTickPullbackCount','oneTickRecoveryCount',state->'oneTickRecoveryCount') as state
+      from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=true order by updated_at_ms desc limit $2`,[systemName,lim]);
+    this.memoryReadStats||={};this.memoryReadStats.profitProfileRows=r.rows.length;
+    return r.rows;
+  }
+
   async athenaEconomicProfitEpisodes(systemName,{limit=20000}={}){
     const lim=Math.max(1,Math.min(20_000,Math.floor(Number(limit)||20_000)));
     const r=await this.pool.query(`select id,entry_price_cents,

@@ -1,3 +1,4 @@
+import {deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { randomUUID } from 'node:crypto';
 import { authorityHash } from './authority.mjs';
 import { validateShadowObservation, consumeBidDepth, buildShadowCloseProof, shadowEntryHash } from './shadowProtocol.mjs';
@@ -496,6 +497,7 @@ export class ProfitGuard {
   resourceSnapshot() {
     return {
       guardStates:this.states.size,
+      sweepInFlight:Boolean(this.sweepInFlight),lastSweepDurationMs:Number(this.lastSweepDurationMs||0),
       atomicThunderStates:this.atomicThunderStates.size,
       entryLocks:this.entryLocks.size,
       tickerExitLocks:this.tickerExitLocks.size,
@@ -1891,7 +1893,13 @@ export class ProfitGuard {
   queueProfitLearningTask(entry, taskName, task) {
     const id=String(entry?.id||'');if(!id||typeof task!=='function')return false;
     const prior=this.profitLearningQueues.get(id)||Promise.resolve();
-    const next=prior.catch(()=>{}).then(task).catch((error)=>{
+    const next=prior.catch(()=>{}).then(async()=>{
+      if(taskName!=='observation'&&typeof this.learning?.flushProfitObservation==='function'){
+        const persisted=await this.learning.flushProfitObservation(id,0);
+        if(!persisted)throw new Error('profit_observation_persistence_unconfirmed');
+      }
+      return task();
+    }).catch((error)=>{
       void this.audit(`pli1_${String(taskName||'task')}_failed`,{id:entry.id,ticker:entry.ticker,error:String(error?.message||error)},'warning');
       return null;
     }).finally(()=>{if(this.profitLearningQueues.get(id)===next)this.profitLearningQueues.delete(id);});
@@ -1905,23 +1913,26 @@ export class ProfitGuard {
     const observedAtMs=Math.max(1,n(observation?.observedAtMs,Date.now()));
     if(observedAtMs<=n(this.profitLearningQueuedAtMs.get(id)))return false;
     this.profitLearningQueuedAtMs.set(id,observedAtMs);
-    return this.queueProfitLearningTask(entry,'observation',()=>this.learning.observeProfitOpportunity(entry,{...observation,observedAtMs}));
+    if(typeof this.learning?.bufferProfitObservation==='function')return this.learning.bufferProfitObservation(entry,{...observation,observedAtMs});
+    const compact=profitLearningEntry(entry);
+    return this.queueProfitLearningTask(compact,'observation',()=>this.learning.observeProfitOpportunity(compact,{...observation,observedAtMs}));
   }
 
   async flushProfitLearningEntry(entryId, timeoutMs = 1000) {
     const pending=this.profitLearningQueues.get(String(entryId||''));
-    if(!pending)return true;
+    if(!pending)return typeof this.learning?.flushProfitObservation==='function'?this.learning.flushProfitObservation(entryId,timeoutMs):true;
     const drained=Promise.resolve(pending).then(()=>true,()=>true);
     if(!(Number(timeoutMs)>0))return drained;
-    return Promise.race([drained,new Promise((resolve)=>setTimeout(()=>resolve(false),Number(timeoutMs)))]);
+    return deadline(drained,timeoutMs,false);
   }
 
   async flushProfitLearningQueues(timeoutMs = 2000) {
     const pending=[...this.profitLearningQueues.values()];
+    if(typeof this.learning?.flushProfitObservations==='function')pending.push(this.learning.flushProfitObservations(timeoutMs));
     if(!pending.length)return true;
-    const drained=Promise.allSettled(pending).then(()=>true);
+    const drained=Promise.allSettled(pending).then(results=>results.every(r=>r.status==='fulfilled'&&r.value!==false));
     if(!(Number(timeoutMs)>0))return drained;
-    return Promise.race([drained,new Promise((resolve)=>setTimeout(()=>resolve(false),Number(timeoutMs)))]);
+    return deadline(drained,timeoutMs,false);
   }
 
   athenaExitHistoricalDrawdownEvidence(entry, observedDrawdownCents, sportName='Unknown') {
@@ -3188,7 +3199,8 @@ export class ProfitGuard {
       // protection critical path while preserving per-entry ordering behind the
       // final pre-exit observation. Shutdown and post-exit research drain this
       // queue with bounded waits.
-      this.queueProfitLearningTask(closedEntry,'exit_mark',()=>this.learning.markProfitExit(closedEntry,{
+      const learningEntry=profitLearningEntry(closedEntry);
+      this.queueProfitLearningTask(learningEntry,'exit_mark',()=>this.learning.markProfitExit(learningEntry,{
         realizedNetCents:pnl, exitVwapCents:averageExit, closedAtMs, closeReason:decision.reason,
       }));
     }
@@ -3276,9 +3288,10 @@ export class ProfitGuard {
       const closedEntry={...entry,...patch};
       await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
       if(profitLearningTrade){
-        this.queueProfitLearningTask(closedEntry,'settlement_finalize',async()=>{
-          if(typeof this.learning?.markProfitExit==='function')await this.learning.markProfitExit(closedEntry,{realizedNetCents:n(closedEntry.pnlCents),exitVwapCents:payout,closedAtMs,closeReason:decision.reason});
-          if(typeof this.learning?.finalizeProfitLearning==='function')await this.learning.finalizeProfitLearning(closedEntry,{finalResult:payout>=100?'yes':'no',terminalNetCents:n(closedEntry.pnlCents),reason:'market_final'});
+        const learningEntry=profitLearningEntry(closedEntry);
+      this.queueProfitLearningTask(learningEntry,'settlement_finalize',async()=>{
+          if(typeof this.learning?.markProfitExit==='function')await this.learning.markProfitExit(learningEntry,{realizedNetCents:n(learningEntry.pnlCents),exitVwapCents:payout,closedAtMs,closeReason:decision.reason});
+          if(typeof this.learning?.finalizeProfitLearning==='function')await this.learning.finalizeProfitLearning(learningEntry,{finalResult:payout>=100?'yes':'no',terminalNetCents:n(learningEntry.pnlCents),reason:'market_final'});
         });
       }
       return { closed:true, exitPrice:payout };
@@ -3302,9 +3315,10 @@ export class ProfitGuard {
     const closedEntry={...entry,...patch};
     await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
     if(profitLearningTrade){
-      this.queueProfitLearningTask(closedEntry,'settlement_finalize',async()=>{
-        if(typeof this.learning?.markProfitExit==='function')await this.learning.markProfitExit(closedEntry,{realizedNetCents:pnl,exitVwapCents:averageExit,closedAtMs,closeReason:decision.reason});
-        if(typeof this.learning?.finalizeProfitLearning==='function')await this.learning.finalizeProfitLearning(closedEntry,{finalResult:payout>=100?'yes':'no',terminalNetCents:pnl,reason:'market_final'});
+      const learningEntry=profitLearningEntry(closedEntry);
+      this.queueProfitLearningTask(learningEntry,'settlement_finalize',async()=>{
+        if(typeof this.learning?.markProfitExit==='function')await this.learning.markProfitExit(learningEntry,{realizedNetCents:pnl,exitVwapCents:averageExit,closedAtMs,closeReason:decision.reason});
+        if(typeof this.learning?.finalizeProfitLearning==='function')await this.learning.finalizeProfitLearning(learningEntry,{finalResult:payout>=100?'yes':'no',terminalNetCents:pnl,reason:'market_final'});
       });
     }
     return { closed:true, exitPrice:payout, pnlCents:pnl };
@@ -4572,14 +4586,16 @@ export class ProfitGuard {
   protect(entry) { return this.withEntryLock(entry.id, () => this._protect(entry)); }
 
   async protectTicker(ticker) {
-    const s = this.getSettings();
-    // HF5: quote-driven protection is capital-risk work. Reference-only Cosmos
-    // must never consume this high-priority lane or its database bandwidth.
-    const entries = typeof this.db.openHunterEntriesByTicker === 'function'
-      ? await this.db.openHunterEntriesByTicker(s.systemName, ticker)
-      : (await this.db.openEntriesByTicker(s.systemName, ticker)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));
-    for (const e of entries) await this.protect(e);
-    return entries.length;
+    const s=this.getSettings();
+    if(typeof this.db.openProtectionIndex==='function'&&typeof this.db.openProtectionPages==='function'){
+      const index=await this.db.openProtectionIndex(s.systemName,{ticker});let count=0;
+      for await(const page of this.db.openProtectionPages(s.systemName,index)){for(const e of page){await this.protect(e);count++;}}
+      return count;
+    }
+    const entries=typeof this.db.openHunterEntriesByTicker==='function'
+      ?await this.db.openHunterEntriesByTicker(s.systemName,ticker)
+      :(await this.db.openEntriesByTicker(s.systemName,ticker)).filter(e=>PORTFOLIO_CONCEPTS.has(e.conceptName));
+    for(const e of entries)await this.protect(e);return entries.length;
   }
 
   async emergencyExit(entry, q = null) {
@@ -4692,40 +4708,40 @@ export class ProfitGuard {
     });
   }
 
-  async sweep() {
-    try {
-      this.protectionOk = true;
-      this.lastError = null;
-      const s = this.getSettings();
-      // HF5: the 1.5s safety sweep is strictly for real owned positions. Before
-      // HF5 every open Pegasus/Dragon reference row was updated here and also on
-      // quote events, creating a database write storm with no capital-safety value.
-      const entries = typeof this.db.openHunterEntries === 'function'
-        ? await this.db.openHunterEntries(s.systemName)
-        : (await this.db.openEntries(s.systemName)).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName));
-      this.pruneRuntimeState(entries);
-      this.activeTickers = new Set(entries.map((e) => e.ticker));
-      this.infinityBreakFastWake = new Map();
-      for(const e of entries)if(this.isInfinityBreakTrade(e))this.registerInfinityBreakFastWake(e,s);
-      for (const e of entries) await this.protect(e);
-      return entries.length;
-    } catch (e) {
-      this.protectionOk = false;
-      this.lastError = String(e?.message || e);
-      throw e;
-    }
+  sweep() {
+    // Overlapping scanner/backup requests share one traversal. Quote-driven
+    // per-ticker protection remains independent and keeps its entry locks.
+    if(this.sweepInFlight)return this.sweepInFlight;
+    const started=Date.now();
+    const task=this.sweepOwnedPositions().finally(()=>{this.lastSweepDurationMs=Date.now()-started;if(this.sweepInFlight===task)this.sweepInFlight=null;});
+    this.sweepInFlight=task;return task;
   }
 
-  async referenceSweep() {
-    // Cosmos remain fully tracked and settle/close normally, but reference-only
-    // persistence is deliberately low-frequency and can never mark real-position
-    // protection healthy. This preserves research while removing quote-rate DB IO.
+  async sweepOwnedPositions(){
+    try{
+      this.protectionOk=true;this.lastError=null;const s=this.getSettings();
+      const paged=typeof this.db.openProtectionIndex==='function'&&typeof this.db.openProtectionPages==='function';
+      const entries=paged?await this.db.openProtectionIndex(s.systemName)
+        :typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(s.systemName)
+        :(await this.db.openEntries(s.systemName)).filter(e=>PORTFOLIO_CONCEPTS.has(e.conceptName));
+      this.pruneRuntimeState(entries);this.activeTickers=new Set(entries.map(e=>e.ticker));this.infinityBreakFastWake=new Map();
+      for(const e of entries)if(this.isInfinityBreakTrade(e))this.registerInfinityBreakFastWake(e,s);
+      let count=0;
+      if(paged){for await(const page of this.db.openProtectionPages(s.systemName,entries)){for(const e of page){await this.protect(e);count++;}}}
+      else{for(const e of entries){await this.protect(e);count++;}}
+      return count;
+    }catch(e){this.protectionOk=false;this.lastError=String(e?.message||e);throw e;}
+  }
+
+  async referenceSweep(){
     const s=this.getSettings();
-    const entries=typeof this.db.openFeederEntries==='function'
-      ? await this.db.openFeederEntries(s.systemName)
-      : (await this.db.openEntries(s.systemName)).filter((e)=>FEEDER_CONCEPTS.has(e.conceptName));
-    for(const e of entries)await this.protect(e);
-    return entries.length;
+    if(typeof this.db.openProtectionIndex==='function'&&typeof this.db.openProtectionPages==='function'){
+      const index=await this.db.openProtectionIndex(s.systemName,{reference:true});let count=0;
+      for await(const page of this.db.openProtectionPages(s.systemName,index)){for(const e of page){await this.protect(e);count++;}}return count;
+    }
+    const entries=typeof this.db.openFeederEntries==='function'?await this.db.openFeederEntries(s.systemName)
+      :(await this.db.openEntries(s.systemName)).filter(e=>FEEDER_CONCEPTS.has(e.conceptName));
+    for(const e of entries)await this.protect(e);return entries.length;
   }
 
   async trackPostExit() {
