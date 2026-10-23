@@ -2535,8 +2535,14 @@ export class StrategyEngine {
           // Legacy Link uses the stop as a ceiling. A positive Athena rise
           // uses current executable liquidity inside the same operator band.
           const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);
-          if(!boundary.ok || (!rise.enabled && (Number(plan.averagePriceCents)>stop+1e-9 || Number(plan.bestAskCents)>stop+1e-9))){
-            trace('STARLIGHT_LINK','BLOCKED',boundary.reason||'no_executable_ask_at_parent_stop');return null;
+          if(!boundary.ok){
+            trace('STARLIGHT_LINK','BLOCKED',boundary.reason||'entry_band');return null;
+          }
+          if(!rise.enabled && (Number(plan.averagePriceCents)>stop+1e-9 || Number(plan.bestAskCents)>stop+1e-9)){
+            // RCV3: a passing band check says "qualified"; it is not the
+            // reason for rejecting a quote above the original stop ceiling.
+            trace('STARLIGHT_LINK','BLOCKED','no_executable_ask_at_parent_stop',{
+              stopPriceCents:stop,averagePriceCents:Number(plan.averagePriceCents),bestAskCents:Number(plan.bestAskCents)});return null;
           }
           trace('STARLIGHT_LINK','PASS',rise.enabled?'athena_rise_at_current_executable_price':'executable_within_parent_stop_limit',{stopPriceCents:stop,actualAsk:executionQuote.yesAsk,athenaTrigger:rise});
         }else{

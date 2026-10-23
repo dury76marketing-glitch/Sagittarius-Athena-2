@@ -1229,8 +1229,13 @@ export class SagittariusEngine {
     if(s.crashRecoveryHunterLinkEnabled===true){
       this.starlightLinkJob=(async()=>{
         const write=this.starlightRecoveryArmWrites?.get(id);
-        if(write)await write;
-        return this.attemptStarlightLinkEntry(id);
+        // RCV2: initial Link admission uses the same ticker lane as durable
+        // recovery and resumed seats. The previous direct call bypassed RCV1
+        // and could collide with another same-ticker recovery parent.
+        if(write && !(await write))return {status:'WATCHING',reason:'watch_persistence_pending'};
+        return this.scheduleStarlightLink(id)
+          ?{status:'QUEUED',reason:'ticker_recovery_lane_claimed'}
+          :{status:'WATCHING',reason:'ticker_recovery_lane_busy'};
       })().catch((error)=>{
         void this.db?.audit?.('error','starlight_link_failed',{authorizationId:id,message:String(error?.message||error)}).catch?.(()=>{});
         return {status:'ERROR',reason:String(error?.message||error)};
@@ -1247,6 +1252,25 @@ export class SagittariusEngine {
       && child.systemName===watch.systemName && child.ownerId===watch.ownerId && child.mode===watch.mode
       && child.ticker===watch.ticker && child.eventTicker===watch.eventTicker
       && Number(epoch)===Number(watch.resetEpoch);
+  }
+
+  // RCV1: a single Starlight recovery admission lane per exact ticker and
+  // execution scope.  A parent-level in-flight set alone allowed several
+  // independent Athena stops to contend repeatedly for the same seat-1
+  // StrategyEngine lock.  Queue the retry at the caller rather than relaxing
+  // that lock, its atomic database fence, or Multiply's parent/seat authority.
+  claimStarlightRecoveryTicker(watch){
+    if(!watch?.ticker)return null;
+    if(!(this.starlightRecoveryTickerOwners instanceof Map))this.starlightRecoveryTickerOwners=new Map();
+    const key=JSON.stringify([watch.systemName,watch.ownerId,watch.mode,Number(watch.resetEpoch),watch.ticker]);
+    if(this.starlightRecoveryTickerOwners.has(key)){
+      const stats=this.starlightRecoveryRuntime();
+      stats.tickerBusyDeferrals=Number(stats.tickerBusyDeferrals||0)+1;
+      return null;
+    }
+    const token={authorizationId:String(watch.authorizationId||''),startedAtMs:Date.now()};
+    this.starlightRecoveryTickerOwners.set(key,token);
+    return ()=>{if(this.starlightRecoveryTickerOwners.get(key)===token)this.starlightRecoveryTickerOwners.delete(key);};
   }
 
   starlightGroupClaim(watch,settings=this.settings){
@@ -1271,6 +1295,9 @@ export class SagittariusEngine {
       if(admitted>=seatBudget)break;
       const id=candidate.authorizationId;
       if(this.starlightRecoveryInFlight.has(id)||this.starlightRecoveryQuoteJobs?.has(id))continue;
+      if(Number(candidate.retryNotBeforeMs||0)>Date.now())continue;
+      const releaseTicker=this.claimStarlightRecoveryTicker(candidate);
+      if(!releaseTicker)continue;
       this.starlightRecoveryInFlight.add(id);
       try{
         const row=await this.db.starlightWatch(candidate);
@@ -1306,6 +1333,7 @@ export class SagittariusEngine {
         if(watch.link!==true&&!starlightRecoverySignalState(watch,q,settings,Date.now()).qualified)continue;
         const snapshot={...watch,version:watch.link?'SE2-R10-STARLIGHT-LINK':'SE2-R5-DURABLE-STOP-LOSS-RECOVERY',
           ...(rise.enabled?{athenaTrigger:rise.stamp}:{})};
+        const usedBefore=used.size;
         for(let seat=1;seat<=target&&admitted<seatBudget;seat++){
           if(used.has(seat))continue;
           const entry=await this.strategy.createHunter('Crash Recovery Hunter',structuredClone(q),Number(settings.crashRecoveryStakeCents||500),0,{
@@ -1316,10 +1344,27 @@ export class SagittariusEngine {
           if(!this.starlightChildMatchesWatch(entry,watch))throw new Error('aps2_resumed_child_identity_invalid');
           seats.push(entry);used.add(seat);admitted++;
         }
-        if(used.size===target)await this.consumeStarlightRecoveryWatch(watch,seats[0].id);
+        if(used.size===target){await this.consumeStarlightRecoveryWatch(watch,seats[0].id);continue;}
+        if(used.size>usedBefore)continue;
+        // No seat was admitted: preserve all already-committed seats and
+        // parent proof; retry after a short durable backoff.  Otherwise a
+        // busy ticker can churn thousands of revisions without progress.
+        const latest=[...(this.strategy?.entryPipelineEvents||[])].reverse().find(e=>
+          e?.concept==='Crash Recovery Hunter'&&String(e?.starlightRecoveryParentEntryId||'')===String(watch.parentEntryId)
+          &&e?.status==='BLOCKED');
+        const reason=latest?.reason||'starlight_group_seat_deferred';
+        const retry={...watch,status:'EXECUTING',lastAttemptReason:String(reason),
+          lastAttemptAtMs:Date.now(),retryNotBeforeMs:Date.now()+2_000};
+        const saved=await this.db.updateStarlightWatch(retry,watch.revision);
+        if(saved)this.starlightRecoveryWatches.set(id,{...retry,revision:Number(saved.revision)});
+        else{
+          const current=await this.db.starlightWatch(watch);
+          if(current&&current.status==='EXECUTING')this.starlightRecoveryWatches.set(id,{...current.watch,revision:Number(current.revision)});
+          else this.starlightRecoveryWatches.delete(id);
+        }
       }catch(error){
         try{await this.db.audit('warning','aps2_shadow_group_resume_deferred',{authorizationId:id,reason:String(error?.message||error)});}catch{}
-      }finally{this.starlightRecoveryInFlight.delete(id);}
+      }finally{releaseTicker();this.starlightRecoveryInFlight.delete(id);}
     }
     return admitted;
   }
@@ -1392,13 +1437,18 @@ export class SagittariusEngine {
 
   scheduleStarlightLink(authorizationId){
     const id=String(authorizationId||'');
-    if(!id)return;
+    if(!id)return false;
     if(!(this.starlightRecoveryInFlight instanceof Set))this.starlightRecoveryInFlight=new Set();
-    if(this.starlightRecoveryInFlight.has(id))return;
+    if(this.starlightRecoveryInFlight.has(id))return false;
+    const watch=this.starlightRecoveryWatches?.get(id);
+    if(!watch||!this.starlightScopeMatches(watch))return false;
+    const releaseTicker=this.claimStarlightRecoveryTicker(watch);
+    if(!releaseTicker)return false; // fair round-robin wake retries this parent
     this.starlightRecoveryInFlight.add(id);
     void this.attemptStarlightLinkEntry(id).catch((error)=>{
       void this.db?.audit?.('error','starlight_link_backpressure',{authorizationId:id,code:String(error?.code||''),message:String(error?.message||error).slice(0,180)}).catch?.(()=>{});
-    }).finally(()=>this.starlightRecoveryInFlight.delete(id));
+    }).finally(()=>{releaseTicker();this.starlightRecoveryInFlight.delete(id);});
+    return true;
   }
 
   async blockLightningOriginWatch(watch){
@@ -1774,7 +1824,7 @@ export class SagittariusEngine {
     let accepted=false;
     for(const [id,w] of this.starlightRecoveryWatches){
       if(String(w.ticker)!==String(q.ticker)||!this.starlightScopeMatches(w)||['CONSUMED','EXPIRED','BLOCKED'].includes(String(w.status)))continue;
-      if(link&&!terminal){if(['ARMED','WATCHING'].includes(String(w.status)))this.scheduleStarlightLink(id);continue;}
+      if(link&&!terminal){if(['ARMED','READY','WATCHING'].includes(String(w.status)))this.scheduleStarlightLink(id);continue;}
       const jobs=link?this.starlightTerminalQuoteJobs:this.starlightRecoveryQuoteJobs;
       if(jobs.has(id)){if(!link)this.bufferStarlightRecoveryQuote(id,q);accepted=true;continue;}
       const task=this.observeStarlightRecoveryQuote(q,{onlyId:id});
@@ -1802,7 +1852,7 @@ export class SagittariusEngine {
           }else this.starlightRecoveryWatches.set(watch.authorizationId,blocked);
           continue;
         }
-        if(['ARMED','WATCHING'].includes(String(watch.status)))this.scheduleStarlightLink(watch.authorizationId);
+        if(['ARMED','READY','WATCHING'].includes(String(watch.status)))this.scheduleStarlightLink(watch.authorizationId);
       }
       return false;
     }
@@ -1973,14 +2023,16 @@ export class SagittariusEngine {
     this.starlightRecoveryWakeCursor=(offset+scope.length)%candidates.length;
     let awake=resumed;
     if(this.settings?.crashRecoveryHunterLinkEnabled===true){
+      // RCV3: READY is a durable nonexecuted watch, not a consumed signal.
+      // An OFF-to-ON toggle or restored READY watch must be scheduled through
+      // the same ticker lane; the Link entry handler rechecks every gate.
       for(const current of scope){
         const w=this.starlightRecoveryWatches.get(String(current.authorizationId));
         if(!w||!this.starlightScopeMatches(w)||this.starlightRecoveryInFlight?.has(String(w.authorizationId)))continue;
-        if(!['ARMED','WATCHING'].includes(String(w.status))){
+        if(!['ARMED','READY','WATCHING'].includes(String(w.status))){
           if(!(String(w.status)==='EXECUTING' && w.resultWritePending===true && Number(w.retryNotBeforeMs||0)<=Date.now()))continue;
         }else if(Number(w.retryNotBeforeMs||0)>Date.now())continue;
-        this.scheduleStarlightLink(w.authorizationId);
-        awake++;
+        if(this.scheduleStarlightLink(w.authorizationId))awake++;
       }
       return awake;
     }
@@ -2101,8 +2153,21 @@ export class SagittariusEngine {
     // Overflow remains a durable watch and is picked up by regular maintenance.
     return this.starlightExecutionQueue.enqueue(id,async()=>{
       if(this.starlightRecoveryInFlight.has(id))return;
+      const watch=this.starlightRecoveryWatches?.get(id);
+      if(!watch||!this.starlightScopeMatches(watch))return;
+      // RCV2: the Link-OFF READY queue (and its Link-ON compatibility path)
+      // previously bypassed the RCV1 per-ticker claim. Coalesced queue
+      // concurrency is per watch, not per ticker; two valid recovery parents
+      // could enter StrategyEngine's same-ticker seat lock simultaneously.
+      // A busy ticker remains durably READY/EXECUTING and is retried by the
+      // independent maintenance lane; it is never consumed or discarded.
+      const releaseTicker=this.claimStarlightRecoveryTicker(watch);
+      if(!releaseTicker)return {status:'WATCHING',reason:'ticker_recovery_lane_busy'};
       this.starlightRecoveryInFlight.add(id);
-      try{return await this.attemptStarlightRecovery(id);}finally{this.starlightRecoveryInFlight.delete(id);}
+      try{return await this.attemptStarlightRecovery(id);}finally{
+        releaseTicker();
+        this.starlightRecoveryInFlight.delete(id);
+      }
     });
   }
 
