@@ -3367,6 +3367,19 @@ export class ProfitGuard {
     const remain = remainingCount(entry);
     const payout = n(decision.exitPriceCents);
     const closedAtMs = Date.now();
+    // CW1 only: GH LIVE settlement has no sell-order receipt by design.
+    // Once the EXISTING settlement authority is already closing a genuine
+    // Great Horn loss, preserve that terminal fact for Crystal Wall's parent
+    // verification. This is metadata only: it does not change the decision,
+    // cash, price, protections, position state, or any other Saint's exits.
+    const crystalWallGreatHornSettlementProof =
+      entry.mode==='LIVE' && entry.conceptName==='Great Horn Recovery'
+      && decision?.action==='settlement' && decision?.reason==='settlement_loss'
+      && payout===0 && !entry.exitClientOrderId
+        ? {exitExecutionState:{...(entry.exitExecutionState||{}),terminal:true,
+            settlementConfirmed:true,settlementConfirmedAtMs:closedAtMs,
+            settlementPriceCents:payout,settlementProofVersion:'CW1-GH-LOSS-SETTLEMENT-V1'}}
+        : {};
     const x1Trade = this.isAthenaExitTrade(entry);
     const profitLearningTrade = this.isProfitLearningTrade(entry);
     const priorPri1 = activeProtectedRunnerState(entry);
@@ -3383,7 +3396,8 @@ export class ProfitGuard {
     if (remain <= 1e-9) {
       const patch = {
         status:'closed', remainingCount:0, closeReason:decision.reason, researchTrackingComplete:true,
-        closedAtMs, updatedAtMs:closedAtMs, ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
+        closedAtMs, updatedAtMs:closedAtMs, ...crystalWallGreatHornSettlementProof,
+        ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
       };
       if(entry.mode==='LIVE'){
         if(!await this.persistLiveExitSnapshot(entry,patch))return{closed:false,pending:true,ambiguous:true,skipped:'settlement_receipt_concurrent_change'};
@@ -3415,7 +3429,8 @@ export class ProfitGuard {
       peakPriceCents:Math.max(n(entry.peakPriceCents, entry.entryPriceCents), payout),
       stopPriceCents:decision.stopPriceCents ?? entry.stopPriceCents,
       exitClientOrderId:null, closeReason:decision.reason, researchTrackingComplete:true,
-      closedAtMs, updatedAtMs:closedAtMs, ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
+      closedAtMs, updatedAtMs:closedAtMs, ...crystalWallGreatHornSettlementProof,
+      ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
     };
     if(entry.mode==='LIVE'){
         if(!await this.persistLiveExitSnapshot(entry,patch))return{closed:false,pending:true,ambiguous:true,skipped:'settlement_receipt_concurrent_change'};

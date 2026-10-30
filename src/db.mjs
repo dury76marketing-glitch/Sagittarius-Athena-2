@@ -1596,9 +1596,14 @@ export class Database {
    * and bounded limit prevent leaking other operator/reset watch identities. */
   async crystalWallRecoveryActiveTickers(scope,{limit=256}={}){
     const lim=Math.max(1,Math.min(256,Math.floor(Number(limit)||256)));
+    // One Great Horn market can generate hundreds of separate losing seats.
+    // Limit distinct ACTIVE markets, never raw watch rows: otherwise a single
+    // crowded ticker could evict every other unresolved recovery subscription
+    // following restart. Oldest scanned markets take priority for fairness.
     const r=await this.pool.query(`select ticker from sag_crystal_wall_recovery_watches_v1
       where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
-        and status='WATCHING' order by last_scan_ms desc,updated_at_ms desc,id desc
+        and status='WATCHING' and ticker<>''
+      group by ticker order by min(last_scan_ms) asc,ticker asc
       limit $5`,[scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),lim]);
     return [...new Set(r.rows.map(row=>String(row.ticker||'')).filter(Boolean))];
   }
