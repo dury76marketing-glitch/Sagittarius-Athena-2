@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SAGITTARIUS</title>
-  <link rel="stylesheet" href="/styles.css?v=capital-history-20261027-r1">
+  <link rel="stylesheet" href="/styles.css?v=cw1-dashboard-clarity-20261030">
 </head>
 <body>
 <main class="shell">
@@ -68,7 +68,7 @@
     </details>
   </section>
   <section id="crystalWallPerformancePanel" class="card">
-    <div class="section-title"><h2>CRYSTAL WALL — SEPARATE RECOVERY RESULTS</h2><span class="muted">Crystal Wall SIM recovery uses verified Great Horn-loss authorization and independent financial safeguards. LIVE new BUYs remain release-gated pending PostgreSQL and Railway proof. Lightning totals stay separate.</span></div>
+    <div class="section-title"><div><h2>CRYSTAL WALL RECOVERY (CW1) — GREAT HORN LOSS RECOVERY</h2><span class="muted">This is the NEW capital recovery linked to Great Horn, NOT historical Recovery Hunter (legacy CI1). SIM recovery requires a verified Great Horn loss; LIVE BUYs remain independently release-gated.</span></div><a class="btn light" href="#crystalWallRecoverySettings">Go to Crystal Wall settings</a></div>
     <div id="cw1BuildWarning" class="message negative hidden" role="alert"></div>
     <div class="stats-grid" id="crystalWallMetricCards" aria-label="Crystal Wall recovery-only financial metrics">
       <div class="stat"><span>Win Rate</span><strong id="cw1WinRate">Unavailable</strong></div>
@@ -83,6 +83,11 @@
       <div class="stat"><span>Profit This Week</span><strong id="cw1Week">Unavailable</strong></div>
       <div class="stat"><span>Profit This Month</span><strong id="cw1Month">Unavailable</strong></div>
       <div class="stat"><span>Profit This Year</span><strong id="cw1Year">Unavailable</strong></div>
+    </div>
+    <div class="cw-results-heading"><strong>CRYSTAL WALL RECOVERY — RESULTS TABLE</strong><span class="muted">CW1 capital only · refreshed independently of editable controls</span></div>
+    <div class="table-wrap cw-results-table" role="region" aria-label="Crystal Wall Recovery capital results, one horizontal table">
+      <table><thead><tr><th>Attack</th><th>Avg Entry</th><th>Entries</th><th>Open</th><th>Closed</th><th>W / L</th><th>Win %</th><th>Pending</th><th>Realized P/L</th><th>Unrealized P/L</th></tr></thead>
+      <tbody><tr><td class="capital-attack-name">Crystal Wall Recovery</td><td id="cwTableAvg">Unavailable</td><td id="cwTableEntries">Unavailable</td><td id="cwTableOpen">Unavailable</td><td id="cwTableClosed">Unavailable</td><td id="cwTableWinsLosses">Unavailable</td><td id="cwTableRate">Unavailable</td><td id="cwTablePending">Unavailable</td><td id="cwTableRealized">Unavailable</td><td id="cwTableUnrealized">Unavailable</td></tr></tbody></table>
     </div>
     <div id="crystalWallFinancialStatus" class="muted">Separate Crystal Wall capital results pending scope verification.</div>
     <details id="crystalWallOpenFold"><summary>Crystal Wall open capital positions <span id="crystalWallOpenCount"></span></summary>
@@ -116,6 +121,7 @@
     <div class="architecture-label">3 / ATHENA'S EXECUTION WEAPONS</div>
     <div class="section-title entry-head"><div><h2>EXECUTION ATTACKS <span id="entryRunning" class="pill green">Running</span></h2><p>Attacks do not re-decide Athena's strategy. Normal controls are exactly ON/OFF, Stake, Min Entry and Max Entry. Lightning Plasma additionally controls maximum rays.</p></div><div><button id="modelScanBtn" class="btn primary">Run Scan</button><button id="resetSimulationBtn" class="btn light">Reset Simulation</button></div></div>
     <div class="galactic-control"><div><h3>GALACTIC EXPLOSION <span id="galacticStatus" class="pill red">OFF</span></h3><p class="muted">OFF (default): one real Attack per exact ticker. ON: the first valid door opens the ticker, then every enabled Attack whose own band and confirmation card pass may enter that same ticker. Same Attack cannot duplicate. Feeders never buy.</p></div><button id="galacticExplosionToggle" class="galactic-toggle" type="button">OFF</button></div>
+    <p class="cw-settings-guide">Crystal Wall Recovery (CW1) is a separate settings row directly under Great Horn. <a href="#crystalWallRecoverySettings">Jump to its independent Link, Athena X1/Infinity, spread, stake, price band, Aurora and Multiply controls.</a> The legacy Recovery Hunter above Great Horn is a different virtual-only attack.</p>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Execution Attack / Operator Controls</th><th>Enabled</th><th>Avg Entry</th><th>Entries</th><th>Open</th><th>Closed</th><th>W/L</th><th>Win%</th><th>P/L</th></tr></thead><tbody id="attackBody"></tbody></table></div>
     <div class="subsection-head"><div><h3>OPEN LIGHTNING PLASMA + GREAT HORN + CRYSTAL WALL TRADES <span id="openHunterCount"></span></h3><span id="hunterSummary" class="muted"></span></div></div>
     <p id="openCapitalHistoryStatus" class="capital-history-status muted" role="status" aria-live="polite">Waiting for trade history.</p>
@@ -169,6 +175,6 @@
 
   <section class="card"><div class="section-title"><div><h2>KALSHI CREDENTIALS</h2><p class="muted">LIVE requires explicit arming. Saved credentials are encrypted in PostgreSQL.</p></div><span id="connectionPill" class="pill"></span></div><form id="credentialsForm" class="credential-grid"><label>System Name<input id="systemNameInput" autocomplete="off"></label><label>API Key ID<input id="apiKeyInput" autocomplete="off"></label><label class="wide">Private Key (PEM)<textarea id="privateKeyInput" rows="7"></textarea></label><div class="wide form-actions"><button class="btn primary" type="submit">Save credentials</button><button class="btn light" id="testConnectionBtn" type="button">Test connection</button></div></form><div id="actionMessage" class="message"></div></section>
 </main>
-<script src="/app.js?v=crystal-wall-recovery-20261029-fivewave"></script>
+<script src="/app.js?v=cw1-dashboard-clarity-20261030"></script>
 </body>
 </html>

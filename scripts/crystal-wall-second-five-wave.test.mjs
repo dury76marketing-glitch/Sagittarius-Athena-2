@@ -123,6 +123,6 @@ test('W5 / three independent financial cohorts and legacy identity are distinct 
  assert.match(db,/crystalWallClosedRows:crystalWallClosed\.rows\.map\(rowEntry\)/);
  assert.match(engine,/crystalWallClosedRows=snapshot\.crystalWallClosedRows\|\|\[\]/);
  assert.match(ui,/Crystal Wall — GH recovery/);
- assert.match(ui,/Crystal Wall \(legacy CI1\)/);
+ assert.match(ui,/Recovery Hunter \(legacy CI1\)/);
  assert.match(ui,/Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery/);
 });

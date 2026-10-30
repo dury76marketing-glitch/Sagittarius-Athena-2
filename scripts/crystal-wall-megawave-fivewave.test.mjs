@@ -76,7 +76,7 @@ test('W1 / spread independence, fingerprint and legacy Crystal Wall identity',()
  assert.equal(crystalWallRecoverySpreadAllowed(quote(),{...s,crystalWallRecoveryMaxSpreadCents:3,maxSpreadCents:20}),false);
  assert.notEqual(crystalWallRecoverySettingsFingerprint(s),crystalWallRecoverySettingsFingerprint({...s,crystalWallRecoveryMaxSpreadCents:7}));
  assert.equal(crystalWallRecoverySettingsFingerprint(s),crystalWallRecoverySettingsFingerprint({...s,greatHornMaxSpreadCents:99}));
- assert.ok(read('public/app.js').includes("{legacy:'Recovery Hunter',name:'Crystal Wall (legacy CI1)'"));
+ assert.ok(read('public/app.js').includes("{legacy:'Recovery Hunter',name:'Recovery Hunter (legacy CI1)'"));
  assert.ok(read('public/app.js').includes("{legacy:'Crystal Wall Recovery',name:'Crystal Wall — GH recovery'"));
 });
 // WAVE 2: Parent authorization and durable observations.
@@ -226,7 +226,7 @@ test('W5 / UI financial verification sums three independent scoped reports and f
 });
 test('W5 / no old Crystal Wall/Recovery Hunter trading behavior renamed and no auth restriction',()=>{
  const app=read('public/app.js'),html=read('public/index.html');
- assert.ok(app.includes("{legacy:'Recovery Hunter',name:'Crystal Wall (legacy CI1)'"));
+ assert.ok(app.includes("{legacy:'Recovery Hunter',name:'Recovery Hunter (legacy CI1)'"));
  assert.ok(app.includes("{legacy:'Crystal Wall Recovery',name:'Crystal Wall — GH recovery'"));
  assert.ok(!read('src/crystalWallRecovery.mjs').includes('import pg'));
  assert.ok(html.includes('No new operator password') || !html.includes('type="password"'));

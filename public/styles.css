@@ -41,3 +41,16 @@
 .capital-history-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .capital-history-status{margin:7px 0;font-size:12px}
 .capital-attack-name{font-weight:600}
+
+/* CW1 dashboard clarity only: historic CI1 remains a different attack. */
+.cw-results-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:14px 0 7px;font-size:12px}
+.cw-results-table{border:1px solid #dbeafe;border-radius:6px;margin-bottom:10px}
+.cw-results-table thead th{background:#eff6ff}
+.cw-results-table tbody td{font-weight:600}
+.cw-settings-guide{padding:8px 10px;border:1px solid #dbeafe;background:#f8fbff;border-radius:6px;color:#334155;font-size:12px;line-height:1.45}
+.cw-settings-guide a{font-weight:700;color:#1d4ed8}
+#crystalWallRecoverySettings{scroll-margin-top:16px}
+#crystalWallRecoverySettings td{background:#f8fbff}
+#crystalWallRecoverySettings .concept-name{color:#1d4ed8}
+#crystalWallRecoverySettings.model-disabled td:not(:nth-child(3)){opacity:1}
+#crystalWallRecoverySettings:target td{box-shadow:inset 0 2px 0 #60a5fa}
