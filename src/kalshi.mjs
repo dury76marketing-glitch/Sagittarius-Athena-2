@@ -1,3 +1,5 @@
+import {OPS_LIMITS,RequestLane,validateBalance,validateRestingOrders,finiteNumber} from './operationalSafety.mjs';
+import {performance} from 'node:perf_hooks';
 import { createPrivateKey, constants, randomUUID, sign as cryptoSign } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isMatchDecisionMarket } from './doctrine.mjs';
@@ -18,6 +20,38 @@ export function exchangeBalanceCents(balance = {}, exchangeIndex = 0) {
   if (row && Number.isFinite(Number(row.balance))) return dollarCentsExact(row.balance);
   if (idx === 0 && Number.isFinite(Number(balance?.balance))) return Number(balance.balance);
   return rows.length ? 0 : null;
+}
+
+const brokerDecimal = value => ((typeof value==='number'&&Number.isFinite(value))
+  ||(typeof value==='string'&&/^\d+(?:\.\d+)?$/.test(value)))
+  &&Number.isFinite(Number(value))&&Number(value)>=0;
+const BROKER_TERMINAL = new Set(['executed','filled','canceled','cancelled','rejected','expired']);
+const BROKER_ACTIVE = new Set(['resting','pending','open']);
+
+// Receipt quantities must not use parseFloat's silent invalid-to-zero fallback.
+// Both the fixed-point GET shape and the documented V2 POST shape are accepted.
+// V2 POST legitimately omits status/ticker: do not impose GET-only fields there.
+function brokerReceiptError(raw,{clientOrderId=null,requireCounts=true}={}){
+  const d=raw?.order||raw;
+  if(!d||typeof d!=='object'||Array.isArray(d))return 'broker_order_shape_invalid';
+  if(typeof d.order_id!=='string'||!d.order_id.trim())return 'broker_order_id_missing';
+  if(clientOrderId&&d.client_order_id!=null&&String(d.client_order_id)!==String(clientOrderId))
+    return 'broker_order_client_id_mismatch';
+  const decimal=brokerDecimal;
+  for(const [name,value] of [['fill_count',d.fill_count_fp??d.fill_count],['remaining_count',d.remaining_count_fp??d.remaining_count]]){
+    if((value==null&&requireCounts)||(value!=null&&!decimal(value)))return `broker_${name}_invalid`;
+  }
+  for(const name of ['average_fee_paid','maker_fees_dollars','taker_fees_dollars']){
+    if(d[name]!=null&&!decimal(d[name]))return 'broker_fee_invalid';
+  }
+  for(const name of ['average_fill_price','yes_price_dollars']){
+    if(d[name]!=null&&(!decimal(d[name])||Number(d[name])>1))return 'broker_fill_price_invalid';
+  }
+  const initial=d.initial_count_fp??d.initial_count;
+  if(initial!=null&&(!decimal(initial)||Number(d.fill_count_fp??d.fill_count)>Number(initial)+1e-7
+    ||Number(d.remaining_count_fp??d.remaining_count)>Number(initial)+1e-7
+    ||Number(d.fill_count_fp??d.fill_count)+Number(d.remaining_count_fp??d.remaining_count)>Number(initial)+1e-7))return 'broker_initial_quantity_inconsistent';
+  return null;
 }
 
 function brokerErrorFields(raw = {}) {
@@ -102,6 +136,8 @@ export class KalshiClient {
     // so repeated quote evaluations cannot fire duplicate funding mutations
     // while Kalshi is still moving collateral between exchange indexes.
     this.exchangeFundingInFlight = new Map();
+    this.readLane=new RequestLane(OPS_LIMITS.readConcurrency,OPS_LIMITS.readPending);
+    this.mutationLane=new RequestLane(OPS_LIMITS.mutationConcurrency,OPS_LIMITS.mutationPending);
   }
 
   setCredentials(c) { this.credentials = c; }
@@ -131,7 +167,15 @@ export class KalshiClient {
         body: body == null ? undefined : JSON.stringify(body),
         signal: c.signal,
       });
-      const text = await res.text();
+      // A failed/oversized response never becomes partial broker truth.
+      let text;
+      if(res.body?.getReader){
+        const reader=res.body.getReader(),chunks=[];let size=0;
+        try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;
+          if(size>OPS_LIMITS.responseBytes)throw new Error('broker_response_size_limit');chunks.push(Buffer.from(part.value));}
+          text=Buffer.concat(chunks,size).toString('utf8');
+        }catch(error){await reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
+      }else{text=await res.text();if(Buffer.byteLength(text)>OPS_LIMITS.responseBytes)throw new Error('broker_response_size_limit');}
       let data = {};
       try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
       return { ok: res.ok, status: res.status, data, headers: res.headers };
@@ -140,33 +184,78 @@ export class KalshiClient {
     }
   }
 
-  async request(method, apiPath, body = null, {
+  async request(method,apiPath,body=null,options={}){
+    const mutation=method.toUpperCase()!=='GET'||options.mutation===true;
+    const deadline=performance.now()+OPS_LIMITS.requestBudgetMs;
+    const lane=mutation?this.mutationLane:this.readLane;
+    let started=false;
+    try{return await lane.run(()=>{started=true;return this.requestWithBudget(method,apiPath,body,{...options,mutation,deadline});},deadline);}
+    catch(error){return{ok:false,status:0,...(!started?{notSubmitted:true}:{}),data:{error:String(error?.message||'broker_request_failed')}};}
+    finally{if(mutation)this.onAccountMutation?.();}
+  }
+  resourceSnapshot(){return{reads:this.readLane.snapshot(),mutations:this.mutationLane.snapshot(),responseByteLimit:OPS_LIMITS.responseBytes};}
+
+  async requestWithBudget(method, apiPath, body = null, {
     mutation = method.toUpperCase() !== 'GET',
     timeoutMs = mutation ? 12000 : 8000,
     maxAttempts = mutation ? 1 : 6,
     authenticated = true,
     preferFallbackHost = false,
+    // HC2-R1: lane admission is not execution authorization. A queued entry
+    // must revalidate its durable intent, then its live signal/control state.
+    beforeDispatch = null,
+    confirmDispatch = null,
+    deadline=performance.now()+OPS_LIMITS.requestBudgetMs,
   } = {}) {
+    mutation=mutation||method.toUpperCase()!=='GET';
     const primaryHosts = [this.baseUrl, this.fallbackBaseUrl].filter((x, i, a) => x && a.indexOf(x) === i);
     const hosts = preferFallbackHost && primaryHosts.length > 1 ? [primaryHosts[1], primaryHosts[0]] : primaryHosts;
     let last = null;
-    const max = Math.max(1, Math.floor(Number(maxAttempts) || (mutation ? 1 : 6)));
+    const max = mutation?1:Math.max(1,Math.min(6,Math.floor(Number(maxAttempts)||6)));
     for (let attempt = 0; attempt < max; attempt += 1) {
       const host = hosts[Math.min(attempt, hosts.length - 1)] || this.baseUrl;
       try {
-        const r = await this.fetchOnce(method, host, apiPath, body, timeoutMs, authenticated);
+        if(mutation){
+          const rejectDispatch=reason=>({ok:false,status:0,notSubmitted:true,data:{error:String(reason||'dispatch_authorization_rejected').slice(0,160)}});
+          if(performance.now()>=deadline)return rejectDispatch('broker_request_deadline_exceeded');
+          if(typeof beforeDispatch==='function'){
+            let decision;
+            try{decision=await beforeDispatch();}
+            catch{return rejectDispatch('dispatch_authorization_unverified');}
+            if(decision?.ok!==true)return rejectDispatch(decision?.reason);
+          }
+          if(typeof confirmDispatch==='function'){
+            let decision;
+            try{decision=confirmDispatch();}
+            catch{return rejectDispatch('dispatch_authorization_unverified');}
+            // Deliberately synchronous: no await between this final signal
+            // check, account invalidation, signing and the network send.
+            if(decision?.ok!==true)return rejectDispatch(decision?.reason);
+          }
+        }
+        const remaining=deadline-performance.now();
+        if(remaining<=0)return{ok:false,status:0,...(mutation?{notSubmitted:true}:{}),data:{error:'broker_request_deadline_exceeded'}};
+        if(mutation)this.onAccountMutation?.();
+        const r = await this.fetchOnce(method, host, apiPath, body, Math.min(timeoutMs,remaining), authenticated);
         last = r;
         if (r.ok) return r;
         if (mutation) return r;
         const rateLimited = String(r.data?.error || r.data?.message || '').toLowerCase().includes('rate limit');
         if (![429, 502, 503, 504].includes(r.status) && !rateLimited) return r;
         if (attempt + 1 >= max) break;
-        const retryAfter = Number(r.headers?.get?.('retry-after') || 0);
-        await sleep(retryAfter ? retryAfter * 1000 : Math.min(250 * 2 ** attempt, 3000) + Math.floor(Math.random() * 100));
+        const retryValue=r.headers?.get?.('retry-after');
+        const retryAfter=retryValue==null?0:finiteNumber(retryValue)?Math.max(0,Number(retryValue)*1000):Math.max(0,Date.parse(retryValue)-Date.now())||0;
+        const delay=retryAfter||Math.min(250*2**attempt,3000)+Math.floor(Math.random()*100);
+        // Honour Retry-After; a delay beyond our request budget returns the
+        // failed response, rather than hanging or retrying before permitted.
+        if(delay>=deadline-performance.now())return r;
+        await sleep(delay);
       } catch (e) {
         last = { ok: false, status: 0, data: { error: e?.name === 'AbortError' ? 'timeout' : String(e?.message || e) } };
         if (mutation || attempt + 1 >= max) break;
-        await sleep(Math.min(250 * 2 ** attempt, 3000) + Math.floor(Math.random() * 100));
+        const delay=Math.min(250*2**attempt,3000)+Math.floor(Math.random()*100);
+        if(delay>=deadline-performance.now())break;
+        await sleep(delay);
       }
     }
     return last || { ok: false, status: 0, data: { error: 'request_failed' } };
@@ -178,37 +267,54 @@ export class KalshiClient {
       this.request('GET', '/account/limits'),
     ]);
     if (!b.ok) throw new Error(`Kalshi authentication failed (${b.status}): ${JSON.stringify(b.data)}`);
-    return { balance: b.data, limits: l.ok ? l.data : null };
+    return { balance: validateBalance(b.data), limits: l.ok ? l.data : null };
   }
 
   async getBalance() {
     const r = await this.request('GET', '/portfolio/balance');
     if (!r.ok) throw new Error(`balance ${r.status}`);
-    return r.data;
+    return validateBalance(r.data);
   }
 
   async getPositions() {
-    const out = [];
-    let cursor = '';
-    do {
-      const r = await this.request('GET', `/portfolio/positions?limit=1000&count_filter=position${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
-      if (!r.ok) throw new Error(`positions ${r.status}`);
-      out.push(...(r.data.market_positions || []));
-      cursor = r.data.cursor || '';
-    } while (cursor);
-    return out;
+    const rows=await this.completePortfolioPages({path:'/portfolio/positions?limit=1000&count_filter=position',field:'market_positions',label:'positions'});
+    const seenPositions=new Set();
+    for(const p of rows){
+      const ticker=p?.ticker??p?.market_ticker;
+      const rawQuantity=p?.position_fp??p?.position??p?.market_position;
+      if(typeof ticker!=='string'||!ticker.trim()||rawQuantity==null
+        ||!finiteNumber(rawQuantity)||seenPositions.has(ticker))throw new Error('positions_malformed_position_record');
+      seenPositions.add(ticker);
+    }
+    return rows;
   }
 
   async getOpenOrders() {
-    const out = [];
-    let cursor = '';
-    do {
-      const r = await this.request('GET', `/portfolio/orders?status=resting&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
-      if (!r.ok) break;
-      out.push(...(r.data.orders || []));
-      cursor = r.data.cursor || '';
-    } while (cursor);
-    return out;
+    return validateRestingOrders(await this.completePortfolioPages({path:'/portfolio/orders?status=resting&limit=1000',field:'orders',label:'resting_orders'}));
+  }
+
+  // HC1: an incomplete account response is never authoritative broker truth.
+  // In particular, repeated cursors previously looped without bound and a
+  // missing market_positions array silently looked like an empty account.
+  async completePortfolioPages({path,field,label,maxPages=100}={}) {
+    const rows=[];
+    const deadline=performance.now()+OPS_LIMITS.requestBudgetMs;
+    const seen=new Set();
+    let cursor='';
+    for(let page=0;page<maxPages;page++){
+      if(performance.now()>=deadline)throw new Error(`${label}_collection_deadline`);
+      const r=await this.request('GET',`${path}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);
+      if(!r?.ok)throw new Error(`${label}_request_failed_${r?.status??'unknown'}`);
+      if(!Array.isArray(r.data?.[field]))throw new Error(`${label}_malformed_page`);
+      if(r.data[field].length>1000)throw new Error(`${label}_oversized_page`);
+      rows.push(...r.data[field]);
+      const next=r.data.cursor;
+      if(next!=null&&typeof next!=='string')throw new Error(`${label}_invalid_cursor`);
+      if(!next)return rows;
+      if(seen.has(next))throw new Error(`${label}_repeated_cursor`);
+      seen.add(next);cursor=next;
+    }
+    throw new Error(`${label}_page_limit_exceeded`);
   }
 
   async getOpenMarkets(maxPages = 6, maxMarkets = 3000) {
@@ -462,12 +568,20 @@ export class KalshiClient {
   buildOrder({ ticker, action, count, priceCents, clientOrderId, exchangeIndex = -1, timeInForce = 'immediate_or_cancel' }) {
     const tif=String(timeInForce||'immediate_or_cancel');
     if(!['immediate_or_cancel','fill_or_kill','good_till_canceled'].includes(tif))throw new Error(`invalid timeInForce: ${tif}`);
+    // Never convert a bad action into SELL or clamp a planned order into a
+    // different economic instruction. Valid fractional exits remain supported.
+    const fixed=(value,scale)=>brokerDecimal(value)&&Math.abs(Number(value)*scale-Math.round(Number(value)*scale))<=1e-7;
+    if(typeof ticker!=='string'||!ticker.trim()||ticker!==ticker.trim())throw new Error('invalid_order_ticker');
+    if(typeof clientOrderId!=='string'||!clientOrderId.trim()||clientOrderId!==clientOrderId.trim())throw new Error('invalid_order_client_id');
+    if(!['buy','sell'].includes(action))throw new Error('invalid_order_action');
+    if(!fixed(count,100)||!(Number(count)>0)||!Number.isSafeInteger(Math.round(Number(count)*100)))throw new Error('invalid_order_quantity');
+    if(!fixed(priceCents,100)||!(Number(priceCents)>=1&&Number(priceCents)<=99))throw new Error('invalid_order_price');
     return {
       ticker,
       client_order_id: clientOrderId,
       side: action === 'buy' ? 'bid' : 'ask',
-      count: Math.max(0, count).toFixed(2),
-      price: (Math.max(1, Math.min(99, priceCents)) / 100).toFixed(4),
+      count: Number(count).toFixed(2),
+      price: (Number(priceCents) / 100).toFixed(4),
       time_in_force: tif,
       self_trade_prevention_type: 'taker_at_cross',
       post_only: false,
@@ -484,6 +598,11 @@ export class KalshiClient {
     const d = raw?.order || raw || {};
     const fillCount = fp(d.fill_count_fp ?? d.fill_count);
     const averageFeePaidCents = d.average_fee_paid != null ? dollarCentsExact(d.average_fee_paid) : null;
+    // GET summaries report cumulative maker/taker fees, whereas V2 POST may
+    // report an average. Require both cumulative fields; absence is not zero.
+    const cumulativeFeeCents=d.maker_fees_dollars!=null&&d.taker_fees_dollars!=null
+      &&brokerDecimal(d.maker_fees_dollars)&&brokerDecimal(d.taker_fees_dollars)
+      ?dollarCentsExact(d.maker_fees_dollars)+dollarCentsExact(d.taker_fees_dollars):null;
     const brokerError = brokerErrorFields(raw);
     return {
       ok: Boolean(raw),
@@ -494,9 +613,9 @@ export class KalshiClient {
       fillCount,
       remainingCount: fp(d.remaining_count_fp ?? d.remaining_count),
       averageFillPriceCents: d.average_fill_price != null
-        ? dollarCents(d.average_fill_price)
-        : d.yes_price_dollars != null ? dollarCents(d.yes_price_dollars) : null,
-      feePaidCents: averageFeePaidCents == null ? null : averageFeePaidCents * fillCount,
+        ? dollarCentsExact(d.average_fill_price)
+        : d.yes_price_dollars != null ? dollarCentsExact(d.yes_price_dollars) : null,
+      feePaidCents: averageFeePaidCents == null ? cumulativeFeeCents : averageFeePaidCents * fillCount,
       ...brokerError,
       exchangeIndex: finiteExchangeIndex(d.exchange_index),
       raw,
@@ -530,17 +649,18 @@ export class KalshiClient {
         }
         const rawCount = f?.count_fp ?? f?.count;
         const c = Number(rawCount);
-        if (rawCount == null || !Number.isFinite(c) || c <= 0) return incomplete('fill_history_invalid_quantity');
-        const px = f.yes_price_dollars != null || f.price_dollars != null
-          ? dollarCentsExact(f.yes_price_dollars ?? f.price_dollars)
-          : Number(f.yes_price ?? f.price);
+        if (!brokerDecimal(rawCount) || c <= 0) return incomplete('fill_history_invalid_quantity');
+        const isDollars=f.yes_price_dollars!=null||f.price_dollars!=null;
+        const rawPrice=isDollars?(f.yes_price_dollars??f.price_dollars):(f.yes_price??f.price);
+        if(!brokerDecimal(rawPrice))return incomplete('fill_history_invalid_price');
+        const px=Number(rawPrice)*(isDollars?100:1);
         if (!Number.isFinite(px) || px <= 0 || px > 100) return incomplete('fill_history_invalid_price');
         count += c;
         notional += c * px;
         if (f.fee_cost == null) feeComplete = false;
         else {
           const rawFee = Number(f.fee_cost);
-          if (!Number.isFinite(rawFee) || rawFee < 0) return incomplete('fill_history_invalid_fee');
+          if (!brokerDecimal(f.fee_cost)) return incomplete('fill_history_invalid_fee');
           feeCostCents += rawFee * 100;
         }
       }
@@ -560,7 +680,14 @@ export class KalshiClient {
   // Order summaries and the complete fill ledger must agree before any
   // terminal/no-fill decision or cumulative position delta is accepted.
   async verifiedOrder(raw, clientOrderId) {
+    const invalid=brokerReceiptError(raw,{clientOrderId});
+    if(invalid)return {found:true,authoritative:false,order:null,reason:invalid};
     const order = this.resultFrom(raw, clientOrderId);
+    const reportedStatus=raw?.status;
+    if(reportedStatus!=null&&!BROKER_TERMINAL.has(String(reportedStatus))&&!BROKER_ACTIVE.has(String(reportedStatus)))
+      return {found:true,authoritative:false,order:null,reason:'broker_order_status_unknown'};
+    if(BROKER_TERMINAL.has(String(reportedStatus))&&order.remainingCount>0)
+      return {found:true,authoritative:false,order:null,reason:'broker_terminal_remaining_conflict'};
     if (!order.orderId) return { found:true, authoritative:false, order:null, reason:'broker_order_id_missing' };
     const fills = await this.fillTruth(order.orderId);
     if (!fills?.authoritative) return { found:true, authoritative:false, order:null, reason:fills?.reason || 'fill_history_unavailable' };
@@ -583,6 +710,13 @@ export class KalshiClient {
       order.fillCount = 0;
       order.feePaidCents = 0;
     }
+    // Fixed-point GET responses can omit status. Derive only after exact-order
+    // identity, remaining quantity and ALL fill pages have been verified. A
+    // V2 POST receipt alone never reaches this branch and cannot prove terminality.
+    if(reportedStatus==null){
+      order.status=order.remainingCount>0?'resting':order.fillCount>0?'executed':'canceled';
+      order.statusEvidence='verified_order_remaining_and_complete_fills';
+    }
     return { found:true, authoritative:true, order };
   }
 
@@ -597,7 +731,7 @@ export class KalshiClient {
       return { found:true, authoritative:false, order:null, mismatch:true };
     if (String(raw.order_id || '') !== String(orderId))
       return { found:true, authoritative:false, order:null, mismatch:true };
-    if (expectedTicker && raw.ticker && String(raw.ticker) !== String(expectedTicker))
+    if (expectedTicker && String(raw.ticker||'') !== String(expectedTicker))
       return { found:true, authoritative:false, order:null, mismatch:true, reason:'broker_order_ticker_mismatch' };
     return this.verifiedOrder(raw, raw.client_order_id || clientOrderId);
   }
@@ -617,7 +751,7 @@ export class KalshiClient {
         if (!r?.ok || !Array.isArray(r.data?.orders)) break;
         const raw = r.data.orders.find(x => x.client_order_id === clientOrderId);
         if (raw) {
-          if (raw.ticker && String(raw.ticker)!==String(ticker))
+          if (String(raw.ticker||'')!==String(ticker))
             return {found:true,authoritative:false,order:null,mismatch:true,reason:'broker_order_ticker_mismatch'};
           return this.verifiedOrder(raw, clientOrderId);
         }
@@ -651,7 +785,7 @@ export class KalshiClient {
         const cid = String(raw?.client_order_id || '');
         if (!cid.startsWith(prefix)) continue;
         const rr = this.resultFrom(raw, cid);
-        if (!rr.orderId || (raw.ticker && String(raw.ticker) !== String(ticker))) { authoritative = false; continue; }
+        if (!rr.orderId || (String(raw.ticker||'') !== String(ticker))) { authoritative = false; continue; }
         if (seenOrderIds.has(rr.orderId)) { authoritative = false; continue; }
         seenOrderIds.add(rr.orderId);
         const verified = await this.verifiedOrder(raw, cid);
@@ -818,20 +952,37 @@ export class KalshiClient {
     return { ok:false, reason:'live_exchange_rebalance_requested', retryable:true, exchangeIndex:idx, availableCents, requiredCents:need, fundingRequestedCents:Number(moved.amountCents||moveCents), transferIds, transfers:[moved] };
   }
 
-  async placeOrder(args) {
-    const payload = this.buildOrder(args);
+  async placeOrder(args,{beforeDispatch=null,confirmDispatch=null}={}) {
+    let payload;
+    try{payload=this.buildOrder(args);}catch(error){
+      return {ok:false,notSubmitted:true,ambiguous:false,httpStatus:0,fillCount:0,
+        orderId:null,clientOrderId:args?.clientOrderId||null,
+        localRejectionReason:String(error?.message||'invalid_order_arguments').slice(0,160)};
+    }
     const minTs = Math.floor(Date.now() / 1000) - 120;
     let r;
     try {
-      r = await this.request('POST', '/portfolio/events/orders', payload, { mutation: true, timeoutMs: 12000 });
+      r = await this.request('POST', '/portfolio/events/orders', payload, { mutation: true, timeoutMs: 12000,
+        beforeDispatch,confirmDispatch });
     } catch {
       r = { ok: false, status: 0, data: { error: 'network_error' } };
     }
-    if (r.ok) return { ...this.resultFrom(r.data, args.clientOrderId), httpStatus: r.status, ok: true };
-    if ([0, 409, 502, 503, 504].includes(r.status)) {
-      const truth = await this.findOrderByClientId(args.ticker, args.clientOrderId, minTs);
+    const invalid=r.ok?brokerReceiptError(r.data,{clientOrderId:args.clientOrderId}):null;
+    if (r.ok&&!invalid) return { ...this.resultFrom(r.data, args.clientOrderId), httpStatus: r.status, ok: true };
+    // Local refusal before transport is positive proof of non-submission. It
+    // must not become an ambiguous broker order or start absence polling.
+    if(r.notSubmitted===true)return {...this.resultFrom(r.data,args.clientOrderId),ok:false,ambiguous:false,
+      notSubmitted:true,localRejectionReason:String(r.data?.error||'dispatch_not_authorized').slice(0,160),httpStatus:r.status};
+    if (invalid || [0,408,409].includes(Number(r.status)) || Number(r.status)>=500) {
+      // A server error or malformed success is not proof that the matching
+      // engine did nothing. Look up the ORIGINAL client ID; never send again.
+      const truth = await this.findOrderByClientId(args.ticker, args.clientOrderId, minTs).catch(()=>null);
       if (truth) return { ...truth, httpStatus: r.status };
-      return { ...this.resultFrom(r.data, args.clientOrderId, true), ok: false, ambiguous: true, httpStatus: r.status };
+      const unverified=this.resultFrom(r.data,args.clientOrderId,true);
+      return {...unverified,ok:false,ambiguous:true,httpStatus:r.status,
+        orderId:invalid==='broker_order_client_id_mismatch'?null:unverified.orderId,
+        fillCount:0,averageFillPriceCents:null,feePaidCents:null,
+        unverifiedFillCount:unverified.fillCount,reconciliationReason:invalid||'broker_submission_outcome_unknown'};
     }
     return { ...this.resultFrom(r.data, args.clientOrderId), ok: false, httpStatus: r.status };
   }
@@ -841,6 +992,13 @@ export function classifyLiveOrderResult(result = {}) {
   const fill = Number(result?.fillCount || 0);
   if (fill > 0) return { kind: 'fill', reason: 'live_fill' };
   if (result?.ambiguous === true) return { kind: 'ambiguous', reason: 'live_ambiguous_pending' };
+  // A receipt that can still execute is not an IOC no-fill result. Keep the
+  // original durable client ID until a terminal broker readback is available.
+  const brokerStatus=String(result?.status||'').toLowerCase();
+  if (result?.orderId && (BROKER_ACTIVE.has(brokerStatus)
+      || ['active','accepted'].includes(brokerStatus) || Number(result?.remainingCount)>0))
+    return {kind:'ambiguous',reason:'live_order_nonterminal_pending'};
+
   const status = Number(result?.httpStatus || 0);
   const msg = String(result?.brokerError || result?.error || result?.raw?.error || result?.raw?.message || '').toLowerCase();
   if (status === 429 || msg.includes('rate limit')) return { kind: 'rejected', reason: 'live_broker_rate_limited' };

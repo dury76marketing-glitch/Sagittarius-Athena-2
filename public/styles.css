@@ -32,3 +32,12 @@
 .attack-authority-note{font-size:10px;color:#475569;font-weight:700;margin-top:4px}
 
 .cosmo-filters{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}.cosmo-filter.active{background:#111827;color:#fff;border-color:#111827}
+/* CAPITAL TRADE HISTORY: bounded DOM viewport; the ledger is fetched by keyset pages. */
+.capital-scroll{max-height:510px;overflow:auto;overscroll-behavior:contain;border:1px solid #e2e8f0;border-radius:6px}
+.capital-scroll thead th{position:sticky;top:0;z-index:1;background:#f8fafc}
+.capital-scroll tbody tr.capital-entry-row{height:44px}
+.capital-scroll tbody tr.capital-entry-row td{height:44px}
+.capital-scroll tbody tr.capital-spacer-row td{padding:0!important;border:0!important;line-height:0;font-size:0}
+.capital-history-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.capital-history-status{margin:7px 0;font-size:12px}
+.capital-attack-name{font-weight:600}

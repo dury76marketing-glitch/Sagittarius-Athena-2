@@ -3,8 +3,12 @@ import {PORTFOLIO_CONCEPTS,isShadowSaintEntry,kalshiGeneralTakerFeeEstimateCents
 export const EXECUTION_REPORT_VERSION='EXECUTION-REPORT-V3';
 // Separate performance attribution from actual account/exposure accounting.
 export const LIGHTNING_REPORT_VERSION='APS2-LIGHTNING-REPORT-V1';
+export const GREAT_HORN_CONCEPT='Great Horn Recovery';
+export const CRYSTAL_WALL_RECOVERY_CONCEPT='Crystal Wall Recovery';
+export const crystalWallRecoveryCapital=(e)=>e?.conceptName===CRYSTAL_WALL_RECOVERY_CONCEPT&&!isShadowSaintEntry(e);
+export const greatHornCapital=(e)=>e?.conceptName===GREAT_HORN_CONCEPT&&!isShadowSaintEntry(e);
 export const lightningCapital=(e)=>e?.conceptName==='Lightning Plasma'&&!isShadowSaintEntry(e);
-export const EXECUTION_ATTACKS=Object.freeze(['Crash Recovery Hunter','Lightning Plasma']);
+export const EXECUTION_ATTACKS=Object.freeze(['Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery']);
 export const EXPOSURE_STATUSES=Object.freeze(['open','exit_pending','entry_pending','pending_recovery']);
 const finite=(v)=>v!==null&&v!==undefined&&Number.isFinite(Number(v));
 const n=(v)=>finite(v)?Number(v):0;
@@ -136,7 +140,7 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
  create or replace function sag_execution_realization_v3() returns trigger language plpgsql as $$
  declare delta double precision;at_ms bigint;
  begin
-   if NEW.concept_name not in ('Crash Recovery Hunter','Lightning Plasma') or coalesce(NEW.execution_class,'CAPITAL')='SHADOW_SAINT'
+   if NEW.concept_name not in ('Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery') or coalesce(NEW.execution_class,'CAPITAL')='SHADOW_SAINT'
      or coalesce(NEW.entry_config->>'executionClass','CAPITAL')='SHADOW_SAINT' then return NEW;end if;
    at_ms:=(extract(epoch from clock_timestamp())*1000)::bigint;
    if TG_OP='INSERT' then
@@ -155,7 +159,7 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
    select e.id,'initial',e.pnl_cents,e.opened_at_ms,
      greatest(e.opened_at_ms,coalesce(e.closed_at_ms,(extract(epoch from clock_timestamp())*1000)::bigint)),
      'legacy_time_interval'
-   from sag_entries e where e.concept_name in ('Crash Recovery Hunter','Lightning Plasma')
+   from sag_entries e where e.concept_name in ('Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery')
    and coalesce(e.execution_class,'CAPITAL')<>'SHADOW_SAINT' and coalesce(e.entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT'
    and not exists(select 1 from sag_execution_realizations_v3 j where j.entry_id=e.id) on conflict do nothing;
  drop trigger if exists sag_execution_realization_observer_v3 on sag_entries;

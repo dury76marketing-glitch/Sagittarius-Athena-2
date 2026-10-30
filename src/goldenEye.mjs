@@ -1,3 +1,4 @@
+import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
 import { createHash } from 'node:crypto';
 import { GOLDEN_EYE, PORTFOLIO_CONCEPTS } from './doctrine.mjs';
 
@@ -455,7 +456,7 @@ export class GoldenEye{
     const filled=Math.max(0,Math.min(remaining,n(exec?.filled)));
     if(filled<=0)return 0;
     const original=Math.max(0,n(entry.count));
-    const totalEntryFee=n(entry.entryFeeCents)>0?n(entry.entryFeeCents):n(settings.simFeeCents)*original;
+    const totalEntryFee=n(entry.entryFeeCents)>0||hasKnownZeroLiveEntryFee(entry)?n(entry.entryFeeCents):n(settings.simFeeCents)*original;
     const allocatedEntryFee=original>0?totalEntryFee*(filled/original):0;
     const exitFee=n(settings.simFeeCents)*filled;
     return (n(exec?.avgCents)-n(entry.entryPriceCents))*filled-allocatedEntryFee-exitFee;

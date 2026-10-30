@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SAGITTARIUS</title>
-  <link rel="stylesheet" href="/styles.css?v=R61MW1">
+  <link rel="stylesheet" href="/styles.css?v=capital-history-20261027-r1">
 </head>
 <body>
 <main class="shell">
   <section class="top">
-    <div><h1>SAGITTARIUS</h1><p><strong>COSMO SHADOW → GREEN → ATOMIC THUNDER → ATHENA → FIRE → ATTACK → INFINITY BREAK</strong> · Aurora Execution protects the loss side.</p><p><strong>APS2: ATHENA SHADOW &rarr; STARLIGHT SHADOW &rarr; LIGHTNING CAPITAL.</strong> Starlight retains its complete virtual recovery, Aurora and exit lifecycle without risking capital. Lightning can follow a verified open or profitably closed virtual Starlight parent using its ORIGINAL entry price. A losing, break-even or safety close revokes new continuation entries. Existing genuine positions remain real and protected.</p></div>
+    <div><h1>SAGITTARIUS</h1><p><strong>COSMO SHADOW → GREEN → ATOMIC THUNDER → ATHENA → FIRE → ATTACK → INFINITY BREAK</strong> · Aurora Execution protects the loss side.</p><p><strong>CW1 SECOND RECOVERY (SIM VALIDATION REQUIRED): ATHENA SHADOW &rarr; STARLIGHT SHADOW &rarr; LIGHTNING CAPITAL &rarr; GREAT HORN CAPITAL RECOVERY &rarr; CRYSTAL WALL RECOVERY (BOTH RECOVERY LIVE BUY ROUTES RELEASE GATED).</strong> Starlight retains its complete virtual recovery, Aurora and exit lifecycle without risking capital. Lightning can follow a verified open or profitably closed virtual Starlight parent using its ORIGINAL entry price. A losing, break-even or safety close revokes new continuation entries. Existing genuine positions remain real and protected.</p></div>
     <div class="top-actions"><a class="btn light" href="/api/diagnostics/download">Download Diagnostics</a><a class="btn light" href="/api/trading-logs/download">Download Trading Logs</a></div>
   </section>
 
@@ -19,11 +19,78 @@
   <section id="errorWatchdog" class="alert hidden"></section>
   <section class="status-line"><strong id="madridClock">--:--:--</strong><span id="uptime"></span><span id="systemStatus" class="pill"></span></section>
 
+  <section id="capitalCombinedPerformancePanel" class="card">
+    <div class="section-title"><h2>COMBINED CAPITAL RESULTS — LIGHTNING + GREAT HORN + CRYSTAL WALL RECOVERY</h2><span class="muted">Same system, owner, SIM/LIVE mode and reset. Only verified Lightning Plasma, Great Horn and Crystal Wall Recovery capital; virtual signals and legacy positions excluded.</span></div>
+    <div class="stats-grid" aria-label="Combined Lightning, Great Horn and Crystal Wall capital results">
+      <div class="stat"><span>Win Rate</span><strong id="capitalCombinedWinRate">Unavailable</strong></div>
+      <div class="stat"><span>Open</span><strong id="capitalCombinedOpen">Unavailable</strong></div>
+      <div class="stat"><span>Closed</span><strong id="capitalCombinedClosed">Unavailable</strong></div>
+      <div class="stat"><span>Wins / Losses</span><strong id="capitalCombinedWinsLosses">Unavailable</strong></div>
+      <div class="stat"><span>Realized P/L</span><strong id="capitalCombinedRealized">Unavailable</strong></div>
+      <div class="stat"><span>Unrealized P/L</span><strong id="capitalCombinedUnrealized">Unavailable</strong></div>
+      <div class="stat"><span>Profit Today</span><strong id="capitalCombinedToday">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Week</span><strong id="capitalCombinedWeek">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Month</span><strong id="capitalCombinedMonth">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Year</span><strong id="capitalCombinedYear">Unavailable</strong></div>
+      <div class="stat"><span>Pending BUY orders</span><strong id="capitalCombinedPending">Unavailable</strong></div>
+    </div>
+    <div id="capitalCombinedFinancialStatus" class="muted">Waiting for matching Lightning, Great Horn and Crystal Wall Recovery financial reports.</div>
+  </section>
   <section id="lightningPerformancePanel" class="card">
     <div class="section-title"><h2>LIGHTNING PLASMA - SYSTEM RESULTS</h2><span class="muted">Lightning capital only for the selected system, owner, mode and reset. Athena, virtual Starlight, Cosmos and legacy capital are excluded. Periods follow the Madrid calendar.</span></div>
     <div class="stats-grid"><div class="stat"><span>Win Rate</span><strong id="winRate">Unavailable</strong></div><div class="stat"><span>Unrealized P/L</span><strong id="unrealized">Unavailable</strong></div><div class="stat"><span>Realized P/L</span><strong id="realized">Unavailable</strong></div><div class="stat"><span>Profit Today</span><strong id="profitToday">Unavailable</strong></div><div class="stat"><span>Profit This Week</span><strong id="profitWeek">Unavailable</strong></div><div class="stat"><span>Profit This Month</span><strong id="profitMonth">Unavailable</strong></div><div class="stat"><span>Profit This Year</span><strong id="profitYear">Unavailable</strong></div><div class="stat"><span>Open</span><strong id="openCount">Unavailable</strong></div><div class="stat"><span>Closed</span><strong id="closedPerfCount">Unavailable</strong></div><div class="stat"><span>Release</span><strong id="releaseLabel" style="font-size:0.95rem;overflow-wrap:anywhere">APS2 integration candidate</strong></div></div>
     <div id="executionFinancialStatus" class="muted">Waiting for a verified financial snapshot.</div>
     <details id="executionPerformanceDetails"><summary>Lightning-only performance detail</summary><div id="executionAttackBreakdown" class="stats-grid"></div></details>
+  </section>
+  <section id="greatHornPerformancePanel" class="card">
+    <div class="section-title"><h2>GREAT HORN — SEPARATE RECOVERY RESULTS</h2><span class="muted">Great Horn SIM recovery uses verified Lightning-loss authorization and independent financial safeguards. LIVE new BUYs remain release-gated pending PostgreSQL and Railway proof. Lightning totals stay separate.</span></div>
+    <div id="gh1BuildWarning" class="message negative hidden" role="alert"></div>
+    <div class="stats-grid" id="greatHornMetricCards" aria-label="Great Horn recovery-only financial metrics">
+      <div class="stat"><span>Win Rate</span><strong id="gh1WinRate">Unavailable</strong></div>
+      <div class="stat"><span>Open</span><strong id="gh1Open">Unavailable</strong></div>
+      <div class="stat"><span>Closed</span><strong id="gh1Closed">Unavailable</strong></div>
+      <div class="stat"><span>Wins / Losses</span><strong id="gh1WinsLosses">Unavailable</strong></div>
+      <div class="stat"><span>Realized P/L</span><strong id="gh1Realized">Unavailable</strong></div>
+      <div class="stat"><span>Unrealized P/L</span><strong id="gh1Unrealized">Unavailable</strong></div>
+      <div class="stat"><span>Pending BUY orders</span><strong id="gh1Pending">Unavailable</strong></div>
+      <div class="stat"><span>Great Horn Link</span><strong id="gh1LinkState">Unavailable</strong></div>
+      <div class="stat"><span>Profit Today</span><strong id="gh1Today">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Week</span><strong id="gh1Week">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Month</span><strong id="gh1Month">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Year</span><strong id="gh1Year">Unavailable</strong></div>
+    </div>
+    <div id="greatHornFinancialStatus" class="muted">Separate Great Horn capital results pending scope verification.</div>
+    <details id="greatHornOpenFold"><summary>Great Horn open capital positions <span id="greatHornOpenCount"></span></summary>
+      <div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Lightning parent / seat</th><th>Entry</th><th>Current bid</th><th>Remaining</th><th>Status</th><th>Unrealized</th></tr></thead><tbody id="greatHornOpenBody"></tbody></table></div>
+    </details>
+    <details id="greatHornClosedFold"><summary>Great Horn closed capital positions <span id="greatHornClosedCount"></span></summary>
+      <div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Lightning parent / seat</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Reason</th><th>Realized P/L</th></tr></thead><tbody id="greatHornClosedBody"></tbody></table></div>
+    </details>
+  </section>
+  <section id="crystalWallPerformancePanel" class="card">
+    <div class="section-title"><h2>CRYSTAL WALL — SEPARATE RECOVERY RESULTS</h2><span class="muted">Crystal Wall SIM recovery uses verified Great Horn-loss authorization and independent financial safeguards. LIVE new BUYs remain release-gated pending PostgreSQL and Railway proof. Lightning totals stay separate.</span></div>
+    <div id="cw1BuildWarning" class="message negative hidden" role="alert"></div>
+    <div class="stats-grid" id="crystalWallMetricCards" aria-label="Crystal Wall recovery-only financial metrics">
+      <div class="stat"><span>Win Rate</span><strong id="cw1WinRate">Unavailable</strong></div>
+      <div class="stat"><span>Open</span><strong id="cw1Open">Unavailable</strong></div>
+      <div class="stat"><span>Closed</span><strong id="cw1Closed">Unavailable</strong></div>
+      <div class="stat"><span>Wins / Losses</span><strong id="cw1WinsLosses">Unavailable</strong></div>
+      <div class="stat"><span>Realized P/L</span><strong id="cw1Realized">Unavailable</strong></div>
+      <div class="stat"><span>Unrealized P/L</span><strong id="cw1Unrealized">Unavailable</strong></div>
+      <div class="stat"><span>Pending BUY orders</span><strong id="cw1Pending">Unavailable</strong></div>
+      <div class="stat"><span>Crystal Wall Link</span><strong id="cw1LinkState">Unavailable</strong></div>
+      <div class="stat"><span>Profit Today</span><strong id="cw1Today">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Week</span><strong id="cw1Week">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Month</span><strong id="cw1Month">Unavailable</strong></div>
+      <div class="stat"><span>Profit This Year</span><strong id="cw1Year">Unavailable</strong></div>
+    </div>
+    <div id="crystalWallFinancialStatus" class="muted">Separate Crystal Wall capital results pending scope verification.</div>
+    <details id="crystalWallOpenFold"><summary>Crystal Wall open capital positions <span id="crystalWallOpenCount"></span></summary>
+      <div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Great Horn parent / seat</th><th>Entry</th><th>Current bid</th><th>Remaining</th><th>Status</th><th>Unrealized</th></tr></thead><tbody id="crystalWallOpenBody"></tbody></table></div>
+    </details>
+    <details id="crystalWallClosedFold"><summary>Crystal Wall closed capital positions <span id="crystalWallClosedCount"></span></summary>
+      <div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Great Horn parent / seat</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Reason</th><th>Realized P/L</th></tr></thead><tbody id="crystalWallClosedBody"></tbody></table></div>
+    </details>
   </section>
   <details id="accountBalancesPanel" class="card"><summary><strong>ACTUAL ACCOUNT BALANCES</strong> <span class="muted">Not Lightning strategy performance; includes genuine legacy exposure.</span></summary><div class="stats-grid"><div class="stat"><span id="portfolioLabel">Portfolio Value</span><strong id="portfolioValue">Unavailable</strong></div><div class="stat"><span id="cashLabel">Simulation Free Cash</span><strong id="simFreeCash">Unavailable</strong></div></div><div id="brokerBookNote" class="muted"></div></details>
 
@@ -50,8 +117,10 @@
     <div class="section-title entry-head"><div><h2>EXECUTION ATTACKS <span id="entryRunning" class="pill green">Running</span></h2><p>Attacks do not re-decide Athena's strategy. Normal controls are exactly ON/OFF, Stake, Min Entry and Max Entry. Lightning Plasma additionally controls maximum rays.</p></div><div><button id="modelScanBtn" class="btn primary">Run Scan</button><button id="resetSimulationBtn" class="btn light">Reset Simulation</button></div></div>
     <div class="galactic-control"><div><h3>GALACTIC EXPLOSION <span id="galacticStatus" class="pill red">OFF</span></h3><p class="muted">OFF (default): one real Attack per exact ticker. ON: the first valid door opens the ticker, then every enabled Attack whose own band and confirmation card pass may enter that same ticker. Same Attack cannot duplicate. Feeders never buy.</p></div><button id="galacticExplosionToggle" class="galactic-toggle" type="button">OFF</button></div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Execution Attack / Operator Controls</th><th>Enabled</th><th>Avg Entry</th><th>Entries</th><th>Open</th><th>Closed</th><th>W/L</th><th>Win%</th><th>P/L</th></tr></thead><tbody id="attackBody"></tbody></table></div>
-    <div class="subsection-head"><div><h3>OPEN LIGHTNING PLASMA TRADES <span id="openHunterCount"></span></h3><span id="hunterSummary" class="muted"></span></div></div>
-    <div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Attack</th><th>Entry</th><th>Current</th><th>Peak</th><th>Aurora</th><th>Profit Authority</th><th>Count</th><th>Status</th><th>P/L</th><th>Operator</th></tr></thead><tbody id="openHunterBody"></tbody></table></div>
+    <div class="subsection-head"><div><h3>OPEN LIGHTNING PLASMA + GREAT HORN + CRYSTAL WALL TRADES <span id="openHunterCount"></span></h3><span id="hunterSummary" class="muted"></span></div></div>
+    <p id="openCapitalHistoryStatus" class="capital-history-status muted" role="status" aria-live="polite">Waiting for trade history.</p>
+    <div class="table-wrap capital-scroll" id="openCapitalScroll" tabindex="0" role="region" aria-label="Open Lightning Plasma, Great Horn and Crystal Wall capital trades; scroll to load older records"><table><thead><tr><th>Ticker</th><th>Attack</th><th>Entry</th><th>Current</th><th>Peak</th><th>Aurora</th><th>Profit Authority</th><th>Count</th><th>Status</th><th>P/L</th><th>Operator</th></tr></thead><tbody id="openHunterBody"></tbody></table></div>
+    <div class="capital-history-actions"><button id="openCapitalOlderBtn" class="btn light" type="button">Load older open trades</button><button id="openCapitalRefreshBtn" class="btn light" type="button">Refresh open trades</button></div>
   </section>
 
   <section id="infinityBreakSection" class="card infinity-section">
@@ -91,7 +160,7 @@
     <details id="shadowSaintsFold" class="card long-table-fold"><summary><strong>SHADOW SAINTS — RESEARCH / SIGNAL ENGINE <span id="shadowSaintCount"></span></strong> <span class="muted">VIRTUAL / COUNTERFACTUAL · no broker money</span></summary>
       <p id="shadowWorkerStatus" class="muted"></p><div class="cosmo-filters"><select id="shadowStatusFilter" aria-label="Shadow trade status"><option value="">All virtual trades</option><option value="open">Open</option><option value="closed">Closed</option></select><button class="btn light" id="shadowRefreshBtn" type="button">Refresh virtual history</button><button class="btn light" id="shadowOlderBtn" type="button">Older virtual trades</button></div>
       <p id="shadowHistoryMessage" class="muted"></p><div class="table-wrap"><table><thead><tr><th>Attack / ID</th><th>Ticker</th><th>Mode / Epoch</th><th>Quantity</th><th>Virtual Entry</th><th>Current / Exit</th><th>Frozen Stop</th><th>Status / Reason</th><th>Hypothetical Fees</th><th>Virtual Net P/L</th><th>Virtual proof / Authority</th><th>Recovery / Lightning authority</th></tr></thead><tbody id="shadowSaintBody"></tbody></table></div></details>
-<details id="closedPositionsFold" class="card long-table-fold" data-body="closedBody"><summary><strong>CLOSED LIGHTNING PLASMA TRADES <span id="closedCount"></span></strong></summary><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Attack</th><th>Entry</th><th>Exit</th><th title="Latest observed market price after the exit; this display price is not itself an executable-depth claim.">Post Price</th><th title="Latest post-exit market price minus the actual exit price.">Delta Exit</th><th title="Best full-position executable bid observed after exit, with its price difference versus the actual exit.">Best Exec</th><th title="Additional net P/L that would have been available at the best full-position executable post-exit observation versus the actual realized exit.">Missed Upside</th><th title="Worst full-position executable bid observed after exit, with its price difference versus the actual exit.">Worst Exec</th><th title="Net capital preserved by exiting when Sagittarius did versus the worst full-position executable post-exit observation.">Loss Avoided</th><th>Reason</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody id="closedBody"></tbody></table></div></details>
+<details id="closedPositionsFold" class="card long-table-fold" data-body="closedBody"><summary><strong>CLOSED LIGHTNING PLASMA + GREAT HORN + CRYSTAL WALL TRADES <span id="closedCount"></span></strong></summary><p id="closedCapitalHistoryStatus" class="capital-history-status muted" role="status" aria-live="polite">Open this table to load capital trade history.</p><div class="table-wrap capital-scroll" id="closedCapitalScroll" tabindex="0" role="region" aria-label="Closed Lightning Plasma, Great Horn and Crystal Wall capital trades; scroll to load older records"><table><thead><tr><th>Ticker</th><th>Attack</th><th>Entry</th><th>Exit</th><th title="Latest observed market price after the exit; this display price is not itself an executable-depth claim.">Post Price</th><th title="Latest post-exit market price minus the actual exit price.">Delta Exit</th><th title="Best full-position executable bid observed after exit, with its price difference versus the actual exit.">Best Exec</th><th title="Additional net P/L that would have been available at the best full-position executable post-exit observation versus the actual realized exit.">Missed Upside</th><th title="Worst full-position executable bid observed after exit, with its price difference versus the actual exit.">Worst Exec</th><th title="Net capital preserved by exiting when Sagittarius did versus the worst full-position executable post-exit observation.">Loss Avoided</th><th>Reason</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody id="closedBody"></tbody></table></div><div class="capital-history-actions"><button id="closedCapitalOlderBtn" class="btn light" type="button">Load older closed trades</button><button id="closedCapitalRefreshBtn" class="btn light" type="button">Refresh closed trades</button></div></details>
   <details id="opportunityFold" class="card long-table-fold"><summary><strong>OPPORTUNITY / LEARNING RESEARCH</strong> <span class="muted">Historical and prospective learning remains persistent across dashboard resets.</span></summary><div id="opportunityResearch" class="counterfactual-note"></div></details>
   <details id="trackedMarketsFold" class="card long-table-fold" data-body="trackedBody"><summary><strong>TRACKED MARKETS</strong></summary><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Market</th><th>Bid</th><th>Ask</th><th>Scans</th><th>Last Scan</th></tr></thead><tbody id="trackedBody"></tbody></table></div></details>
 
@@ -100,6 +169,6 @@
 
   <section class="card"><div class="section-title"><div><h2>KALSHI CREDENTIALS</h2><p class="muted">LIVE requires explicit arming. Saved credentials are encrypted in PostgreSQL.</p></div><span id="connectionPill" class="pill"></span></div><form id="credentialsForm" class="credential-grid"><label>System Name<input id="systemNameInput" autocomplete="off"></label><label>API Key ID<input id="apiKeyInput" autocomplete="off"></label><label class="wide">Private Key (PEM)<textarea id="privateKeyInput" rows="7"></textarea></label><div class="wide form-actions"><button class="btn primary" type="submit">Save credentials</button><button class="btn light" id="testConnectionBtn" type="button">Test connection</button></div></form><div id="actionMessage" class="message"></div></section>
 </main>
-<script src="/app.js?v=aps2-lightning-only-report-v1-20261022"></script>
+<script src="/app.js?v=crystal-wall-recovery-20261029-fivewave"></script>
 </body>
 </html>

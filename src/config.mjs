@@ -10,7 +10,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-APS2-THREE-WAVE-V1-VALIDATION-PENDING-2026-10-22';
+export const RELEASE = 'SAGITTARIUS-GH1-OBSERVATION-REPORTING-DEVELOPMENT-NOT-DEPLOYABLE-2026-10-25';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -55,6 +55,31 @@ export const CANONICAL_NUMERIC_SETTINGS = Object.freeze([
   'crashRecoveryHunterAuroraDamageControlPercent',
   'freezingCoffinMaxDropCents',
   'momentumHunterObservationMinutes',
+  'greatHornObservationMinutes',
+  'greatHornStakeCents',
+  'greatHornMaxSpreadCents',
+  'greatHornMinEntryCents',
+  'greatHornMaxEntryCents',
+  'greatHornMultiply',
+  'greatHornMinCrashCents',
+  'greatHornMinReboundCents',
+  'greatHornMinUpwardTicks',
+  'greatHornParentEntryRiseCents',
+  'greatHornAuroraDamageControlPercent',
+  'greatHornMinProfitNetPerOriginalContractCents',
+  // CW1 second-recovery card, distinct from legacy Recovery Hunter/Crystal Wall.
+  'crystalWallRecoveryObservationMinutes',
+  'crystalWallRecoveryStakeCents',
+  'crystalWallRecoveryMaxSpreadCents',
+  'crystalWallRecoveryMinEntryCents',
+  'crystalWallRecoveryMaxEntryCents',
+  'crystalWallRecoveryMultiply',
+  'crystalWallRecoveryMinCrashCents',
+  'crystalWallRecoveryMinReboundCents',
+  'crystalWallRecoveryMinUpwardTicks',
+  'crystalWallRecoveryParentEntryRiseCents',
+  'crystalWallRecoveryAuroraDamageControlPercent',
+  'crystalWallRecoveryMinProfitNetPerOriginalContractCents',
   'waveSurferObservationMinutes',
   'crashRecoveryHunterObservationMinutes',
   'crystalWallObservationMinutes',
@@ -160,7 +185,13 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'pegasusEnabled',
   'dragonEnabled',
   'phoenixEnabled',
-  'momentumHunterEnabled',
+  'momentumHunterEnabled', // legacy; forcibly OFF for all new entries
+  'greatHornEnabled',
+  'greatHornLinkEnabled',
+  'greatHornAthenaX1Enabled',
+  'crystalWallRecoveryEnabled',
+  'crystalWallRecoveryLinkEnabled',
+  'crystalWallRecoveryAthenaX1Enabled',
   'waveSurferEnabled',
   'recoveryHunterEnabled',
   'crashRecoveryHunterEnabled',
@@ -208,7 +239,13 @@ export function originalSettings() {
     pegasusEnabled: true,
     dragonEnabled: true,
     phoenixEnabled: false,
-    momentumHunterEnabled: true,
+    momentumHunterEnabled: false, // GH1 retires original Athena-path Momentum Hunter
+    greatHornEnabled: false, // GH1 unverified capital route must never auto-arm
+    greatHornLinkEnabled: false,
+    greatHornAthenaX1Enabled: false,
+    crystalWallRecoveryEnabled: false, // CW1 must be explicitly enabled, no automatic new capital
+    crystalWallRecoveryLinkEnabled: false,
+    crystalWallRecoveryAthenaX1Enabled: false,
     waveSurferEnabled: true,
     recoveryHunterEnabled: true,
     crashRecoveryHunterEnabled: true,
@@ -224,6 +261,7 @@ export function originalSettings() {
     freezingCoffinEnabled: false,
     freezingCoffinMaxDropCents: 3,
     momentumHunterObservationMinutes: 0,
+    greatHornObservationMinutes: 1,
     waveSurferObservationMinutes: 0,
     crashRecoveryHunterObservationMinutes: 0,
     crystalWallObservationMinutes: 0,
@@ -279,6 +317,29 @@ export function originalSettings() {
     geminiMinPriceCents: 10,
     geminiMaxPriceCents: 89,
 
+    greatHornStakeCents: 500,
+    greatHornMaxSpreadCents: 3,
+    greatHornMinEntryCents: 10,
+    greatHornMaxEntryCents: 90,
+    greatHornMultiply: 1,
+    greatHornMinCrashCents: 1,
+    greatHornMinReboundCents: 1,
+    greatHornMinUpwardTicks: 1,
+    greatHornParentEntryRiseCents: 0,
+    greatHornAuroraDamageControlPercent: 45,
+    greatHornMinProfitNetPerOriginalContractCents: 2,
+    crystalWallRecoveryObservationMinutes: 1,
+    crystalWallRecoveryStakeCents: 500,
+    crystalWallRecoveryMaxSpreadCents: 3,
+    crystalWallRecoveryMinEntryCents: 10,
+    crystalWallRecoveryMaxEntryCents: 90,
+    crystalWallRecoveryMultiply: 1,
+    crystalWallRecoveryMinCrashCents: 1,
+    crystalWallRecoveryMinReboundCents: 1,
+    crystalWallRecoveryMinUpwardTicks: 1,
+    crystalWallRecoveryParentEntryRiseCents: 0,
+    crystalWallRecoveryAuroraDamageControlPercent: 45,
+    crystalWallRecoveryMinProfitNetPerOriginalContractCents: 2,
     momentumStakeCents: 20000,
     momentumMinEntryCents: 50,
     momentumMaxEntryCents: 60,
@@ -355,6 +416,61 @@ export function originalSettings() {
     resetTimestampMs: null,
   };
 }
+
+// Ledger-locked factory operator card, exported 2026-10-26T17:32:59Z.
+// This changes FACTORY settings only. It never overwrites a persisted operator
+// card on deployment. Runtime identity, mode, arm state, engine and reset epoch
+// are intentionally excluded; they cannot be copied from a historical ledger.
+// The full 165-field comparison fixture lives under reference/.
+export const LEDGER_FACTORY_OVERRIDES_20261026 = Object.freeze({
+  greatHornEnabled: true,
+  greatHornLinkEnabled: true,
+  greatHornAthenaX1Enabled: true,
+  lightningPlasmaEnabled: true,
+  andromedaThunderWaveEnabled: true,
+  andromedaThunderWaveLevel: "OPEN",
+  freezingCoffinEnabled: true,
+  freezingCoffinMaxDropCents: 5,
+  greatHornObservationMinutes: 0,
+  lightningPlasmaObservationMinutes: 0,
+  maxPositions: 1000000,
+  maxGameMinutes: 55,
+  crashRecoveryHunterAuroraDamageControlPercent: 65,
+  lightningPlasmaAuroraDamageControlPercent: 20,
+  greatHornStakeCents: 100,
+  greatHornMultiply: 5,
+  greatHornMinCrashCents: 0,
+  greatHornMinReboundCents: 0,
+  greatHornMinUpwardTicks: 0,
+  greatHornAuroraDamageControlPercent: 20,
+  greatHornMinProfitNetPerOriginalContractCents: 1,
+  crashRecoveryStakeCents: 100,
+  crashRecoveryMinEntryCents: 65,
+  crashRecoveryMaxEntryCents: 85,
+  crashRecoveryHunterMinProfitNetPerOriginalContractCents: 4,
+  athenaExclamationMinReboundCents: 7,
+  lightningPlasmaFieldStakeCents: 100,
+  lightningPlasmaMinEntryCents: 65,
+  lightningPlasmaMaxEntryCents: 95,
+  lightningPlasmaMinCrashCents: 0,
+  lightningPlasmaMinReboundCents: 0,
+  lightningPlasmaMinUpwardTicks: 0,
+  lightningPlasmaMinProfitNetPerOriginalContractCents: 1,
+  lightningPlasmaStarlightScaleInCents: 7,
+  crashRecoveryHunterMultiply: 5,
+  lightningPlasmaMultiply: 5,
+  athenaExclamationMultiply: 5,
+});
+
+// Factory-only operator settings cloned from the 2026-10-28T14:38:56Z
+// diagnostic ledger. The remaining operator values already match the
+// 2026-10-26 factory profile. Never copy ledger reset epochs or arm states.
+export const LEDGER_FACTORY_OVERRIDES_20261028 = Object.freeze({
+  crashRecoveryHunterLinkEnabled: false,
+  greatHornMaxSpreadCents: 4,
+  greatHornMinEntryCents: 50,
+  athenaExclamationStarlightTriggerCents: 7,
+});
 
 // R63-MHF1 authoritative fresh-install profile. Keep the conservative
 // originalSettings() contract for legacy migrations and missing-key fallbacks,
@@ -442,6 +558,7 @@ export function freshInstallSettings() {
     maxGameMinutes:120,
     maxPositions:1000,
     maxSpreadCents:3,
+    greatHornMaxSpreadCents:3,
     minGameMinutes:30,
     momentumHunterAthenaX1Enabled:true,
     momentumHunterEnabled:false,
@@ -498,6 +615,25 @@ export function freshInstallSettings() {
     waveSurferMinUpwardTicks:7,
     waveSurferMultiply:1,
     waveSurferObservationMinutes:15,
+    // Ledger factory card is layered over the pre-upgrade historical defaults.
+    // Keep all unrelated trading mechanics and migration flags unchanged.
+    ...LEDGER_FACTORY_OVERRIDES_20261026,
+    ...LEDGER_FACTORY_OVERRIDES_20261028,
+    crystalWallRecoveryEnabled:false,
+    crystalWallRecoveryLinkEnabled:true,
+    crystalWallRecoveryAthenaX1Enabled:true,
+    crystalWallRecoveryObservationMinutes:0,
+    crystalWallRecoveryStakeCents:100,
+    crystalWallRecoveryMaxSpreadCents:4,
+    crystalWallRecoveryMinEntryCents:50,
+    crystalWallRecoveryMaxEntryCents:90,
+    crystalWallRecoveryMultiply:5,
+    crystalWallRecoveryMinCrashCents:0,
+    crystalWallRecoveryMinReboundCents:0,
+    crystalWallRecoveryMinUpwardTicks:0,
+    crystalWallRecoveryParentEntryRiseCents:0,
+    crystalWallRecoveryAuroraDamageControlPercent:20,
+    crystalWallRecoveryMinProfitNetPerOriginalContractCents:1,
     resetTimestampMs:null,
     factoryTradingProfile20261005Applied:true,
     athenaArrowCloneApplied:true,
@@ -525,6 +661,9 @@ export function factoryOperatorSettingsPatch() {
   const flags = new Set(SETTINGS_MIGRATION_FLAGS);
   for (const k of EDITABLE_NUMERIC_SETTINGS) if (Object.hasOwn(factory, k) && !flags.has(k)) patch[k] = factory[k];
   for (const k of EDITABLE_BOOLEAN_SETTINGS) if (Object.hasOwn(factory, k) && !flags.has(k)) patch[k] = factory[k];
+  // OPEN is a policy level, not a boolean/numeric setting. Include it explicitly
+  // so the dashboard Factory Reset restores the exact ledger card.
+  patch.andromedaThunderWaveLevel = factory.andromedaThunderWaveLevel;
   return patch;
 }
 
@@ -699,6 +838,27 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
     }
     out[key] = typeof src[key] === 'boolean' ? src[key] : /^(1|true|yes|on)$/i.test(String(src[key]));
   }
+  // GH-SPREAD-MW1: preserve each existing installation's effective GH admission
+  // limit at first deployment. After migration the card is independent: edits to
+  // the shared spread must never silently edit GH's separate spread.
+  if (!Object.hasOwn(src,'greatHornMaxSpreadCents')) {
+    out.greatHornMaxSpreadCents=Number(out.maxSpreadCents);
+  }
+  // CW1 additive migration: copy CURRENT Great Horn operator parameters once,
+  // without altering Great Horn or enabling a new capital layer on deployment.
+  for(const tail of ["ObservationMinutes", "StakeCents", "MaxSpreadCents", "MinEntryCents", "MaxEntryCents", "Multiply", "MinCrashCents", "MinReboundCents", "MinUpwardTicks", "ParentEntryRiseCents", "AuroraDamageControlPercent", "MinProfitNetPerOriginalContractCents"]) {
+    const own='crystalWallRecovery'+tail,original='greatHorn'+tail;
+    if(!Object.hasOwn(src,own))out[own]=out[original];
+  }
+  for(const tail of ['LinkEnabled','AthenaX1Enabled']) {
+    const own='crystalWallRecovery'+tail,original='greatHorn'+tail;
+    if(!Object.hasOwn(src,own))out[own]=out[original];
+  }
+  // Existing installations remain explicitly opt-in for Crystal Wall buys.
+  if(!Object.hasOwn(src,'crystalWallRecoveryEnabled'))out.crystalWallRecoveryEnabled=false;
+  // GH1 is a separate identity. Never migrate former Momentum Hunter authority to it.
+  // The retired entry authority is intentionally impossible to re-enable through the old card.
+  out.momentumHunterEnabled=false;
   if (Object.hasOwn(src, 'systemName') && String(src.systemName).trim()) out.systemName = String(src.systemName).trim();
   if (Object.hasOwn(src, 'ownerId') && String(src.ownerId).trim()) out.ownerId = String(src.ownerId).trim();
   if (Object.hasOwn(src, 'mode')) out.mode = String(src.mode).toUpperCase() === 'LIVE' ? 'LIVE' : 'SIMULATION';
@@ -725,6 +885,19 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.scarletNeedleMaxRepeats = Math.max(0, Math.min(1, Math.floor(Number(out.scarletNeedleMaxRepeats) || 0)));
   const clampMultiply=(v)=>{const n=Math.floor(Number(v));return Number.isFinite(n)?Math.max(1,Math.min(20,n||1)):1;};
   out.momentumHunterMultiply=clampMultiply(out.momentumHunterMultiply);
+  out.greatHornMultiply=clampMultiply(out.greatHornMultiply);
+  out.crystalWallRecoveryMultiply=clampMultiply(out.crystalWallRecoveryMultiply);
+  out.crystalWallRecoveryAuroraDamageControlPercent=Math.max(1,Math.min(95,Number(out.crystalWallRecoveryAuroraDamageControlPercent)||45));
+  out.crystalWallRecoveryParentEntryRiseCents=Math.max(0,Math.min(99,Math.floor(Number(out.crystalWallRecoveryParentEntryRiseCents)||0)));
+  out.crystalWallRecoveryMinCrashCents=Math.max(0,Math.min(99,Math.floor(Number(out.crystalWallRecoveryMinCrashCents)||0)));
+  out.crystalWallRecoveryMinReboundCents=Math.max(0,Math.min(99,Math.floor(Number(out.crystalWallRecoveryMinReboundCents)||0)));
+  out.crystalWallRecoveryMinUpwardTicks=Math.max(0,Math.min(20,Math.floor(Number(out.crystalWallRecoveryMinUpwardTicks)||0)));
+  out.crystalWallRecoveryMaxSpreadCents=Math.max(0,Math.min(99,Math.floor(Number(out.crystalWallRecoveryMaxSpreadCents)||0)));
+  out.greatHornAuroraDamageControlPercent=Math.max(1,Math.min(95,Number(out.greatHornAuroraDamageControlPercent)||45));
+  out.greatHornParentEntryRiseCents=Math.max(0,Math.min(99,Math.floor(Number(out.greatHornParentEntryRiseCents)||0)));
+  out.greatHornMinCrashCents=Math.max(0,Math.min(99,Math.floor(Number(out.greatHornMinCrashCents)||0)));
+  out.greatHornMinReboundCents=Math.max(0,Math.min(99,Math.floor(Number(out.greatHornMinReboundCents)||0)));
+  out.greatHornMinUpwardTicks=Math.max(0,Math.min(20,Math.floor(Number(out.greatHornMinUpwardTicks)||0)));
   out.waveSurferMultiply=clampMultiply(out.waveSurferMultiply);
   out.crashRecoveryHunterMultiply=clampMultiply(out.crashRecoveryHunterMultiply);
   out.recoveryHunterMultiply=clampMultiply(out.recoveryHunterMultiply);
@@ -746,8 +919,8 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.justiceArrowMinUpwardTicks = clampConfirm(out.justiceArrowMinUpwardTicks, 2, 20);
   out.justiceArrowMinProfitNetPerOriginalContractCents = Math.max(0.01, Math.min(99, Number(out.justiceArrowMinProfitNetPerOriginalContractCents) || 2));
   for (const k of ['momentumHunterMinCrashCents','momentumHunterMinReboundCents','momentumHunterMinUpwardTicks','waveSurferMinCrashCents','waveSurferMinReboundCents','waveSurferMinUpwardTicks','crashRecoveryHunterMinCrashCents','crashRecoveryHunterMinReboundCents','crashRecoveryHunterMinUpwardTicks','scarletNeedleMinCrashCents','scarletNeedleMinReboundCents','scarletNeedleMinUpwardTicks','lightningPlasmaMinCrashCents','lightningPlasmaMinReboundCents','lightningPlasmaMinUpwardTicks']) out[k]=clampConfirm(out[k],0);
-  for (const k of ['momentumHunterObservationMinutes','waveSurferObservationMinutes','crashRecoveryHunterObservationMinutes','crystalWallObservationMinutes','scarletNeedleObservationMinutes','lightningPlasmaObservationMinutes','justiceArrowObservationMinutes','athenaExclamationObservationMinutes']) out[k]=Math.max(0,Math.min(1000,Math.round(Number(out[k])||0)));
-  for (const k of ['momentumHunterMinProfitNetPerOriginalContractCents','waveSurferMinProfitNetPerOriginalContractCents','crashRecoveryHunterMinProfitNetPerOriginalContractCents','recoveryHunterMinProfitNetPerOriginalContractCents','scarletNeedleMinProfitNetPerOriginalContractCents','lightningPlasmaMinProfitNetPerOriginalContractCents']) out[k]=Math.max(0.01,Math.min(99,Number(out[k])||2));
+  for (const k of ['crystalWallRecoveryObservationMinutes','greatHornObservationMinutes','momentumHunterObservationMinutes','waveSurferObservationMinutes','crashRecoveryHunterObservationMinutes','crystalWallObservationMinutes','scarletNeedleObservationMinutes','lightningPlasmaObservationMinutes','justiceArrowObservationMinutes','athenaExclamationObservationMinutes']) out[k]=Math.max(0,Math.min(1000,Math.round(Number(out[k])||0)));
+  for (const k of ['crystalWallRecoveryMinProfitNetPerOriginalContractCents','greatHornMinProfitNetPerOriginalContractCents','momentumHunterMinProfitNetPerOriginalContractCents','waveSurferMinProfitNetPerOriginalContractCents','crashRecoveryHunterMinProfitNetPerOriginalContractCents','recoveryHunterMinProfitNetPerOriginalContractCents','scarletNeedleMinProfitNetPerOriginalContractCents','lightningPlasmaMinProfitNetPerOriginalContractCents']) out[k]=Math.max(0.01,Math.min(99,Number(out[k])||2));
   out.lightningPlasmaMaxRepeats=Math.max(0,Math.min(1,Math.floor(Number(out.lightningPlasmaMaxRepeats??1))));
   out.lightningPlasmaStarlightScaleInCents=Math.max(0,Math.min(50,Math.round(Number(out.lightningPlasmaStarlightScaleInCents)||0)));
   // R63 simulation/live parity: persisted legacy probabilities are neutralized.

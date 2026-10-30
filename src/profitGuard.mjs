@@ -1,3 +1,4 @@
+import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
 import {deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { randomUUID } from 'node:crypto';
 import { authorityHash } from './authority.mjs';
@@ -65,8 +66,17 @@ function plasmaScaleInOwnsAurora(entry){
   return String(entry?.conceptName)==='Lightning Plasma' && Boolean(entry?.entryConfig?.lightningPlasmaScaleIn || entry?.entryConfig?.executionClass==='CAPITAL' || entry?.executionClass==='CAPITAL');
 }
 
+// GH1 recovery children always use their own immutable Aurora, never a legacy
+// Freezing Coffin overlay, including after settings changes or disablement.
+function greatHornOwnsIndependentAurora(entry){
+  return (String(entry?.conceptName)==='Great Horn Recovery'||String(entry?.conceptName)==='Crystal Wall Recovery') && entry?.entryConfig?.executionClass==='CAPITAL' && isFrozenAuroraEntry(entry);
+}
+function recoveryOwnsIndependentAurora(entry){
+  return starlightOwnsIndependentAurora(entry)||plasmaScaleInOwnsAurora(entry)||greatHornOwnsIndependentAurora(entry);
+}
+
 function stopLossForEntry(entry) {
-  if(!starlightOwnsIndependentAurora(entry) && !plasmaScaleInOwnsAurora(entry)){
+  if(!recoveryOwnsIndependentAurora(entry)){
     const coffin=entry?.entryConfig?.freezingCoffin;
     if(coffin?.frozen===true&&coffin?.enabled===true&&n(coffin.maxDropCents)>0) return n(coffin.maxDropCents);
   }
@@ -228,7 +238,8 @@ function conceptMaxSpread(settings, conceptName) {
 
 function totalEntryFee(entry, settings) {
   const stored = n(entry.entryFeeCents);
-  if (stored > 0) return stored;
+  // A broker-confirmed zero fee is economic evidence, not an absent value.
+  if (stored > 0 || hasKnownZeroLiveEntryFee(entry)) return stored;
   return n(settings.simFeeCents) * Math.max(0, n(entry.count));
 }
 
@@ -240,7 +251,7 @@ function allocatedEntryFee(entry, filled, settings) {
 
 function infinityBreakTotalEntryFee(entry, settings) {
   const stored=n(entry?.entryFeeCents);
-  if(stored>0)return stored;
+  if(stored>0 || hasKnownZeroLiveEntryFee(entry))return stored;
   const qty=Math.max(0,n(entry?.count));
   if(!(qty>0))return 0;
   if(String(entry?.mode||settings?.mode||'SIMULATION').toUpperCase()==='LIVE')
@@ -590,7 +601,8 @@ export class ProfitGuard {
     try{positions=await this.kalshi.getPositions();}catch(error){return{ok:false,reason:'broker_position_read_failed',message:String(error?.message||error)};}
     const brokerCount=(positions||[]).filter((p)=>String(p.ticker||p.market_ticker||'')===String(entry.ticker||'')).reduce((sum,p)=>{
       const raw=Number(p?.position_fp??p?.position??p?.market_position??0);
-      return sum+(Number.isFinite(raw)?Math.abs(raw):0);
+      // Positions are signed net YES inventory. A NO holding cannot cover a YES sell.
+      return sum+(Number.isFinite(raw)?Math.max(0,raw):0);
     },0);
     if(brokerCount+1e-9<ownedRemaining)return{ok:false,reason:'broker_below_owned_ledger',brokerCount,ownedRemaining,ownedRows:owned.length,ownedEntries:owned};
     if(remainingCount(entry)>ownedRemaining+1e-9)return{ok:false,reason:'entry_exceeds_owned_ledger',brokerCount,ownedRemaining,entryRemaining:remainingCount(entry),ownedEntries:owned};
@@ -609,9 +621,14 @@ export class ProfitGuard {
       await this.audit('live_exit_orphan_history_inconclusive',{id:entry.id,ticker:entry.ticker,clientOrderPrefix:prefix,auditContext,message:inspected?.error||null},'warning');
       return{recovered:false,reason:'broker_exit_history_inconclusive'};
     }
+    // Prefix recovery must not finalize a partial order that can still fill.
+    // The exact-order path accounts partial fills; this fallback waits for
+    // terminal history and never steals its receipt ownership.
+    if((inspected.orders||[]).some(o=>!terminalOrder(o))){
+      await this.audit('live_exit_orphan_history_pending',{id:entry.id,ticker:entry.ticker,clientOrderPrefix:prefix,auditContext},'warning');
+      return{recovered:false,reason:'broker_exit_history_pending',authoritativeHistory:true};
+    }
     if(n(inspected.fillCount)<=0){
-      const pendingOrders=(inspected.orders||[]).filter((o)=>!terminalOrder(o));
-      if(pendingOrders.length)return{recovered:false,reason:'broker_exit_history_pending',authoritativeHistory:true};
       return{recovered:false,reason:'no_authoritative_exit_fill',authoritativeHistory:true};
     }
 
@@ -637,7 +654,15 @@ export class ProfitGuard {
     // Use a neutral reconciliation reason unless a durable order receipt exists;
     // this prevents falsely firing profit-continuation side effects.
     const decision={action:'broker_reconciled_exit',reason:'broker_reconciled_exit',peakPriceCents:entry.peakPriceCents,stopPriceCents:entry.stopPriceCents};
-    const applied=await this.applyExitFill(entry,decision,{fillCount:missingFill,fillPriceCents,exitFeeCents:Math.max(0,missingFee),orderId:lastFilled?.orderId||entry.exitOrderId||null,clearClientId:true});
+    let applied;
+    try{
+      applied=await this.applyExitFill(entry,decision,{fillCount:missingFill,fillPriceCents,
+        exitFeeCents:Math.max(0,missingFee),orderId:lastFilled?.orderId||entry.exitOrderId||null,clearClientId:true});
+    }catch(error){
+      if(String(error?.message||'')!=='sag_exit_receipt_concurrent_change')throw error;
+      await this.audit('live_exit_orphan_history_concurrent_change',{id:entry.id,ticker:entry.ticker,auditContext},'warning');
+      return{recovered:false,reason:'broker_exit_history_concurrent_change'};
+    }
     await this.audit('live_exit_orphan_fill_recovered',{id:entry.id,ticker:entry.ticker,concept:entry.conceptName,auditContext,clientOrderPrefix:prefix,missingFill,fillPriceCents,exitFeeCents:Math.max(0,missingFee),historicalFilled,persistedFilled,remainingAfter:applied.remaining,closed:applied.closed,orders:(inspected.orders||[]).map((o)=>({orderId:o.orderId,clientOrderId:o.clientOrderId,fillCount:o.fillCount,status:o.status}))},'warning');
     return{recovered:true,...applied};
   }
@@ -661,12 +686,14 @@ export class ProfitGuard {
       confirmations:n(state.confirmations),firstObservedAtMs:n(state.firstObservedAtMs),lastObservedAtMs:n(state.lastObservedAtMs),
       quarantinedAtMs:n(nowMs),economicClosure:false,pnlInferred:false,exitPriceInferred:false,
     };
-    await this.db.updateEntry(fresh.id,{
+    const quarantinePatch={
       status:BROKER_ORPHAN_STATUS,
       closeReason:'broker_zero_inventory_orphan_quarantined',
       postExitState:{...priorPostExit,brokerOwnershipQuarantine:quarantine},
       updatedAtMs:n(nowMs),
-    });
+    };
+    if(!await this.persistLiveExitSnapshot(fresh,quarantinePatch))
+      return{quarantined:false,reason:'entry_changed_before_quarantine'};
     this.brokerOrphanCandidates.delete(fresh.id);
     this.atomicThunderStates.delete(fresh.id);
     this.states.delete(fresh.id);
@@ -1133,7 +1160,7 @@ export class ProfitGuard {
     let bid = n(q?.yesBid);
     if (bid <= 0) return { handled:false };
     const coffin=entry?.entryConfig?.freezingCoffin;
-    if(!starlightOwnsIndependentAurora(entry)&&!plasmaScaleInOwnsAurora(entry)&&coffin?.frozen===true&&coffin?.enabled===true&&n(coffin.maxDropCents)>0){
+    if(!recoveryOwnsIndependentAurora(entry)&&coffin?.frozen===true&&coffin?.enabled===true&&n(coffin.maxDropCents)>0){
       const coffinDanger=n(coffin.dangerPriceCents, n(entry.entryPriceCents)-n(coffin.maxDropCents));
       if(bid>coffinDanger) return {handled:false};
       const verification=await this.verifyFrozenAuroraTouch(entry,q,coffinDanger);
@@ -2998,9 +3025,25 @@ export class ProfitGuard {
     };
   }
 
+  async persistPendingEntryResult(entry,patch){
+    try{
+      await this.db.updateEntry(entry.id,patch,null,entry);
+      return {applied:true,entry:{...entry,...patch}};
+    }catch(error){
+      if(String(error?.message||'')!=='sag_entry_receipt_concurrent_change')throw error;
+      await this.audit('entry_receipt_concurrent_change',{id:entry.id,ticker:entry.ticker,
+        clientOrderId:entry.entryClientOrderId,orderId:entry.entryOrderId||null},'warning');
+      // Never overwrite a newer receipt or discard its owned exposure.
+      const current=await this.db.entryById(entry.id);
+      if(!current)throw new Error('entry_receipt_conflict_current_row_missing');
+      return {applied:false,entry:current};
+    }
+  }
+
   async reconcilePending(entry) {
     if (isShadowSaintEntry(entry)) return {ok:false, closed:false, reason:"shadow_saint_no_broker"};
-    if (entry.mode !== 'LIVE' || !entry.entryClientOrderId) return entry;
+    if (entry.mode !== 'LIVE' || !entry.entryClientOrderId || entry.status!=='entry_pending') return entry;
+    entry=structuredClone(entry);
     const inspectedById = entry.entryOrderId && typeof this.kalshi.inspectOrderById === 'function'
       ? await this.kalshi.inspectOrderById(entry.entryOrderId, entry.entryClientOrderId, entry.ticker).catch(() => ({ found:false, authoritative:false, order:null }))
       : null;
@@ -3020,25 +3063,50 @@ export class ProfitGuard {
       await this.audit('entry_pending_broker_order_id_conflict', {id:entry.id,ticker:entry.ticker,expectedOrderId:entry.entryOrderId,foundOrderId:truth.orderId},'error');
       return entry;
     }
+    // Broker readback can arrive out of order independently of database CAS.
+    // Never erase a previously confirmed BUY fill with an older broker view.
+    const priorFill=entry.entryConfig?.entryFillProof;
+    if(truth && priorFill?.authoritative===true && Number(priorFill.filledCount)>0){
+      const known=Number(priorFill.filledCount),observed=Number(truth.fillCount);
+      if(!Number.isFinite(observed)||observed+1e-9<known){
+        await this.audit('entry_pending_broker_fill_regression',{id:entry.id,ticker:entry.ticker,
+          clientOrderId:entry.entryClientOrderId,orderId:entry.entryOrderId||null,
+          confirmedFillCount:known,reportedFillCount:truth.fillCount??null},'error');
+        return entry;
+      }
+    }
+    // A confirmed Great Horn fill is not safe to protect against an invented
+    // zero/SIM fee. Hold the original LIVE intent for further reconciliation
+    // until authoritative fee economics are provided by the broker.
+    if (greatHornOwnsIndependentAurora(entry) && truth?.fillCount > 0 &&
+        (truth.feePaidCents==null || !Number.isFinite(Number(truth.feePaidCents)) || Number(truth.feePaidCents)<0)) {
+      await this.audit('gh_live_fill_fee_evidence_missing',{id:entry.id,ticker:entry.ticker,
+        clientOrderId:entry.entryClientOrderId,filled:truth.fillCount},'error');
+      return entry;
+    }
     // IOC is normally immediately terminal, but never manufacture an OPEN
     // position while a broker reports it is still capable of further fills.
     if (truth?.fillCount > 0 && truth.status && !terminalOrder(truth)) {
       const patch={status:'entry_pending',entryOrderId:truth.orderId||entry.entryOrderId,
         count:truth.fillCount,remainingCount:truth.fillCount,
-        entryPriceCents:Math.round(n(truth.averageFillPriceCents,entry.entryPriceCents)),
+        entryPriceCents:n(truth.averageFillPriceCents,entry.entryPriceCents),
         entryFeeCents:truth.feePaidCents==null?n(this.getSettings().simFeeCents)*truth.fillCount:n(truth.feePaidCents),
-        entryConfig:{...(entry.entryConfig||{}),entryFillProof:{version:'ENTRY-FILL-REPORT-V1',authoritative:true,filledCount:truth.fillCount,orderId:truth.orderId||entry.entryOrderId,clientOrderId:entry.entryClientOrderId,observedAtMs:Date.now()}},updatedAtMs:Date.now()};
-      await this.db.updateEntry(entry.id,patch);
+        entryConfig:{...(entry.entryConfig||{}),entryFillProof:{version:'ENTRY-FILL-REPORT-V1',authoritative:true,filledCount:truth.fillCount,averageFillPriceCents:truth.averageFillPriceCents,feePaidCents:truth.feePaidCents,orderId:truth.orderId||entry.entryOrderId,clientOrderId:entry.entryClientOrderId,observedAtMs:Date.now()}},updatedAtMs:Date.now()};
+      const saved=await this.persistPendingEntryResult(entry,patch);
+      if(!saved.applied)return saved.entry;
       await this.audit('entry_pending_nonterminal_partial_held',{id:entry.id,ticker:entry.ticker,orderId:patch.entryOrderId,confirmedFillCount:truth.fillCount},'warning');
       return {...entry,...patch};
     }
     if (truth?.fillCount > 0) {
-      const price = Math.round(truth.averageFillPriceCents ?? entry.entryPriceCents);
+      const price = Number(truth.averageFillPriceCents ?? entry.entryPriceCents);
       const settings=this.getSettings();
       const fee = Number.isFinite(Number(truth.feePaidCents))
         ? Number(truth.feePaidCents)
         : n(settings.simFeeCents) * truth.fillCount;
       let entryConfig=entry.entryConfig&&typeof entry.entryConfig==='object'?structuredClone(entry.entryConfig):{};
+      entryConfig.entryFillProof={version:'ENTRY-FILL-REPORT-V1',authoritative:true,
+        filledCount:truth.fillCount,averageFillPriceCents:price,feePaidCents:fee,orderId:truth.orderId||entry.entryOrderId,
+        clientOrderId:entry.entryClientOrderId,observedAtMs:Date.now()};
       let stopLossCents=n(entry.stopLossCents);
       let stopPriceCents=n(entry.stopPriceCents);
       let forcedProtectionReason=null;
@@ -3046,7 +3114,7 @@ export class ProfitGuard {
       // Preserve the frozen operator percentage, but freeze that same Aurora
       // formula against the FINAL authoritative quantity/price/fees, not the
       // earlier smaller partial position. Other attacks' behavior is unchanged.
-      const lpFinalFillChanged=plasmaScaleInOwnsAurora(entry)&&entryConfig?.aurora?.frozen===true&&(
+      const lpFinalFillChanged=(plasmaScaleInOwnsAurora(entry)||greatHornOwnsIndependentAurora(entry))&&entryConfig?.aurora?.frozen===true&&(
         Number(entryConfig.aurora.originalContractCount)!==Number(truth.fillCount)
         ||Number(entryConfig.aurora.entryPriceCents)!==price||Number(entryConfig.aurora.entryFeeCents)!==fee);
       if((entryConfig?.auroraPending?.version===AURORA_EXECUTION.version && !(entryConfig?.aurora?.frozen===true))||lpFinalFillChanged){
@@ -3077,13 +3145,15 @@ export class ProfitGuard {
         status:forcedProtectionReason?'exit_pending':'open',entryPriceCents:price,entryOrderId:truth.orderId,count:truth.fillCount,remainingCount:truth.fillCount,entryFeeCents:fee,
         currentPriceCents:price,peakPriceCents:price,stopLossCents,stopPriceCents,entryConfig,closeReason:forcedProtectionReason,updatedAtMs:Date.now(),
       };
-      await this.db.updateEntry(entry.id, patch);
+      const saved=await this.persistPendingEntryResult(entry,patch);
+      if(!saved.applied)return saved.entry;
       await this.audit('entry_pending_reconciled_fill', { id:entry.id,ticker:entry.ticker,clientOrderId:entry.entryClientOrderId,fillCount:truth.fillCount,priceCents:price,auroraVersion:entryConfig?.aurora?.version||null,auroraDangerPriceCents:entryConfig?.aurora?.dangerPriceCents??null });
       return { ...entry, ...patch, entryPriceCents: price };
     }
 
     if (truth && terminalOrder(truth)) {
-      await this.db.updateEntry(entry.id, { status: 'rejected', remainingCount: 0, entryOrderId: truth.orderId, updatedAtMs: Date.now() });
+      const saved=await this.persistPendingEntryResult(entry,{status:'rejected',remainingCount:0,entryOrderId:truth.orderId,updatedAtMs:Date.now()});
+      if(!saved.applied)return saved.entry;
       await this.audit('entry_pending_reconciled_unfilled', { id: entry.id, ticker: entry.ticker, clientOrderId: entry.entryClientOrderId, orderId: truth.orderId });
       return { ...entry, status: 'rejected', remainingCount: 0, entryOrderId: truth.orderId };
     }
@@ -3101,16 +3171,23 @@ export class ProfitGuard {
     if (isShadowSaintEntry(entry)) return {ok:false, closed:false, reason:"shadow_saint_no_broker"};
     const s = this.getSettings();
     const filled = Math.max(0, Math.min(remainingCount(entry), n(fillCount)));
-    if (filled <= 0) return { closed: false, remaining: remainingCount(entry), filled: 0 };
+    const terminalOnly=filled<=0 && remainingCount(entry)<=1e-9 && entry.mode==='LIVE'
+      && entry.status==='exit_pending' && n(entry.exitFilledCount)>0
+      && exitExecutionState?.terminal===true && Boolean(entry.exitClientOrderId)
+      && expectedExitReceipt?.clientOrderId===entry.exitClientOrderId;
+    if (filled <= 0 && !terminalOnly) return { closed: false, remaining: remainingCount(entry), filled: 0 };
     const px = Math.max(0, Math.min(100, n(fillPriceCents)));
-    const remaining = Math.max(0, remainingCount(entry) - filled);
+    const residual = Math.max(0, remainingCount(entry) - filled);
+    const remaining=residual<=1e-9?0:residual;
+    const isClosed=remaining===0 && !(entry.mode==='LIVE' && exitExecutionState?.terminal===false);
     const entryFeeShare = allocatedEntryFee(entry, filled, s);
     const realized = (px - n(entry.entryPriceCents)) * filled - entryFeeShare - n(exitFeeCents);
     const pnl = n(entry.pnlCents) + realized;
     const exitFilledCount = n(entry.exitFilledCount) + filled;
     const exitNotionalCents = n(entry.exitNotionalCents) + px * filled;
-    const averageExit = exitFilledCount > 0 ? Math.round(exitNotionalCents / exitFilledCount) : px;
-    const closedAtMs = remaining <= 1e-9 ? Date.now() : null;
+    const averageExit = exitFilledCount > 0
+      ? (entry.mode==='LIVE' ? exitNotionalCents / exitFilledCount : Math.round(exitNotionalCents / exitFilledCount)) : px;
+    const closedAtMs = isClosed ? Date.now() : null;
     const profitLearningTrade = this.isProfitLearningTrade(entry);
     const pri1Exit = this.isProtectedRunnerExitDecision(entry, decision);
     const x1Exit = this.isAthenaExitDecision(entry, decision);
@@ -3124,11 +3201,11 @@ export class ProfitGuard {
       const prior = activeProtectedRunnerState(entry) || {};
       nextPri1State = {
         ...prior, version:PROTECTED_RUNNER_INTELLIGENCE.version,
-        phase:remaining <= 1e-9 ? 'PRI1_EXIT_FILLED' : 'PRI1_EXIT_COMMITTED',
+        phase:isClosed ? 'PRI1_EXIT_FILLED' : 'PRI1_EXIT_COMMITTED',
         exitFilledCount, exitVwapCents:averageExit, realizedNetCents:pnl,
         remainingCount:remaining, lastFillPriceCents:px, lastFillCount:filled,
         exitOrderId:orderId || entry.exitOrderId || null,
-        ...(remaining <= 1e-9 ? { exitFilledAtMs:closedAtMs } : {}),
+        ...(isClosed ? { exitFilledAtMs:closedAtMs } : {}),
         updatedAtMs:Date.now(),
       };
     }
@@ -3136,11 +3213,11 @@ export class ProfitGuard {
       const prior = activeAthenaExitState(entry) || {};
       nextX1State = {
         ...prior, version:ATHENA_EXIT_INTELLIGENCE.version, policyRevision:athenaExitPolicyRevision(entry)||ATHENA_EXIT_INTELLIGENCE.policyRevision,
-        phase:remaining <= 1e-9 ? 'X1_EXIT_FILLED' : 'X1_EXIT_COMMITTED',
+        phase:isClosed ? 'X1_EXIT_FILLED' : 'X1_EXIT_COMMITTED',
         exitFilledCount, exitVwapCents:averageExit, realizedNetCents:pnl,
         remainingCount:remaining, lastFillPriceCents:px, lastFillCount:filled,
         exitOrderId:orderId || entry.exitOrderId || null,
-        ...(remaining <= 1e-9 ? { exitFilledAtMs:closedAtMs } : {}),
+        ...(isClosed ? { exitFilledAtMs:closedAtMs } : {}),
         updatedAtMs:Date.now(),
       };
     }
@@ -3148,7 +3225,7 @@ export class ProfitGuard {
       const prior=entry?.profitGuardState?.version===INFINITY_BREAK.version?entry.profitGuardState:{};
       nextInfinityState={
         ...prior,version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,
-        phase:remaining<=1e-9?'INFINITY_BREAK_EXIT_FILLED':'INFINITY_BREAK_EXIT_PARTIAL',
+        phase:isClosed?'INFINITY_BREAK_EXIT_FILLED':'INFINITY_BREAK_EXIT_PARTIAL',
         targetNetCents:n(decision.infinityBreakTargetNetCents,prior.targetNetCents),
         executableNetCents:n(decision.infinityBreakExecutableNetCents,prior.executableNetCents),
         executableBidCents:n(decision.infinityBreakExecutableBidCents,prior.executableBidCents),
@@ -3159,11 +3236,11 @@ export class ProfitGuard {
         revalidatedAtMs:n(decision.infinityBreakRevalidatedAtMs,prior.revalidatedAtMs),
         exitFilledCount,exitVwapCents:averageExit,realizedNetCents:pnl,remainingCount:remaining,
         lastFillPriceCents:px,lastFillCount:filled,exitOrderId:orderId||entry.exitOrderId||null,
-        ...(remaining<=1e-9?{exitFilledAtMs:closedAtMs}:{}),updatedAtMs:Date.now(),
+        ...(isClosed?{exitFilledAtMs:closedAtMs}:{}),updatedAtMs:Date.now(),
       };
     }
     const patch = {
-      status: remaining <= 1e-9 ? 'closed' : 'exit_pending',
+      status: isClosed ? 'closed' : 'exit_pending',
       remainingCount: remaining,
       pnlCents: pnl,
       exitFeeCents: n(entry.exitFeeCents) + n(exitFeeCents),
@@ -3181,7 +3258,7 @@ export class ProfitGuard {
       // Every R32 Hunter remains research-active after a non-terminal exit so
       // PLI1 can measure post-exit executable opportunity and regret. Legacy
       // rows keep the pre-R32 lifecycle unchanged.
-      researchTrackingComplete: remaining <= 1e-9
+      researchTrackingComplete: isClosed
         ? (profitLearningTrade ? false : decision.reason !== 'hard_stop_loss')
         : Boolean(entry.researchTrackingComplete),
       ...(nextX1State ? { profitGuardState:nextX1State } : nextPri1State ? { profitGuardState:nextPri1State } : nextInfinityState ? { profitGuardState:nextInfinityState } : {}),
@@ -3190,11 +3267,13 @@ export class ProfitGuard {
     // A stale worker cannot overwrite a newer cumulative receipt. The JSONB
     // counter and all economic columns are updated by one conditional SQL row
     // mutation; a failed predicate means retry from newly persisted truth.
-    await this.db.updateEntry(entry.id, patch, expectedExitReceipt);
+    const expected=expectedExitReceipt || (entry.mode==='LIVE'
+      ? {clientOrderId:entry.exitClientOrderId||null,appliedFillCount:Number(entry.exitExecutionState?.appliedFillCount||0),snapshot:entry} : null);
+    await this.db.updateEntry(entry.id, patch, expected);
 
     const closedEntry = { ...entry, ...patch };
-    if(remaining<=1e-9)await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
-    if (profitLearningTrade && remaining <= 1e-9 && typeof this.learning?.markProfitExit === 'function') {
+    if(isClosed)await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
+    if (profitLearningTrade && isClosed && typeof this.learning?.markProfitExit === 'function') {
       // Economic truth is already durable above. Keep all PLI1 I/O off the
       // protection critical path while preserving per-entry ordering behind the
       // final pre-exit observation. Shutdown and post-exit research drain this
@@ -3205,25 +3284,25 @@ export class ProfitGuard {
       }));
     }
     if (pri1Exit) {
-      await this.audit(remaining <= 1e-9 ? 'pri1_exit_filled' : 'pri1_exit_partial', {
+      await this.audit(isClosed ? 'pri1_exit_filled' : 'pri1_exit_partial', {
         id:entry.id, ticker:entry.ticker, concept:entry.conceptName, filled, remaining,
         fillPriceCents:px, exitVwapCents:averageExit, realizedNetCents:pnl,
       });
     }
     if (x1Exit) {
-      await this.audit(remaining <= 1e-9 ? 'athena_x1_exit_filled' : 'athena_x1_exit_partial', {
+      await this.audit(isClosed ? 'athena_x1_exit_filled' : 'athena_x1_exit_partial', {
         id:entry.id, ticker:entry.ticker, concept:entry.conceptName, filled, remaining,
         fillPriceCents:px, exitVwapCents:averageExit, realizedNetCents:pnl,
       });
     }
     if (goldenEyeExit) {
-      await this.audit(remaining <= 1e-9 ? 'golden_eye_exit_filled' : 'golden_eye_exit_partial', {
+      await this.audit(isClosed ? 'golden_eye_exit_filled' : 'golden_eye_exit_partial', {
         id:entry.id, ticker:entry.ticker, concept:entry.conceptName, filled, remaining,
         fillPriceCents:px, exitVwapCents:averageExit, realizedNetCents:pnl,
       });
     }
     if (atomicThunderExit) {
-      const eventType = remaining <= 1e-9 ? 'harvest_executed' : 'harvest_partial';
+      const eventType = isClosed ? 'harvest_executed' : 'harvest_partial';
       const targetNetCents=infinityBreakExit?n(decision.infinityBreakTargetNetCents):n(decision.atomicThunderTargetNetCents);
       const executableNetCents=infinityBreakExit?n(decision.infinityBreakExecutableNetCents):n(decision.atomicThunderExecutableNetCents);
       const executableBidCents=infinityBreakExit?n(decision.infinityBreakExecutableBidCents):n(decision.atomicThunderExecutableBidCents);
@@ -3237,22 +3316,44 @@ export class ProfitGuard {
         revalidatedBookMs:infinityBreakExit?n(decision.infinityBreakBookMs):null,
       });
       await this.audit(infinityBreakExit
-        ? (remaining <= 1e-9 ? 'infinity_break_filled' : 'infinity_break_partial')
-        : (remaining <= 1e-9 ? 'atomic_thunder_harvest_filled' : 'atomic_thunder_harvest_partial'), {
+        ? (isClosed ? 'infinity_break_filled' : 'infinity_break_partial')
+        : (isClosed ? 'atomic_thunder_harvest_filled' : 'atomic_thunder_harvest_partial'), {
         id:entry.id, ticker:entry.ticker, concept:entry.conceptName, filled, remaining,
         fillPriceCents:px, exitVwapCents:averageExit, realizedNetCents:pnl,
         ...(infinityBreakExit?{targetNetCents,executableNetCents,executableBidCents,lowestConsumedCents:n(decision.infinityBreakLowestConsumedCents),expectedExitFeeCents:n(decision.infinityBreakExpectedExitFeeCents),entryFeeCents:n(decision.infinityBreakEntryFeeCents),revalidatedBookMs:n(decision.infinityBreakBookMs)}:{}),
       });
-      if (remaining <= 1e-9) this.atomicThunderStates.delete(entry.id);
+      if (isClosed) this.atomicThunderStates.delete(entry.id);
     }
-    if(remaining<=1e-9&&pnl>0&&this.isInfinityBreakExitDecision(closedEntry,decision))this.notifyPositionClosed(closedEntry);
-    // SE2: a real hard stop arms Starlight Extinction recovery. Settlement is not a stop.
-    if(remaining<=1e-9&&String(closedEntry.closeReason||decision?.reason||'')==='hard_stop_loss')this.notifyPositionClosed(closedEntry);
-    return { closed: remaining <= 1e-9, remaining, filled, fillPriceCents: px, pnlCents: pnl, patch };
+    // GH1-ROOT1: every FULLY reconciled losing Lightning parent must reach
+    // GH's durable close callback, not only an exact hard_stop_loss label.
+    // Preserve the existing profitable Infinity and hard-stop notifications
+    // (including Starlight's independent hard-stop qualification), but emit
+    // at most one notification for any given close in this execution path.
+    if(isClosed&&(
+      (pnl>0&&this.isInfinityBreakExitDecision(closedEntry,decision))
+      ||String(closedEntry.closeReason||decision?.reason||'')==='hard_stop_loss'
+      ||(closedEntry.conceptName==='Lightning Plasma'&&pnl<0)
+      // CW1 notification only: a verified losing Great Horn close must wake
+      // Crystal Wall regardless of Aurora/settlement exit reason. The DB
+      // still independently proves the fully reconciled financial loss.
+      ||(closedEntry.conceptName==='Great Horn Recovery'&&pnl<0)
+    ))this.notifyPositionClosed(closedEntry);
+    return { closed: isClosed, remaining, filled, fillPriceCents: px, pnlCents: pnl, patch };
   }
 
   async closeAtSettlement(entry, decision) {
     if (isShadowSaintEntry(entry)) return {ok:false, closed:false, reason:"shadow_saint_no_broker"};
+    if(entry.mode==='LIVE'){
+      const current=await this.db.entryById(entry.id);
+      if(!current || current.archived===true || isShadowSaintEntry(current)
+        || ['id','systemName','ownerId','mode','ticker','conceptName'].some(k=>current[k]!==entry[k]))
+        return{closed:false,pending:true,ambiguous:true,skipped:'settlement_position_identity_changed'};
+      if(current.status==='closed' && remainingCount(current)<=1e-9)
+        return{closed:true,reconciled:true,skipped:'position_already_closed'};
+      if(!['open','exit_pending'].includes(current.status))
+        return{closed:false,pending:true,skipped:'settlement_position_not_ready'};
+      entry=current;
+    }
     if(entry.mode==='LIVE' && entry.exitClientOrderId){
       const reconciled=await this.reconcileExistingExitIntent(entry,{action:'committed_exit',reason:entry.closeReason||decision.reason,peakPriceCents:entry.peakPriceCents,stopPriceCents:entry.stopPriceCents});
       if(reconciled.ambiguous)return{closed:false,pending:true,ambiguous:true,skipped:'settlement_waits_for_broker_exit_receipt'};
@@ -3284,9 +3385,13 @@ export class ProfitGuard {
         status:'closed', remainingCount:0, closeReason:decision.reason, researchTrackingComplete:true,
         closedAtMs, updatedAtMs:closedAtMs, ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
       };
-      await this.db.updateEntry(entry.id, patch);
+      if(entry.mode==='LIVE'){
+        if(!await this.persistLiveExitSnapshot(entry,patch))return{closed:false,pending:true,ambiguous:true,skipped:'settlement_receipt_concurrent_change'};
+      }else await this.db.updateEntry(entry.id,patch);
       const closedEntry={...entry,...patch};
       await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
+      if((closedEntry.conceptName==='Lightning Plasma'||closedEntry.conceptName==='Great Horn Recovery')&&Number(closedEntry.pnlCents)<0)
+        this.notifyPositionClosed(closedEntry);
       if(profitLearningTrade){
         const learningEntry=profitLearningEntry(closedEntry);
       this.queueProfitLearningTask(learningEntry,'settlement_finalize',async()=>{
@@ -3301,7 +3406,8 @@ export class ProfitGuard {
     const pnl = n(entry.pnlCents) + realized;
     const filledTotal = n(entry.exitFilledCount) + remain;
     const notional = n(entry.exitNotionalCents) + payout * remain;
-    const averageExit = filledTotal > 0 ? Math.round(notional / filledTotal) : payout;
+    const averageExit = filledTotal > 0
+      ? (entry.mode==='LIVE' ? notional / filledTotal : Math.round(notional / filledTotal)) : payout;
     const patch = {
       status:'closed', remainingCount:0, pnlCents:pnl,
       exitFilledCount:filledTotal, exitNotionalCents:notional, exitPriceCents:averageExit,
@@ -3311,9 +3417,13 @@ export class ProfitGuard {
       exitClientOrderId:null, closeReason:decision.reason, researchTrackingComplete:true,
       closedAtMs, updatedAtMs:closedAtMs, ...(settlementX1State ? { profitGuardState:settlementX1State } : settlementPri1State ? { profitGuardState:settlementPri1State } : {}),
     };
-    await this.db.updateEntry(entry.id, patch);
+    if(entry.mode==='LIVE'){
+        if(!await this.persistLiveExitSnapshot(entry,patch))return{closed:false,pending:true,ambiguous:true,skipped:'settlement_receipt_concurrent_change'};
+      }else await this.db.updateEntry(entry.id,patch);
     const closedEntry={...entry,...patch};
     await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
+    if((closedEntry.conceptName==='Lightning Plasma'||closedEntry.conceptName==='Great Horn Recovery')&&pnl<0)
+      this.notifyPositionClosed(closedEntry);
     if(profitLearningTrade){
       const learningEntry=profitLearningEntry(closedEntry);
       this.queueProfitLearningTask(learningEntry,'settlement_finalize',async()=>{
@@ -3580,7 +3690,7 @@ export class ProfitGuard {
           fillCount:delta, fillPriceCents:(totalNotional-priorNotional)/delta,
           exitFeeCents:feeTotal-priorFee, orderId, clearClientId:terminal,
           exitExecutionState:receipt,
-          expectedExitReceipt:{clientOrderId,appliedFillCount:priorCount},
+          expectedExitReceipt:{clientOrderId,appliedFillCount:priorCount,snapshot:entry},
         });
       } catch (error) {
         if (String(error?.message||'') !== 'sag_exit_receipt_concurrent_change') throw error;
@@ -3589,12 +3699,36 @@ export class ProfitGuard {
       }
       return { ...result, pending: !result.closed, ambiguous: !terminal && !result.closed };
     }
-    if (terminal) {
-      await this.db.updateEntry(entry.id, { exitOrderId:orderId, exitClientOrderId:null,
-        exitExecutionState:receipt, status:'exit_pending', updatedAtMs:Date.now() });
-      return { closed:false,pending:true,remaining:remainingCount(entry),retryLater:true };
+    // All inventory may already have been accounted while the SELL was still
+    // active. Finalize once, under the same receipt CAS, without a second fill.
+    if(terminal && remainingCount(entry)<=1e-9 && priorCount>0){
+      try{
+        const result=await this.applyExitFill(entry,decision,{fillCount:0,fillPriceCents:price,
+          exitFeeCents:0,orderId,clearClientId:true,exitExecutionState:receipt,
+          expectedExitReceipt:{clientOrderId,appliedFillCount:priorCount,snapshot:entry}});
+        return {...result,pending:!result.closed};
+      }catch(error){
+        if(String(error?.message||'')!=='sag_exit_receipt_concurrent_change')throw error;
+        await this.audit('live_exit_receipt_concurrent_change',{id:entry.id,ticker:entry.ticker,
+          clientOrderId,orderId,priorCount,totalCount},'warning');
+        return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
+      }
     }
-    await this.db.updateEntry(entry.id, { exitOrderId:orderId, exitExecutionState:receipt,updatedAtMs:Date.now() });
+    // A zero-delta readback is still a state mutation. A stale terminal reply
+    // must not clear a newer SELL identity or rewind its cumulative receipt.
+    // Use the same compare-and-swap ownership fence as a positive fill.
+    try {
+      await this.db.updateEntry(entry.id, { exitOrderId:orderId,
+        ...(terminal ? {exitClientOrderId:null,status:'exit_pending'} : {}),
+        exitExecutionState:receipt,updatedAtMs:Date.now() },
+        {clientOrderId,appliedFillCount:priorCount,snapshot:entry});
+    } catch (error) {
+      if(String(error?.message||'')!=='sag_exit_receipt_concurrent_change')throw error;
+      await this.audit('live_exit_receipt_concurrent_change',
+        {id:entry.id,ticker:entry.ticker,clientOrderId,orderId,priorCount,totalCount},'warning');
+      return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
+    }
+    if (terminal) return { closed:false,pending:true,remaining:remainingCount(entry),retryLater:true };
     return { closed:false,pending:true,remaining:remainingCount(entry),ambiguous:true };
   }
 
@@ -3648,18 +3782,53 @@ export class ProfitGuard {
     return {closed:false,pending:true,remaining:remainingCount(entry),ambiguous:true};
   }
 
+  async releaseProfitExitCommitment(entry,{clearOrderId=false}={}){
+    const patch={status:'open',closeReason:null,updatedAtMs:Date.now(),...(clearOrderId?{exitOrderId:null}:{})};
+    if(entry.mode==='LIVE')return this.persistLiveExitSnapshot(entry,patch);
+    await this.db.updateEntry(entry.id,patch);
+    return true;
+  }
+
+  async persistLiveExitSnapshot(entry,patch){
+    const receipt=entry.exitExecutionState||{};
+    try{
+      await this.db.updateEntry(entry.id,patch,{clientOrderId:entry.exitClientOrderId||null,
+        appliedFillCount:Number(receipt.appliedFillCount||0),snapshot:entry});
+      return true;
+    }catch(error){
+      if(String(error?.message||'')!=='sag_exit_receipt_concurrent_change')throw error;
+      await this.audit('live_exit_snapshot_concurrent_change',{id:entry.id,ticker:entry.ticker,
+        clientOrderId:entry.exitClientOrderId||null},'warning');
+      return false;
+    }
+  }
+
   async liveExit(entry, decision) {
     if(isShadowSaintEntry(entry)){await this.audit?.("shadow_saint_broker_wall",{id:entry?.id,path:"liveExit"});return {ok:false,reason:"shadow_saint_no_broker"};}
-    return this.withTickerExitLockQueued(entry.ticker,()=>this._liveExit(entry,decision));
+    return this.withTickerExitLockQueued(entry.ticker,async()=>{
+      // Locks serialize executions, not the snapshots captured before waiting.
+      // Re-read after owning the ticker lane so a completed position cannot
+      // sell a Multiply sibling's broker inventory using stale local state.
+      const current=await this.db.entryById(entry.id);
+      if(!current||isShadowSaintEntry(current)||current.archived===true||current.mode!=='LIVE'
+        ||['id','systemName','ownerId','ticker','conceptName'].some(k=>current[k]!==entry[k])){
+        await this.audit('live_exit_position_identity_changed',{id:entry.id,ticker:entry.ticker},'error');
+        return {closed:false,pending:true,ambiguous:true,skipped:'exit_position_identity_changed'};
+      }
+      if(current.status==='closed'&&remainingCount(current)<=1e-9)
+        return {closed:true,remaining:0,reconciled:true,skipped:'position_already_closed'};
+      if(!['open','exit_pending'].includes(current.status))
+        return {closed:false,pending:true,skipped:'exit_position_not_ready'};
+      return this._liveExit(current,decision);
+    });
   }
 
   async _liveExit(entry, decision) {
     if (isShadowSaintEntry(entry)) return {ok:false, closed:false, reason:"shadow_saint_no_broker"};
     const s = this.getSettings();
     const remain = remainingCount(entry);
-    if (remain <= 1e-9) return { closed: true, exitPrice: decision.liveExitPriceCents };
-
     if (entry.exitClientOrderId) return this.reconcileExistingExitIntent(entry, decision);
+    if (remain <= 1e-9) return { closed: true, exitPrice: decision.liveExitPriceCents };
 
     const goldenEyeExitPre = this.isGoldenEyeExitDecision(entry, decision);
     const atomicThunderExitPre = this.isAtomicThunderExitDecision(entry, decision);
@@ -3723,7 +3892,7 @@ export class ProfitGuard {
         await this.audit('apex_profit_guard_exit_waiting_positive_execution', { id:entry.id, ticker:entry.ticker, mode:'LIVE', bidCents:bid, remaining:remain, reason:'no_bid' });
         return { closed:false, pending:false, remaining:remain, skipped:'apex_profit_guard_no_bid' };
       }
-      await this.db.updateEntry(entry.id, {
+      await this.persistLiveExitSnapshot(entry, {
         status: 'exit_pending', closeReason: decision.reason,
         peakPriceCents: decision.peakPriceCents ?? entry.peakPriceCents,
         stopPriceCents: decision.stopPriceCents ?? entry.stopPriceCents,
@@ -3763,7 +3932,7 @@ export class ProfitGuard {
         }, 'warning');
         return { closed:false, pending:false, remaining:remain, skipped:'apex_profit_guard_profit_floor_unavailable' };
       }
-      await this.db.updateEntry(entry.id, {
+      await this.persistLiveExitSnapshot(entry, {
         status:'exit_pending', closeReason:decision.reason,
         peakPriceCents:decision.peakPriceCents ?? entry.peakPriceCents,
         stopPriceCents:decision.stopPriceCents ?? entry.stopPriceCents,
@@ -3813,7 +3982,7 @@ export class ProfitGuard {
         await this.audit('apex_profit_guard_exit_waiting_positive_execution', { id:entry.id, ticker:entry.ticker, mode:'LIVE', bidCents:bid, minimumPositivePriceCents:exitFloorCents, remaining:remain, reason:'no_executable_bid' }, 'warning');
         return { closed:false, pending:false, remaining:remain, skipped:'apex_profit_guard_no_executable_bid' };
       }
-      await this.db.updateEntry(entry.id, {
+      await this.persistLiveExitSnapshot(entry, {
         status: 'exit_pending', closeReason: decision.reason,
         peakPriceCents: decision.peakPriceCents ?? entry.peakPriceCents,
         stopPriceCents: decision.stopPriceCents ?? entry.stopPriceCents,
@@ -3851,7 +4020,7 @@ export class ProfitGuard {
       const explicitOperatorIntent=['emergency_exit','manual_cashout'].includes(String(decision?.reason||''));
       if(explicitOperatorIntent&&String(entry.status||'')!=='exit_pending'){
         const now=Date.now();
-        await this.db.updateEntry(entry.id,{status:'exit_pending',closeReason:decision.reason,updatedAtMs:now});
+        await this.persistLiveExitSnapshot(entry,{status:'exit_pending',closeReason:decision.reason,updatedAtMs:now});
         entry={...entry,status:'exit_pending',closeReason:decision.reason,updatedAtMs:now};
       }
       return{closed:false,pending:String(entry.status||'')==='exit_pending',remaining:remainingCount(entry),skipped:ownership.reason};
@@ -3862,7 +4031,7 @@ export class ProfitGuard {
     // after the broker accepts the order, restart reconciliation has the one
     // client order ID it must resolve and cannot blindly duplicate the sell.
     const durableIntentAtMs=Date.now();
-    await this.db.updateEntry(entry.id, {
+    const intentPatch={
       status: 'exit_pending', exitClientOrderId: client, exitOrderId:null,
       exitExecutionState:{version:'R11-EXIT-EXECUTION-RECEIPT',clientOrderId:client,orderId:null,appliedFillCount:0,appliedFeeCents:0,appliedNotionalCents:0,terminal:false,updatedAtMs:durableIntentAtMs},
       closeReason: decision.reason,
@@ -3877,7 +4046,10 @@ export class ProfitGuard {
         committedAtMs:durableIntentAtMs,updatedAtMs:durableIntentAtMs,
       }}:{}),
       updatedAtMs: durableIntentAtMs,
-    });
+     };
+    if(!(await this.persistLiveExitSnapshot(entry,intentPatch)))
+      return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
+    const durableExitSnapshot={...entry,...intentPatch};
 
     // IB1-R2 final authority boundary: after ownership proof and after the exact
     // client mutation receipt is durable, reacquire a fresh book and recompute
@@ -3890,7 +4062,8 @@ export class ProfitGuard {
       if(!infinityRevalidation?.qualifies||!Number.isFinite(Number(infinityRevalidation?.lowestConsumedCents))){
         this.atomicThunderStates.delete(entry.id);
         const lostAtMs=Date.now();
-        await this.db.updateEntry(entry.id,{status:'open',exitClientOrderId:null,closeReason:null,profitGuardState:{version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,phase:'INFINITY_BREAK_WINDOW_LOST_BEFORE_SUBMIT',targetNetCents:n(infinityRevalidation?.targetNetCents,preliminaryInfinityTarget),executableNetCents:infinityRevalidation?.executableNetCents??null,executableBidCents:infinityRevalidation?.executableBidCents??null,lowestConsumedCents:infinityRevalidation?.lowestConsumedCents??null,updatedAtMs:lostAtMs},updatedAtMs:lostAtMs});
+        const withdrawn=await this.persistLiveExitSnapshot(durableExitSnapshot,{status:'open',exitClientOrderId:null,closeReason:null,profitGuardState:{version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,phase:'INFINITY_BREAK_WINDOW_LOST_BEFORE_SUBMIT',targetNetCents:n(infinityRevalidation?.targetNetCents,preliminaryInfinityTarget),executableNetCents:infinityRevalidation?.executableNetCents??null,executableBidCents:infinityRevalidation?.executableBidCents??null,lowestConsumedCents:infinityRevalidation?.lowestConsumedCents??null,updatedAtMs:lostAtMs},updatedAtMs:lostAtMs});
+        if(!withdrawn)return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
         await this.audit('infinity_break_exit_window_lost',{id:entry.id,ticker:entry.ticker,mode:'LIVE',bidCents:n(infinityRevalidation?.q?.yesBid,bid),profitFloorCents:n(infinityRevalidation?.exitFloorCents,exitFloorCents),remaining:remain,targetNetCents:n(infinityRevalidation?.targetNetCents,preliminaryInfinityTarget),executableNetCents:infinityRevalidation?.executableNetCents??null,executableBidCents:infinityRevalidation?.executableBidCents??null,lowestConsumedCents:infinityRevalidation?.lowestConsumedCents??null,reason:infinityRevalidation?.reason||'revalidation_failed',stage:'immediately_before_submit'},'warning');
         return{closed:false,pending:false,remaining:remain,skipped:'infinity_break_revalidation_failed'};
       }
@@ -3904,9 +4077,12 @@ export class ProfitGuard {
         infinityBreakBookMs:n(infinityRevalidation.bookMs),
         infinityBreakRevalidatedAtMs:Date.now(),
       };
-      await this.db.updateEntry(entry.id,{profitGuardState:{version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,phase:'INFINITY_BREAK_EXIT_REVALIDATED',targetNetCents:effectiveDecision.infinityBreakTargetNetCents,executableNetCents:effectiveDecision.infinityBreakExecutableNetCents,executableBidCents:effectiveDecision.infinityBreakExecutableBidCents,lowestConsumedCents:effectiveDecision.infinityBreakLowestConsumedCents,expectedExitFeeCents:effectiveDecision.infinityBreakExpectedExitFeeCents,entryFeeCents:effectiveDecision.infinityBreakEntryFeeCents,bookMs:effectiveDecision.infinityBreakBookMs,revalidatedAtMs:effectiveDecision.infinityBreakRevalidatedAtMs,updatedAtMs:Date.now()},updatedAtMs:Date.now()});
+      const revalidationPatch={profitGuardState:{version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,phase:'INFINITY_BREAK_EXIT_REVALIDATED',targetNetCents:effectiveDecision.infinityBreakTargetNetCents,executableNetCents:effectiveDecision.infinityBreakExecutableNetCents,executableBidCents:effectiveDecision.infinityBreakExecutableBidCents,lowestConsumedCents:effectiveDecision.infinityBreakLowestConsumedCents,expectedExitFeeCents:effectiveDecision.infinityBreakExpectedExitFeeCents,entryFeeCents:effectiveDecision.infinityBreakEntryFeeCents,bookMs:effectiveDecision.infinityBreakBookMs,revalidatedAtMs:effectiveDecision.infinityBreakRevalidatedAtMs,updatedAtMs:Date.now()},updatedAtMs:Date.now()};
+      if(!(await this.persistLiveExitSnapshot(durableExitSnapshot,revalidationPatch)))
+        return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
+      Object.assign(durableExitSnapshot,revalidationPatch);
     }
-    const submitted = { ...entry, status: 'exit_pending', exitClientOrderId: client, exitOrderId:null,exitExecutionState:{version:'R11-EXIT-EXECUTION-RECEIPT',clientOrderId:client,orderId:null,appliedFillCount:0,appliedFeeCents:0,appliedNotionalCents:0,terminal:false,updatedAtMs:durableIntentAtMs},closeReason: decision.reason, profitGuardState:infinityBreakExit?{version:INFINITY_BREAK.version,policyRevision:INFINITY_BREAK.policyRevision,phase:'INFINITY_BREAK_EXIT_REVALIDATED',targetNetCents:effectiveDecision.infinityBreakTargetNetCents,executableNetCents:effectiveDecision.infinityBreakExecutableNetCents,executableBidCents:effectiveDecision.infinityBreakExecutableBidCents,lowestConsumedCents:effectiveDecision.infinityBreakLowestConsumedCents,expectedExitFeeCents:effectiveDecision.infinityBreakExpectedExitFeeCents,entryFeeCents:effectiveDecision.infinityBreakEntryFeeCents,bookMs:effectiveDecision.infinityBreakBookMs,revalidatedAtMs:effectiveDecision.infinityBreakRevalidatedAtMs,updatedAtMs:Date.now()}:entry.profitGuardState, updatedAtMs: Date.now() };
+    const submitted=durableExitSnapshot;
     // IB1-R2 uses the lowest level actually consumed by the qualifying full-book
     // sweep as the IOC limit. Other profit authorities preserve their own floors.
     const orderLimitCents = infinityBreakExit ? n(infinityRevalidation.lowestConsumedCents) : profitProtectedExit ? exitFloorCents : bid;
@@ -3916,34 +4092,44 @@ export class ProfitGuard {
       ? Math.trunc(Number(routedExchangeIndex))
       : quoteExchangeIndex!=null&&String(quoteExchangeIndex).trim()!==''&&Number.isFinite(Number(quoteExchangeIndex)) ? Math.trunc(Number(quoteExchangeIndex)) : null;
     const r = await this.kalshi.placeOrder({ ticker: entry.ticker, action: 'sell', count: submitCount, priceCents: orderLimitCents, clientOrderId: client, exchangeIndex });
+    if(r.notSubmitted===true && !r.orderId && !(Number(r.fillCount)>0) && r.ambiguous!==true){
+      const reason=String(r.localRejectionReason||'exit_not_transmitted');
+      const released=await this.persistLiveExitSnapshot(submitted,{status:'exit_pending',exitClientOrderId:null,
+        exitOrderId:null,exitExecutionState:{...submitted.exitExecutionState,terminal:true,
+          notSubmitted:true,reason,updatedAtMs:Date.now()},updatedAtMs:Date.now()});
+      await this.audit('live_exit_not_transmitted',{id:entry.id,ticker:entry.ticker,
+        clientOrderId:client,reason,released},'warning');
+      return {closed:false,pending:true,remaining:remain,retryLater:released,
+        ambiguous:!released,skipped:released?'exit_not_transmitted':'exit_receipt_concurrent_change'};
+    }
     if (n(r.fillCount)>0) {
       const verification = r.orderId && typeof this.kalshi.inspectOrderById === 'function'
         ? await this.kalshi.inspectOrderById(r.orderId, client, entry.ticker).catch(()=>({found:false,authoritative:false,order:null}))
         : null;
       if (verification && !verification.authoritative) {
-        await this.db.updateEntry(entry.id,{exitOrderId:r.orderId,status:'exit_pending',updatedAtMs:Date.now()});
+        if(!(await this.persistLiveExitSnapshot(submitted,{exitOrderId:r.orderId,status:'exit_pending',updatedAtMs:Date.now()})))return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
         await this.audit('live_exit_immediate_fill_awaiting_verification', {id:entry.id,ticker:entry.ticker,clientOrderId:client,orderId:r.orderId,reportedFillCount:r.fillCount,reason:verification.reason||'unverified_fill_history'}, 'warning');
         return {closed:false,pending:true,remaining:remain,ambiguous:true};
       }
       const applied = await this.applyBrokerExitTruth(submitted,effectiveDecision,verification?.order||r,{immediateIocResponse:true});
       if ((atomicThunderExit || goldenEyeExit) && !applied.closed && applied.remaining > 0 && !applied.ambiguous) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, exitClientOrderId:null, updatedAtMs:Date.now() });
+        if(!(await this.persistLiveExitSnapshot({...submitted,...applied.patch},{ status:'open', closeReason:null, exitClientOrderId:null, updatedAtMs:Date.now() })))return {...applied,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
         await this.audit(atomicThunderExit ? (infinityBreakExit?'infinity_break_live_partial_reopened':'atomic_thunder_live_partial_reopened') : 'golden_eye_live_partial_reopened', { id:entry.id,ticker:entry.ticker,filled:applied.filled,remaining:applied.remaining,fillPriceCents:applied.fillPriceCents }, 'warning');
         return { ...applied, pending:false, reopened:true };
       }
       return applied;
     }
     if (r.ambiguous) {
-      await this.db.updateEntry(entry.id, { exitOrderId: r.orderId, status: 'exit_pending', updatedAtMs: submitted.updatedAtMs });
+      if(!(await this.persistLiveExitSnapshot(submitted,{ exitOrderId:r.orderId||null,status:'exit_pending',updatedAtMs:submitted.updatedAtMs })))return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
       this.setState(entry, { ...effectiveDecision, action: 'committed_exit', guardState: 'EXIT_PENDING_RECONCILIATION' });
       return { closed: false, pending: true, remaining: remain, ambiguous: true };
     }
 
     if (r.status && !terminalOrder(r)) {
-      await this.db.updateEntry(entry.id,{exitOrderId:r.orderId||null,status:'exit_pending',updatedAtMs:Date.now()});
+      if(!(await this.persistLiveExitSnapshot(submitted,{exitOrderId:r.orderId||null,status:'exit_pending',updatedAtMs:Date.now()})))return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
       return {closed:false,pending:true,remaining:remain,ambiguous:true};
     }
-    await this.db.updateEntry(entry.id, { exitOrderId: r.orderId||null, status: 'exit_pending', updatedAtMs: Date.now() });
+    if(!(await this.persistLiveExitSnapshot(submitted,{exitOrderId:r.orderId||null,status:'exit_pending',updatedAtMs:Date.now()})))return {closed:false,pending:true,ambiguous:true,skipped:'exit_receipt_concurrent_change'};
     await this.audit('live_exit_ioc_unfilled_awaiting_verification', { id: entry.id, ticker: entry.ticker, clientOrderId: client, orderId: r.orderId||null, reason: decision.reason });
     return { closed: false, pending: true, remaining: remain, ambiguous: true };
   }
@@ -3954,6 +4140,12 @@ export class ProfitGuard {
     if(this.isInfinityBreakTrade(entry))this.registerInfinityBreakFastWake(entry,s);
     if (entry.status === 'entry_pending') entry = await this.reconcilePending(entry);
     if (!['open', 'exit_pending'].includes(entry.status)) return { protected: false, status: entry.status };
+
+    // Receipt completion is independent of quote availability. A fully sold
+    // position must not wait forever for a market book that may have finalized.
+    if(entry.mode==='LIVE' && entry.status==='exit_pending' && entry.exitClientOrderId && remainingCount(entry)<=1e-9)
+      return this.reconcileExistingExitIntent(entry,{action:'committed_exit',reason:entry.closeReason||'exit_pending',
+        peakPriceCents:entry.peakPriceCents,stopPriceCents:entry.stopPriceCents});
 
     const q = await this.refreshProtectionQuote(entry);
     if (!q) {
@@ -4009,7 +4201,7 @@ export class ProfitGuard {
         ? Boolean(infinityAssessment?.qualifies)
         : Boolean(atExec?.full&&n(atExec.filled)+1e-9>=remainingCount(entry)&&n(atNet,-Infinity)+1e-9>=atTarget);
       if (!atWindowValid) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, exitOrderId:null, updatedAtMs:Date.now() });
+        if(!await this.releaseProfitExitCommitment(entry,{clearOrderId:true}))return{closed:false,pending:true,ambiguous:true,skipped:'profit_release_receipt_concurrent_change'};
         entry.status = 'open';
         entry.closeReason = null;
         entry.exitOrderId = null;
@@ -4040,7 +4232,7 @@ export class ProfitGuard {
         ? this.market.executableBid(entry.ticker, remainingCount(entry), geFloor)
         : null;
       if (!geExec?.full || n(geExec.filled) + 1e-9 < remainingCount(entry)) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, updatedAtMs:Date.now() });
+        if(!await this.releaseProfitExitCommitment(entry))return{closed:false,pending:true,ambiguous:true,skipped:'profit_release_receipt_concurrent_change'};
         entry.status = 'open';
         entry.closeReason = null;
         await this.audit('golden_eye_exit_released_after_window', {
@@ -4066,7 +4258,7 @@ export class ProfitGuard {
         ? this.market.executableBid(entry.ticker, remainingCount(entry), x1Floor)
         : null;
       if (!x1Exec?.full) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, updatedAtMs:Date.now() });
+        if(!await this.releaseProfitExitCommitment(entry))return{closed:false,pending:true,ambiguous:true,skipped:'profit_release_receipt_concurrent_change'};
         entry.status = 'open';
         entry.closeReason = null;
         await this.audit('athena_x1_exit_suspended_to_stop_guard', {
@@ -4094,7 +4286,7 @@ export class ProfitGuard {
         ? this.market.executableBid(entry.ticker, remainingCount(entry), priFloor)
         : null;
       if (!priExec?.full) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, updatedAtMs:Date.now() });
+        if(!await this.releaseProfitExitCommitment(entry))return{closed:false,pending:true,ambiguous:true,skipped:'profit_release_receipt_concurrent_change'};
         entry.status = 'open';
         entry.closeReason = null;
         await this.audit('pri1_exit_suspended_to_stop_guard', {
@@ -4120,7 +4312,7 @@ export class ProfitGuard {
         ? this.market.executableBid(entry.ticker, remainingCount(entry), apexFloor)
         : null;
       if (!apexExec?.full) {
-        await this.db.updateEntry(entry.id, { status:'open', closeReason:null, updatedAtMs:Date.now() });
+        if(!await this.releaseProfitExitCommitment(entry))return{closed:false,pending:true,ambiguous:true,skipped:'profit_release_receipt_concurrent_change'};
         entry.status = 'open';
         entry.closeReason = null;
         await this.audit('apex_profit_guard_exit_suspended_to_stop_guard', {
@@ -4217,7 +4409,7 @@ export class ProfitGuard {
     if (d.action === 'hard_stop') {
       if(isFrozenAuroraEntry(entry)){
         const coffin=entry?.entryConfig?.freezingCoffin;
-        const coffinActive=!starlightOwnsIndependentAurora(entry)&&!plasmaScaleInOwnsAurora(entry)&&coffin?.frozen===true&&coffin?.enabled===true;
+        const coffinActive=!recoveryOwnsIndependentAurora(entry)&&coffin?.frozen===true&&coffin?.enabled===true;
         const danger=coffinActive?n(coffin.dangerPriceCents,entry.stopPriceCents):n(entry?.entryConfig?.aurora?.dangerPriceCents,entry.stopPriceCents);
         const verification=await this.verifyFrozenAuroraTouch(entry,q,danger);
         if(!verification.confirmed){
@@ -4882,7 +5074,7 @@ export class ProfitGuard {
         if (price != null) {
           const observedAtMs = Math.max(n(e.closedAtMs), n(q?.updatedAtMs, now));
           if (e.recoveryToEntryAtMs == null && price >= n(e.entryPriceCents)) patch.recoveryToEntryAtMs = observedAtMs;
-          const entryFee = n(e.entryFeeCents) > 0 ? n(e.entryFeeCents) : n(s.simFeeCents) * n(e.count);
+          const entryFee = totalEntryFee(e,s);
           const exitFee = n(s.simFeeCents) * n(e.count);
           const hypotheticalNet = (price - n(e.entryPriceCents)) * n(e.count) - entryFee - exitFee;
           if (e.recoveryToGreenAtMs == null && hypotheticalNet > 0) {

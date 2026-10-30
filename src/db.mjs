@@ -1,7 +1,13 @@
+import {OPS_SCHEMA_SQL} from './operationalSafety.mjs';
+import {authorityHash} from './authority.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_SQL} from './athenaStarlightTrigger.mjs';
 import {LP_CONTINUATION_MIGRATION_SQL} from './lightningContinuation.mjs';
 import {LP_CONTINUATION_VERSION,LP_SHADOW_CONTINUATION_SQL,mapLightningAuthority,lightningParentEligibility,lightningEntryAuroraProof} from './lightningShadowContinuation.mjs';
 import {STARLIGHT_SHADOW_SQL,APS2_VERSION} from './shadowStarlight.mjs';
+import {GREAT_HORN_SQL,verifiedLightningLoss,greatHornWatchFromLoss,greatHornObservationStep,greatHornAdmissionDecision,greatHornOperatorBandAllowed,greatHornSpreadAllowed,GH_CONCEPT} from './greatHornRecovery.mjs';
+import {GH_SIM_VERSION,GH_LIVE_VERSION,greatHornSettingsFingerprint} from './greatHornSimCapital.mjs';
+import {CRYSTAL_WALL_RECOVERY_SQL,verifiedGreatHornLoss,crystalWallRecoveryWatchFromLoss,crystalWallRecoveryObservationStep,crystalWallRecoveryAdmissionDecision,crystalWallRecoveryOperatorBandAllowed,crystalWallRecoverySpreadAllowed,CW_CONCEPT} from './crystalWallRecovery.mjs';
+import {CW_SIM_VERSION,CW_LIVE_VERSION,crystalWallRecoverySettingsFingerprint} from './crystalWallSimCapital.mjs';
 import {ACTUAL_OPEN_SQL,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
 import pg from 'pg';
 import { ShadowStore, SHADOW_SCHEMA_SQL } from './shadowStore.mjs';
@@ -56,18 +62,22 @@ export class BoundedDbWorkGate {
   snapshot(){return{version:LOW_PRIORITY_DB_PERSISTENCE.version,maxConcurrency:this.maxConcurrency,maxPending:this.maxPending,active:this.active,pending:this.queue.length,totalStarted:this.totalStarted,totalCompleted:this.totalCompleted,totalFailed:this.totalFailed,totalRejected:this.totalRejected,maxObservedActive:this.maxObservedActive,maxObservedPending:this.maxObservedPending};}
 }
 
-// INT1: PostgreSQL stores these sag_entries fields as integer cents. Runtime
-// execution math may legitimately produce fractional VWAPs (for example,
-// U-PG3 full-position executable averages), so the storage boundary must
-// project only the integer-backed ledger/display columns to whole cents while
-// leaving double-precision accounting fields and JSON guard telemetry exact.
+// Price-grid telemetry remains integer cents. Execution entry/exit VWAPs are
+// financial cost basis and must retain broker precision, like notional and P/L.
+// The idempotent schema migration below widens only those two ledger columns.
 const ENTRY_INTEGER_CENT_FIELDS = new Set([
-  'entryPriceCents','exitPriceCents','currentPriceCents','peakPriceCents',
+  'currentPriceCents','peakPriceCents',
   'stopPriceCents','stopLossCents','spreadAtEntryCents',
   'lowestPriceAfterEntryCents','maeCents','recoveryGreenPriceCents',
 ]);
 function entryStorageValue(key, value) {
-  if (!ENTRY_INTEGER_CENT_FIELDS.has(key) || value == null) return value;
+  if(value==null)return value;
+  if(key==='entryPriceCents'||key==='exitPriceCents'){
+    const price=Number(value);
+    if(!Number.isFinite(price)||price<0||price>100)throw new Error(`${key} must be a finite execution price`);
+    return price;
+  }
+  if (!ENTRY_INTEGER_CENT_FIELDS.has(key)) return value;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) throw new Error(`${key} must be finite before sag_entries persistence`);
   return Math.round(numeric);
@@ -106,12 +116,21 @@ const rowEntry = (r) => ({
 });
 
 const AUTHORIZED_STARLIGHT_INSERTS = new WeakSet();
+const AUTHORIZED_GH_SIM_INSERTS = new WeakSet();
+const AUTHORIZED_GH_LIVE_INSERTS = new WeakSet();
+const AUTHORIZED_CW_SIM_INSERTS = new WeakSet();
+const AUTHORIZED_CW_LIVE_INSERTS = new WeakSet();
 
 export class Database {
   constructor(url) {
     if (!url) throw new Error('DATABASE_URL is required');
     this.shadowArchitectureRequired=true;
-    const base = { connectionString:url, ssl:url.includes('localhost') ? false : { rejectUnauthorized:false } };
+    const timeout=Math.max(1000,Math.min(120000,Number(process.env.SAGITTARIUS_DB_STATEMENT_TIMEOUT_MS)||30000));
+    const base = { connectionString:url, ssl:url.includes('localhost') ? false : { rejectUnauthorized:false },
+      // Server-side cancellation: do not abandon a client promise while the
+      // database can still commit behind it. Existing intent replay handles
+      // uncertain transport outcomes independently.
+      statement_timeout:timeout,lock_timeout:5000,idle_in_transaction_session_timeout:15000 };
     // HF3: session advisory locks must never consume the same pool that serves
     // ordinary ledger/diagnostic/protection queries. Holding pg_advisory_lock
     // on the query pool can self-deadlock under concurrent entries: every
@@ -127,6 +146,7 @@ export class Database {
     this.pool = new Pool({ ...base, max:8, connectionTimeoutMillis:5000, idleTimeoutMillis:10000 });
     this.lockPool = new Pool({ ...base, max:2, connectionTimeoutMillis:2000, idleTimeoutMillis:10000 });
     this.dbInterrupted=false;this.lastDbError=null;this.dbRecoveredAtMs=0;
+    this.dbAvailabilityProbeAtMs=0;this.dbAvailabilityProbeFailures=0;
     const onPoolError=(poolName)=>(err)=>{
       this.dbInterrupted=true;
       this.lastDbError={pool:poolName,code:String(err?.code||'unknown'),severity:String(err?.severity||'error'),atMs:Date.now(),message:String(err?.message||'').slice(0,180)};
@@ -140,9 +160,26 @@ export class Database {
     // pool slots for ledger, protection and broker reconciliation.
     this.starlightPersistenceGate=new BoundedDbWorkGate(2,256);
   }
+  async verifyAvailability(){
+    this.dbAvailabilityProbeAtMs=Date.now();
+    try {
+      // Both pools are execution dependencies: ordinary ledger writes and
+      // exclusive entry locks must work before recovering LIVE readiness.
+      await Promise.all([this.pool.query('select 1 as ok'),this.lockPool.query('select 1 as ok')]);
+      this.markDbRecovered();
+      return true;
+    }catch(error){
+      this.dbAvailabilityProbeFailures+=1;
+      this.dbInterrupted=true;
+      this.lastDbError={pool:'availability_probe',code:String(error?.code||'unknown'),atMs:Date.now(),message:String(error?.message||error).slice(0,180)};
+      throw error;
+    }
+  }
   resourceSnapshot(){
     const snap=(pool,max)=>({max,total:Number(pool?.totalCount||0),idle:Number(pool?.idleCount||0),waiting:Number(pool?.waitingCount||0)});
-    return {bounded:true,memoryReads:{...(this.memoryReadStats||{})},mainPool:snap(this.pool,8),lockPool:snap(this.lockPool,2),maximumConnections:10,lowPriorityPersistence:this.lowPriorityPersistenceGate?.snapshot?.()||null,starlightWatchPersistence:this.starlightPersistenceGate?.snapshot?.()||null};
+    return {bounded:true,dbInterrupted:this.dbInterrupted===true,dbRecoveredAtMs:this.dbRecoveredAtMs,
+      dbAvailabilityProbeAtMs:this.dbAvailabilityProbeAtMs,dbAvailabilityProbeFailures:this.dbAvailabilityProbeFailures,
+      memoryReads:{...(this.memoryReadStats||{})},mainPool:snap(this.pool,8),lockPool:snap(this.lockPool,2),maximumConnections:10,lowPriorityPersistence:this.lowPriorityPersistenceGate?.snapshot?.()||null,starlightWatchPersistence:this.starlightPersistenceGate?.snapshot?.()||null};
   }
   runLowPriorityPersistence(task){
     if(!this.lowPriorityPersistenceGate)return Promise.resolve().then(task);
@@ -268,6 +305,8 @@ export class Database {
   }
 
   async init() {
+    this.startupStage='base_schema';
+    try{
     await this.pool.query(`
       create table if not exists sag_settings(key text primary key,value jsonb not null,updated_at timestamptz not null default now());
       -- SE2-R5: immutable parent+epoch identity and durable, versioned recovery geometry.
@@ -302,7 +341,7 @@ export class Database {
       create table if not exists sag_entries(
         id text primary key,system_name text not null,owner_id text not null,concept_name text not null,source_feeder text,source_trade_id text,
         ticker text not null,event_ticker text not null,market_title text not null,watchdog_model text not null default 'hold-to-settlement',
-        mode text not null,status text not null,entry_price_cents int not null,exit_price_cents int,current_price_cents int not null,
+        mode text not null,status text not null,entry_price_cents double precision not null,exit_price_cents double precision,current_price_cents int not null,
         peak_price_cents int not null,stop_price_cents int not null default 0,stop_loss_cents int not null default 0,count double precision not null,
         remaining_count double precision not null default 0,volume_24h double precision not null default 0,spread_at_entry_cents int not null default 0,
         pnl_cents double precision not null default 0,entry_fee_cents double precision not null default 0,profit_harvest_peak_pnl_cents double precision not null default 0,exit_fee_cents double precision not null default 0,
@@ -313,7 +352,9 @@ export class Database {
         recovery_to_green_at_ms bigint,recovery_green_price_cents int,research_tracking_complete boolean not null default false,
         entry_config jsonb not null default '{}'::jsonb,feeder_state jsonb not null default '{}'::jsonb,stop_guard_state jsonb not null default '{}'::jsonb,profit_guard_state jsonb not null default '{}'::jsonb,apex_profit_guard_state jsonb not null default '{}'::jsonb,post_exit_state jsonb not null default '{}'::jsonb,exit_execution_state jsonb not null default '{}'::jsonb
       );
-      alter table sag_entries add column if not exists exit_price_cents int;
+      alter table sag_entries add column if not exists exit_price_cents double precision;
+      -- Execution-price widening runs in initAPS2's locked transaction, after
+      -- dependent trigger definitions have been preserved (see method below).
       alter table sag_entries add column if not exists entry_fee_cents double precision not null default 0;
       alter table sag_entries add column if not exists profit_harvest_peak_pnl_cents double precision not null default 0;
       alter table sag_entries add column if not exists exit_fee_cents double precision not null default 0;
@@ -493,14 +534,89 @@ export class Database {
       );
       create index if not exists sag_lightning_plasma_reservations_v1_expiry on sag_lightning_plasma_reservations_v1(system_name,expires_at_ms);
     `);
+    this.startupStage='legacy_learning';
     await this.migrateLearningData();
     await this.initAPS2();
     this.shadowSchemaReady=true;
+    this.startupStage='ready';
+    }catch(error){this.shadowSchemaReady=false;error.startupStage=error.startupStage||this.startupStage;throw error;}
+  }
+
+  async migrateExecutionPricePrecision(client){
+    // Caller owns the APS2 transaction and migration locks. Do not move this
+    // into the uncoordinated base-schema batch: UPDATE OF / WHEN dependencies
+    // can reject ALTER TYPE with SQLSTATE 0A000 on an upgraded database.
+    const inspect=()=>client.query(`select c.oid::text as table_oid,n.nspname as schema_name,
+      c.relname as table_name,a.attname,a.attnum,a.atttypid::regtype::text as type_name,
+      (a.atttypid='float8'::regtype) as already_precise
+      from pg_class c join pg_namespace n on n.oid=c.relnamespace
+      join pg_attribute a on a.attrelid=c.oid
+      where c.oid='sag_entries'::regclass and not a.attisdropped
+        and a.attname in ('entry_price_cents','exit_price_cents') order by a.attname`);
+    let columns=(await inspect()).rows;
+    const names=['entry_price_cents','exit_price_cents'];
+    const validate=()=>{
+      if(columns.length!==2||!names.every(name=>columns.some(c=>c.attname===name)))
+        throw new Error('execution_price_migration_columns_missing');
+      if(columns.some(c=>!['smallint','integer','bigint','real','double precision','numeric'].includes(c.type_name)))
+        throw new Error('execution_price_migration_unexpected_column_type');
+    };
+    validate();
+    if(columns.every(c=>c.already_precise===true))return {changed:false,triggersRestored:0};
+    // Block all access while dependent triggers are absent. PostgreSQL DDL is
+    // transactional: neither other workers nor a failed startup can observe a
+    // committed interval without the original protection triggers.
+    await client.query('lock table sag_entries in access exclusive mode');
+    columns=(await inspect()).rows;validate();
+    const changed=columns.filter(c=>c.already_precise!==true);
+    if(!changed.length)return {changed:false,triggersRestored:0};
+    const ident=value=>'"'+String(value).replaceAll('"','""')+'"';
+    const table=ident(columns[0].schema_name)+'.'+ident(columns[0].table_name);
+    const dependent=await client.query(`select t.oid::text as trigger_oid,t.tgname,
+      t.tgenabled,t.tgisinternal,t.tgconstraint::text as constraint_oid,
+      pg_get_triggerdef(t.oid,false) as definition,
+      case when obj_description(t.oid,'pg_trigger') is not null then
+        format('comment on trigger %I on %I.%I is %L',t.tgname,n.nspname,c.relname,
+          obj_description(t.oid,'pg_trigger')) else null end as comment_statement
+      from pg_trigger t join pg_class c on c.oid=t.tgrelid
+      join pg_namespace n on n.oid=c.relnamespace
+      where t.tgrelid=$1::oid and (
+        t.tgattr::smallint[] && $2::smallint[] or exists(
+          select 1 from pg_depend d where d.classid='pg_trigger'::regclass
+            and d.objid=t.oid and d.refclassid='pg_class'::regclass
+            and d.refobjid=t.tgrelid and d.refobjsubid=any($2::smallint[])))
+      order by t.tgname`,[columns[0].table_oid,changed.map(c=>Number(c.attnum))]);
+    const triggers=dependent.rows;
+    // Never CASCADE, silently discard a constraint, or reconstruct a definition
+    // from assumptions. Unknown dependencies make the whole transaction fail.
+    for(const t of triggers){
+      if(t.tgisinternal||String(t.constraint_oid)!=='0'||!['O','D','R','A'].includes(t.tgenabled)
+        ||!/^CREATE (?:CONSTRAINT )?TRIGGER /i.test(String(t.definition||'')))
+        throw new Error('execution_price_migration_unsupported_trigger_dependency');
+    }
+    for(const t of triggers)await client.query(`drop trigger ${ident(t.tgname)} on ${table}`);
+    await client.query(`alter table ${table} `+changed.map(c=>
+      `alter column ${ident(c.attname)} type double precision using ${ident(c.attname)}::double precision`).join(', '));
+    for(const t of triggers){
+      await client.query(t.definition);
+      const action={O:'enable',D:'disable',R:'enable replica',A:'enable always'}[t.tgenabled];
+      await client.query(`alter table ${table} ${action} trigger ${ident(t.tgname)}`);
+      if(t.comment_statement)await client.query(t.comment_statement);
+    }
+    const restored=await client.query(`select tgname,tgenabled from pg_trigger
+      where tgrelid=$1::oid and tgname=any($2::text[])`,[columns[0].table_oid,triggers.map(t=>t.tgname)]);
+    if(restored.rows.length!==triggers.length||triggers.some(t=>
+      !restored.rows.some(r=>r.tgname===t.tgname&&r.tgenabled===t.tgenabled)))
+      throw new Error('execution_price_migration_trigger_restore_unverified');
+    columns=(await inspect()).rows;validate();
+    if(!columns.every(c=>c.already_precise===true))throw new Error('execution_price_migration_readback_failed');
+    return {changed:true,triggersRestored:triggers.length};
   }
 
   async initAPS2(){
     // All authority upgrades commit together. Startup is fail-closed until this
     // transaction succeeds. V3 is historical infrastructure, not a buy route.
+    this.startupStage='authority_transaction';
     const client=await this.pool.connect();
     try{
       await client.query('BEGIN');
@@ -522,18 +638,237 @@ export class Database {
       if(activation?.rows?.[0]?.version && !alreadyActive)
         throw new Error('aps2_activation_version_mismatch');
       await client.query('lock table sag_entries in share row exclusive mode');
+      this.startupStage='execution_price_precision';
+      await this.migrateExecutionPricePrecision(client);
+      this.startupStage='shadow_schema';
       await client.query(SHADOW_SCHEMA_SQL);
       const legacy=await client.query("select to_regclass('sag_lp_continuation_v3') as relation");
-      if(!legacy.rows[0]?.relation)await client.query(LP_CONTINUATION_MIGRATION_SQL);
+      if(!legacy.rows[0]?.relation){this.startupStage='legacy_lightning_schema';await client.query(LP_CONTINUATION_MIGRATION_SQL);}
       // Do NOT re-run V3's pending-order migration over V4 orders on restart.
+      this.startupStage='starlight_schema';
       await client.query(STARLIGHT_SHADOW_SQL);
+      this.startupStage='great_horn_schema';
+      await client.query(GREAT_HORN_SQL);
+      this.startupStage='crystal_wall_recovery_schema';
+      await client.query(CRYSTAL_WALL_RECOVERY_SQL);
+      this.startupStage='lightning_schema';
       await client.query(LP_SHADOW_CONTINUATION_SQL);
+      this.startupStage='athena_starlight_schema';
       await client.query(ATHENA_STARLIGHT_TRIGGER_SQL);
+      this.startupStage='execution_reporting_schema';
       await client.query(EXECUTION_REPORT_MIGRATION_SQL);
+      this.startupStage='authority_commit';
       await client.query('COMMIT');
       this.aps2SchemaVersion=APS2_VERSION;
-    }catch(error){try{await client.query('ROLLBACK');}catch{}this.shadowSchemaReady=false;throw error;}
+    }catch(error){try{await client.query('ROLLBACK');}catch{}this.shadowSchemaReady=false;error.startupStage=error.startupStage||this.startupStage;throw error;}
     finally{client.release();}
+  }
+
+  async armGreatHornWatchFromClosedLightning(parentId){
+    // A verified loss creates observation only. Seat/BUY authority is separate.
+    // Re-read the database under a row lock: callback objects are never authoritative.
+    const client=await this.pool.connect();
+    try{
+      await client.query('BEGIN');
+      const runtime=await client.query("select value from sag_settings where key='runtime' for share");
+      const settings=sanitizeRuntimeSettings(runtime.rows[0]?.value||{});
+      if(settings.greatHornEnabled!==true||settings.engineActive!==true){await client.query('ROLLBACK');return {ok:false,reason:'gh1_disabled'};}
+      const rows=await client.query('select * from sag_entries where id=$1 for share',[String(parentId||'')]);
+      const parent=rows.rows[0]?rowEntry(rows.rows[0]):null;
+      const loss=verifiedLightningLoss(parent,settings);
+      if(!loss.ok){await client.query('ROLLBACK');return loss;}
+      const built=greatHornWatchFromLoss(loss,settings);
+      if(!built.ok){await client.query('ROLLBACK');return built;}
+      const w=built.watch;
+      const result=await client.query(`insert into sag_great_horn_watches_v1
+         (id,version,system_name,owner_id,mode,reset_epoch,parent_entry_id,ticker,event_ticker,status,revision,watch,updated_at_ms)
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,'WATCHING',1,$10,$11)
+         on conflict(system_name,owner_id,mode,reset_epoch,parent_entry_id) do nothing returning id`,
+        [w.id,w.version,w.systemName,w.ownerId,w.mode,w.resetEpoch,w.parentEntryId,w.ticker,w.eventTicker,w,Date.now()]);
+      await client.query('COMMIT');
+      return {ok:true,status:result.rowCount?'WATCHING_CREATED':'WATCH_ALREADY_PRESENT',watchId:w.id};
+    }catch(error){try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  /** Replay missed close-notification callbacks after restart, by keyset.
+   * A page only identifies possible parents. armGreatHornWatchFromClosedLightning
+   * rechecks all evidence and scope under locks; its unique parent key ensures
+   * callback+replay and concurrent workers cannot create duplicate watches.
+   */
+  async greatHornMissingParentPage(scope,{limit=8,beforeClosedMs=Number.MAX_SAFE_INTEGER,beforeId='\uffff'}={}){
+    const lim=Math.max(1,Math.min(32,Math.floor(Number(limit)||8)));
+      const r=await this.pool.query(`select e.id,e.closed_at_ms,e.ticker from sag_entries e
+      where e.system_name=$1 and e.owner_id=$2 and e.mode=$3
+        and e.opened_at_ms >= $4 and e.archived=false
+        and e.execution_class='CAPITAL' and e.concept_name='Lightning Plasma'
+        and e.status='closed' and e.pnl_cents<0 and e.remaining_count=0
+        and e.closed_at_ms is not null and e.closed_at_ms <= $5
+        and (e.closed_at_ms < $6 or (e.closed_at_ms=$6 and e.id < $7))
+        and not exists(select 1 from sag_great_horn_watches_v1 w
+          where w.system_name=$1 and w.owner_id=$2 and w.mode=$3 and w.reset_epoch=$4
+            and w.parent_entry_id=e.id)
+      order by e.closed_at_ms desc,e.id desc limit $8`,
+      [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),Date.now(),
+       Math.min(Number.MAX_SAFE_INTEGER,Number(beforeClosedMs)||Number.MAX_SAFE_INTEGER),String(beforeId),lim]);
+    return r.rows.map(x=>({id:String(x.id),closedAtMs:Number(x.closed_at_ms),ticker:String(x.ticker)}));
+  }
+  /** Claim a bounded and fair observation page, not an execution authority.
+   * FOR UPDATE SKIP LOCKED plus scan cursor prevents stalled parents monopolizing
+   * the queue while protecting against concurrent scheduler processes.
+   */
+  /** Durable subscriptions for unresolved recovery watches, including after a
+   * process restart or after the final Lightning position was removed. Scope
+   * and bounded limit prevent leaking other operator/reset watch identities. */
+  async greatHornActiveTickers(scope,{limit=256}={}){
+    const lim=Math.max(1,Math.min(256,Math.floor(Number(limit)||256)));
+    const r=await this.pool.query(`select ticker from sag_great_horn_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+        and status='WATCHING' order by last_scan_ms desc,updated_at_ms desc,id desc
+      limit $5`,[scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),lim]);
+    return [...new Set(r.rows.map(row=>String(row.ticker||'')).filter(Boolean))];
+  }
+  async greatHornObservationPage(scope,{limit=24,priorityWatchIds=[],priorityTickers=[]}={}){
+    const lim=Math.max(1,Math.min(64,Math.floor(Number(limit)||24)));
+    const ids=[...new Set((Array.isArray(priorityWatchIds)?priorityWatchIds:[]).map(String).filter(Boolean))].slice(0,32);
+    const tickers=[...new Set((Array.isArray(priorityTickers)?priorityTickers:[]).map(String).filter(Boolean))].slice(0,16);
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local statement_timeout='4000ms'");
+      const r=await client.query(`with due as (
+        select id from sag_great_horn_watches_v1
+        where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+        and status='WATCHING'
+        order by case when id=any($7::text[]) then 0
+                      when ticker=any($8::text[]) then 1 else 2 end,
+                 last_scan_ms asc,updated_at_ms asc,id asc
+        limit $5 for update skip locked
+      ) update sag_great_horn_watches_v1 w set last_scan_ms=$6
+        from due where w.id=due.id returning w.id,w.revision,w.watch`,
+        [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),lim,Date.now(),ids,tickers]);
+      await client.query('COMMIT');started=false;
+      return r.rows.map(row=>({...row.watch,revision:Number(row.revision),id:row.id}));
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  /** CAS persistence of one immutable, ordered observation. No row created
+   * here can enter a position, reserve cash, or submit a broker request.
+   */
+  async greatHornObserve(watchId,quote){
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local lock_timeout='1000ms'");
+      await client.query("set local statement_timeout='4000ms'");
+      const runtime=await client.query("select value from sag_settings where key='runtime' for share");
+      const settings=sanitizeRuntimeSettings(runtime.rows[0]?.value||{});
+      if(settings.engineActive!==true||settings.greatHornEnabled!==true){await client.query('ROLLBACK');started=false;return {ok:false,reason:'gh1_observation_paused'};}
+      const r=await client.query('select * from sag_great_horn_watches_v1 where id=$1 for update',[String(watchId||'')]);
+      const row=r.rows[0];
+      if(!row||row.status!=='WATCHING'||String(row.system_name)!==String(settings.systemName)
+        ||String(row.owner_id)!==String(settings.ownerId)||String(row.mode)!==String(settings.mode)
+        ||Number(row.reset_epoch)!==Number(settings.resetTimestampMs||0)){
+        await client.query('ROLLBACK');started=false;return {ok:false,reason:'gh1_watch_scope_or_status_changed'};
+      }
+      const parent=await client.query('select * from sag_entries where id=$1 for share',[row.parent_entry_id]);
+      const proof=verifiedLightningLoss(parent.rows[0]?rowEntry(parent.rows[0]):null,settings);
+      if(!proof.ok){await client.query('ROLLBACK');started=false;return {ok:false,reason:`gh1_parent_drift:${proof.reason}`};}
+      const current={...row.watch,revision:Number(row.revision)};
+      if(current.id!==row.id||current.version!==row.version||String(current.parentEntryId)!==String(row.parent_entry_id))
+        throw new Error('gh1_corrupted_watch_identity');
+      const transition=greatHornObservationStep(current,quote,settings);
+      if(!transition.ok||!transition.changed){await client.query('COMMIT');started=false;return {...transition,watchId:row.id};}
+      const next=transition.watch;
+      const revision=Number(row.revision)+1;
+      const updated=await client.query(`update sag_great_horn_watches_v1
+        set status=$2,revision=$3,watch=$4,updated_at_ms=$5
+        where id=$1 and revision=$6 returning revision`,
+        [row.id,next.status,revision,{...next,revision},Date.now(),Number(row.revision)]);
+      if(updated.rowCount!==1)throw new Error('gh1_observation_revision_conflict');
+      await client.query('COMMIT');started=false;
+      return {ok:true,changed:true,reason:transition.reason,watchId:row.id,
+        status:next.status,signalQualified:next.qualified===true,revision,watch:{...next,revision}};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  async greatHornWatchSummary(scope){
+    const r=await this.pool.query(`select status,count(*)::int as n from sag_great_horn_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4 group by status`,
+      [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0)]);
+    return {version:'GH1-WATCH-AND-CAPITAL',capitalAdmission:scope.mode==='SIMULATION'?'SIM_CAPITAL_NATIVE_VERIFICATION_PENDING':'LIVE_BROKER_NATIVE_VERIFICATION_PENDING',byStatus:Object.fromEntries(r.rows.map(x=>[x.status,Number(x.n)]))};
+  }
+  /** GH1-P0 bounded, scope-isolated read model. Called only by explicit
+   * diagnostic/ledger export; never on the trading hot path or every SSE tick.
+   * Do not export secrets, raw broker payloads or unbounded watch JSON. */
+  async greatHornDiagnosticSnapshot(scope,{limit=48,fromMs=0,toMs=0}={}){
+    const lim=Math.min(64,Math.max(1,Math.floor(Number(limit)||48)));
+    const args=[String(scope.systemName),String(scope.ownerId),String(scope.mode),
+      Number(scope.resetEpoch??scope.resetTimestampMs??0),lim];
+    const w=await this.pool.query(`select id,parent_entry_id,ticker,event_ticker,status,revision,
+      watch->>'link' as link,watch->>'qualified' as qualified,
+      watch->>'lastSignalReason' as reason,watch->>'lastAskCents' as last_ask,
+      watch->>'lastBidCents' as last_bid,watch->>'lastQuoteAtMs' as last_quote_ms,
+      watch->>'armedAtMs' as armed_ms,watch->>'maximumSeats' as maximum_seats,
+      watch->>'verifiedLosingExitPriceCents' as parent_exit_cents,
+      watch->>'originalParentEntryPriceCents' as original_entry_cents,
+      updated_at_ms,last_scan_ms from sag_great_horn_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+      order by updated_at_ms desc,id desc limit $5`,args);
+    const seats=await this.pool.query(`select x.watch_id,x.seat,x.position_id,x.status,
+      e.entry_client_order_id is not null as has_broker_client_order,
+      e.entry_order_id is not null as has_broker_receipt,
+      e.status as position_status,e.opened_at_ms,e.closed_at_ms
+      from sag_great_horn_seats_v1 x join sag_great_horn_watches_v1 w on w.id=x.watch_id
+      left join sag_entries e on e.id=x.position_id
+      where w.system_name=$1 and w.owner_id=$2 and w.mode=$3 and w.reset_epoch=$4
+      order by w.updated_at_ms desc,x.seat asc limit $5`,[...args.slice(0,4),Math.min(160,lim*3)]);
+    // New GH events always carry ownerId and mode. Missing legacy owner data
+    // is not exported because it cannot be proven scoped to this operator.
+    // GH1-ROOT1: the previous audit query referenced $2,$3,$5,$6,$7
+    // without using $1 and $4. PostgreSQL cannot infer those unused input
+    // types, so EVERY export of Great Horn's watch/denial evidence failed.
+    // All seven parameters are typed and referenced. Reset epoch is a
+    // financial authority boundary, not merely a display label: old events
+    // must never appear as current-reset denials. Legacy scope-less events
+    // remain excluded rather than guessed into an operator's ledger.
+    const eventArgs=[args[0],args[1],args[2],args[3],Math.max(0,Number(fromMs)||0),
+      Math.max(0,Number(toMs)||0),lim];
+    const events=await this.pool.query(`select id,ts,level,event,
+      data->>'parentId' as parent_id,data->>'watchId' as watch_id,
+      data->>'ticker' as ticker,data->>'reason' as reason,
+      data->>'depthReason' as depth_reason,
+      data->>'availableAtLimitCount' as available_at_limit_count,
+      data->>'plannedAvailableAtLimitCount' as planned_available_at_limit_count,
+      data->>'previouslyConsumedCount' as previously_consumed_count,
+      data->>'requestedCount' as requested_count,
+      data->>'seat' as seat,data->>'seatsOpened' as seats_opened
+      from sag_audit where event like 'gh1_%'
+      and data->>'systemName'=$1::text and data->>'ownerId'=$2::text
+      and data->>'mode'=$3::text
+      and data->>'resetEpoch'=($4::bigint)::text
+      and ($5::bigint=0 or ts>=to_timestamp($5::double precision/1000.0))
+      and ($6::bigint=0 or ts<=to_timestamp($6::double precision/1000.0))
+      order by id desc limit $7::int`,eventArgs);
+    return {version:'GH1-P0-DURABLE-DECISIONS',available:true,scope:{systemName:args[0],ownerId:args[1],mode:args[2],resetEpoch:args[3]},
+      truncated:{watches:w.rowCount===lim,seats:seats.rowCount===Math.min(160,lim*3),events:events.rowCount===lim},
+      watches:w.rows.map(r=>({id:r.id,parentId:r.parent_entry_id,ticker:r.ticker,eventTicker:r.event_ticker,
+        status:r.status,revision:Number(r.revision),link:r.link==='true',qualified:r.qualified==='true',
+        reason:r.reason,lastAskCents:r.last_ask==null?null:Number(r.last_ask),
+        lastBidCents:r.last_bid==null?null:Number(r.last_bid),lastQuoteAtMs:Number(r.last_quote_ms||0),
+        armedAtMs:Number(r.armed_ms||0),maximumSeats:Number(r.maximum_seats||0),
+        parentExitCents:Number(r.parent_exit_cents||0),originalEntryCents:Number(r.original_entry_cents||0),
+        lastScanMs:Number(r.last_scan_ms||0),updatedAtMs:Number(r.updated_at_ms||0)})),
+      seats:seats.rows.map(r=>({watchId:r.watch_id,seat:Number(r.seat),positionId:r.position_id,
+        status:r.status,positionStatus:r.position_status,hasBrokerClientOrder:r.has_broker_client_order,
+        hasBrokerReceipt:r.has_broker_receipt,openedAtMs:Number(r.opened_at_ms||0),closedAtMs:Number(r.closed_at_ms||0)})),
+      events:events.rows.map(r=>({id:Number(r.id),at:r.ts,event:r.event,level:r.level,
+        parentId:r.parent_id,watchId:r.watch_id,ticker:r.ticker,reason:r.reason,
+        depthReason:r.depth_reason||null,
+        availableAtLimitCount:r.available_at_limit_count==null?null:Number(r.available_at_limit_count),
+        plannedAvailableAtLimitCount:r.planned_available_at_limit_count==null?null:Number(r.planned_available_at_limit_count),
+        previouslyConsumedCount:r.previously_consumed_count==null?null:Number(r.previously_consumed_count),
+        requestedCount:r.requested_count==null?null:Number(r.requested_count),
+        seat:r.seat==null?null:Number(r.seat),seatsOpened:r.seats_opened==null?null:Number(r.seats_opened)}))};
   }
 
   async starlightShadowSeats(scope,parentId){
@@ -622,6 +957,12 @@ export class Database {
       const closed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Lightning Plasma'],Math.max(1,Math.min(5000,Number(limit)||150))]);
+      const greatHornClosed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
+        where ${scope} and opened_at_ms>=$4 and concept_name='Great Horn Recovery' and status='closed' and count>0
+        order by closed_at_ms desc nulls last,id limit $5`,[...args.slice(0,4),Math.max(1,Math.min(5000,Number(limit)||150))]);
+      const crystalWallClosed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
+        where ${scope} and opened_at_ms>=$4 and concept_name='Crystal Wall Recovery' and status='closed' and count>0
+        order by closed_at_ms desc nulls last,id limit $5`,[...args.slice(0,4),Math.max(1,Math.min(5000,Number(limit)||150))]);
       const legacyClosed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Crash Recovery Hunter'],Math.max(1,Math.min(5000,Number(limit)||150))]);
@@ -632,7 +973,7 @@ export class Database {
         from sag_entries where ${scope} and concept_name=any($4::text[])`,[...args.slice(0,3),PORTFOLIO_CONCEPT_NAMES,Math.max(0,Number(simFeeCents)||0)]);
       await client.query('COMMIT');
       return {reportingVersion:EXECUTION_REPORT_VERSION,aggregates:groups.rows,periods:periods.rows,openRows:opens.rows.map(rowEntry),
-        closedRows:closed.rows.map(rowEntry),legacyClosedRows:legacyClosed.rows.map(rowEntry),account:account.rows[0]||{},asOfMs:Date.now()};
+        closedRows:closed.rows.map(rowEntry),greatHornClosedRows:greatHornClosed.rows.map(rowEntry),crystalWallClosedRows:crystalWallClosed.rows.map(rowEntry),legacyClosedRows:legacyClosed.rows.map(rowEntry),account:account.rows[0]||{},asOfMs:Date.now()};
     }catch(error){try{await client.query('ROLLBACK');}catch{}throw error;}
     finally{client.release();}
   }
@@ -942,6 +1283,1078 @@ export class Database {
     }finally{client.release();}
   }
 
+  /** GH1 SIM/LIVE transactional capital admission; LIVE creates only a durable
+   * pending intent, never a broker fill or direct permission to POST.
+   * Runtime/parent/watch/seat lock order is global and deterministic. No BUY or
+   * portfolio row exists unless all constraints commit atomically. Each child
+   * remains in the ordinary protective ProfitGuard ledger after GH is disabled.
+   */
+  async insertGreatHornCapitalEntry(entry,{quote,isCurrent=()=>true}={}){
+    const live=entry?.mode==='LIVE';
+    if(entry?.conceptName!==GH_CONCEPT||!['SIMULATION','LIVE'].includes(entry?.mode)
+       ||entry.entryConfig?.greatHornRecovery?.version!==(live?GH_LIVE_VERSION:GH_SIM_VERSION)
+       ||(live&&(entry.status!=='entry_pending'||!entry.entryClientOrderId))
+       ||(!live&&entry.status!=='open')
+       ||!quote||typeof isCurrent!=='function')throw new Error('gh_sim_atomic_entry_contract_required');
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local lock_timeout='1500ms'");
+      await client.query("set local statement_timeout='5000ms'");
+      const runtime=await client.query("select value from sag_settings where key='runtime' for update");
+      const persistedRuntime=runtime.rows?.[0]?.value||{};
+      const settings=sanitizeRuntimeSettings(persistedRuntime);
+      // The sanitizer intentionally disarms startup configuration; here the
+      // PostgreSQL runtime row is the durable operator truth under FOR UPDATE.
+      settings.liveArmed=persistedRuntime.liveArmed===true;
+      const stamp=entry.entryConfig.greatHornRecovery;
+      if(!isCurrent()||entry.entryConfig?.greatHornSettingsFingerprint!==greatHornSettingsFingerprint(settings)
+         ||settings.engineActive!==true||settings.greatHornEnabled!==true
+         ||settings.mode!==entry.mode||(live&&settings.liveArmed!==true)||settings.systemName!==entry.systemName
+         ||settings.ownerId!==entry.ownerId
+         ||Number(settings.resetTimestampMs||0)!==Number(entry.entryConfig.resetTimestampMs||0))
+        throw new Error('gh_sim_current_operator_scope_required');
+      const found=await client.query('select * from sag_great_horn_watches_v1 where id=$1 for update',[stamp.watchId]);
+      const wRow=found.rows[0];
+      if(!wRow||wRow.status!=='WATCHING'||wRow.system_name!==entry.systemName
+         ||wRow.owner_id!==entry.ownerId||wRow.mode!==entry.mode
+         ||Number(wRow.reset_epoch)!==Number(settings.resetTimestampMs||0))
+        throw new Error('gh_sim_watch_not_current');
+      const parentResult=await client.query('select * from sag_entries where id=$1 for share',[wRow.parent_entry_id]);
+      const parent=parentResult.rows[0]?rowEntry(parentResult.rows[0]):null;
+      const watch={...wRow.watch,id:wRow.id,revision:Number(wRow.revision),status:wRow.status};
+      const check=greatHornAdmissionDecision({watch,seat:Number(stamp.seat),settings,quote,parent});
+      if(!check.ok||check.positionId!==entry.id||watch.parentEntryId!==entry.sourceTradeId
+         ||Number(stamp.watchRevision)!==Number(wRow.revision)
+         ||!watch.qualified||Number(watch.lastQuoteAtMs)>Number(quote.quoteAtMs))
+        throw new Error(`gh_sim_parent_or_signal_changed:${check.reason||'watch_drift'}`);
+      
+      if(!Number.isSafeInteger(entry.count)||entry.count<1
+         ||!(entry.entryPriceCents>=Number(quote.yesAsk))
+         ||!greatHornOperatorBandAllowed(watch,entry.entryPriceCents,settings)
+         ||!greatHornSpreadAllowed(quote,settings)
+         ||entry.count*entry.entryPriceCents>Number(settings.greatHornStakeCents)
+         ||(live?entry.entryFeeCents!==0:entry.entryFeeCents!==Number(settings.simFeeCents||0)*entry.count)
+         ||entry.entryConfig?.aurora?.frozen!==true
+         ||Number(entry.entryConfig.aurora.damageControlPercent)!==Number(settings.greatHornAuroraDamageControlPercent)
+         ||!(Number(entry.entryConfig.finalEntryConfirmation?.bookProof?.verifiedAtMs)>Date.now()-5000)
+         ||Number(entry.entryConfig.aurora.originalContractCount)!==entry.count
+         ||Number(entry.entryConfig.aurora.entryPriceCents)!==entry.entryPriceCents
+         ||entry.entryConfig.aurora.dangerPriceCents!==entry.stopPriceCents)
+        throw new Error('gh_sim_immutable_financial_parameters_invalid');
+      // The DB transaction serializes this group's seats. Validate the
+      // previously committed contract footprint against the caller's frozen
+      // REST depth witness; never grant an unlimited second SIM fill at a
+      // price level that could only support the first seat.
+      const priorQuantity=await client.query(`select coalesce(sum(e.count),0)::double precision as contracts
+        from sag_great_horn_seats_v1 x join sag_entries e on e.id=x.position_id
+        where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
+      const priorCount=Number(priorQuantity.rows?.[0]?.contracts||0);
+      const bookProof=entry.entryConfig?.finalEntryConfirmation?.bookProof;
+      if(!Number.isFinite(priorCount)||priorCount<0||(!live&&!Number.isSafeInteger(priorCount))
+         ||!Number.isSafeInteger(Number(bookProof?.availableAtLimitCount))
+         ||Number(bookProof?.existingGroupQuantity)!==priorCount
+         ||Number(bookProof?.availableAtLimitCount)<(live?0:priorCount)+entry.count)
+        throw new Error('gh_sim_cumulative_rest_depth_or_group_changed');
+      const duplicates=await client.query('select id,status from sag_entries where id=$1',[entry.id]);
+      if(duplicates.rowCount)throw new Error('gh_sim_seat_already_consumed');
+      const capacity=await client.query(`select count(*)::int as active from sag_entries
+        where system_name=$1 and owner_id=$3 and mode=$4 and archived=false
+          and ${CAPITAL_SQL} and concept_name=any($2::text[])
+          and status in ('open','entry_pending','exit_pending','pending_recovery')`,
+        [entry.systemName,PORTFOLIO_CONCEPT_NAMES,entry.ownerId,entry.mode]);
+      if(Number(capacity.rows[0]?.active||0)>=Math.max(1,Number(settings.maxPositions)||1))
+        throw new Error('gh_sim_global_capacity_exceeded');
+      // Keep the existing Galactic Explosion cross-attack exact-ticker policy.
+      // The configured GH Multiply seats for ONE verified Lightning parent are
+      // a single bounded recovery group, not a cross-concept ticker bypass.
+      if(settings.galacticExplosionEnabled!==true){
+        const overlaps=await client.query(`select id,concept_name,source_trade_id from sag_entries
+          where system_name=$1 and ticker=$2 and owner_id=$6 and mode=$7
+          and archived=false and ${CAPITAL_SQL}
+          and concept_name=any($3::text[])
+          and status in ('open','entry_pending','exit_pending','pending_recovery')
+          and not (concept_name=$4 and source_trade_id=$5)
+          limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,GH_CONCEPT,parent.id,entry.ownerId,entry.mode]);
+        if(overlaps.rowCount)throw new Error('gh_sim_cross_attack_exact_ticker_conflict');
+      }
+      // A recovered LIVE pending intent is a real broker obligation, even if
+      // the POST response was lost. Block any additional GH capital intent
+      // until ALL earlier owner-wide capital entries have been reconciled.
+      // This is deliberately stricter than a per-ticker or per-seat admission:
+      // a single current broker balance must never be spent twice by GH.
+      if(live){
+        const outstanding=await client.query(`select id from sag_entries
+          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
+          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
+          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
+        if(outstanding.rowCount)throw new Error('gh_live_outstanding_owner_order_requires_reconciliation');
+      }
+      // A different owner's completed SIM profits must not finance this
+      // owner's GH purchases. Legacy/open exposure in this owner's system
+      // remains reserved even when its entry predates the current reset.
+      if(!live){
+        const cash=await this.simulationCashAggregate(entry.systemName,
+          {simFeeCents:settings.simFeeCents,ownerId:entry.ownerId,
+           realizedSinceMs:Number(settings.resetTimestampMs||0)},client);
+        if(Number(settings.startingCapitalCents||0)+cash.realizedCents-cash.reservedCents
+           <entry.count*entry.entryPriceCents+entry.entryFeeCents)
+          throw new Error('gh_sim_insufficient_available_cash');
+      }
+      const seat=Number(stamp.seat);
+      const seats=await client.query(`insert into sag_great_horn_seats_v1(watch_id,seat,position_id,status)
+        values($1,$2,$3,'RESERVED') on conflict do nothing returning seat`,[watch.id,seat,entry.id]);
+      if(seats.rowCount!==1)throw new Error('gh_sim_seat_already_reserved');
+      // The SQL fence has an independent scope/lineage/seat check. The capability
+      // is transaction-local, never granted to caller-owned pooled queries.
+      await client.query(live?"select set_config('sagittarius.gh1_live_entry','admitted',true)":"select set_config('sagittarius.gh1_sim_entry','admitted',true)");
+      if(!isCurrent())throw new Error('gh_sim_authority_changed_at_insert');
+      const allowed=live?AUTHORIZED_GH_LIVE_INSERTS:AUTHORIZED_GH_SIM_INSERTS;
+      allowed.add(client);
+      try{await this.insertEntry(entry,client);}finally{allowed.delete(client);}
+      const seatUpdate=await client.query(`update sag_great_horn_seats_v1 set status='${live?'RECONCILE':'FILLED'}'
+        where watch_id=$1 and seat=$2 and position_id=$3 and status='RESERVED'`,[watch.id,seat,entry.id]);
+      if(seatUpdate.rowCount!==1)throw new Error('gh_sim_seat_commit_missing');
+      const remaining=await client.query('select count(*)::int as occupied from sag_great_horn_seats_v1 where watch_id=$1',[watch.id]);
+      if(Number(remaining.rows?.[0]?.occupied)===Number(watch.maximumSeats)){
+        const consumed=await client.query(`update sag_great_horn_watches_v1
+          set status='CONSUMED',watch=watch||jsonb_build_object('status','CONSUMED',
+            'qualified',false,'lastSignalReason','gh_sim_all_seats_consumed'),
+            revision=revision+1,updated_at_ms=$2 where id=$1 and revision=$3`,
+          [watch.id,Date.now(),Number(wRow.revision)]);
+        if(consumed.rowCount!==1)throw new Error('gh_sim_group_consumed_revision_conflict');
+      }
+      if(!isCurrent())throw new Error('gh_sim_authority_changed_before_commit');
+      await client.query('COMMIT');started=false;
+      return {ok:true,entry,watchId:watch.id,seat};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+
+  async insertGreatHornSimulationEntry(entry,options={}){
+    if(entry?.mode!=='SIMULATION')throw new Error('gh_sim_only');
+    return this.insertGreatHornCapitalEntry(entry,options);
+  }
+
+  async insertGreatHornLiveEntry(entry,options={}){
+    if(entry?.mode!=='LIVE')throw new Error('gh_live_only');
+    return this.insertGreatHornCapitalEntry(entry,options);
+  }
+
+  /** Read-only durable proof used before AND during the broker queue. Never
+   * grants capital permission on a reconstructed caller-side parent snapshot. */
+  async verifyGreatHornLiveIntent(entry){
+    const stamp=entry?.entryConfig?.greatHornRecovery;
+    if(entry?.conceptName!==GH_CONCEPT||entry?.mode!=='LIVE'||!entry?.entryClientOrderId
+       ||stamp?.version!==GH_LIVE_VERSION)return {ok:false,reason:'gh_live_intent_missing'};
+    const r=await this.pool.query(`select e.*, s.value as runtime, w.watch as recovery_watch,
+      w.status as watch_status,w.revision as watch_revision,w.system_name as watch_system,
+      w.owner_id as watch_owner,w.mode as watch_mode,w.reset_epoch as watch_epoch,
+      w.parent_entry_id as watch_parent, x.status as seat_status,x.position_id as seat_position,
+      p.id as parent_id, to_jsonb(p) as parent_record
+      from sag_entries e join sag_settings s on s.key='runtime'
+      left join sag_great_horn_watches_v1 w on w.id=e.entry_config#>>'{greatHornRecovery,watchId}'
+      left join sag_great_horn_seats_v1 x on x.watch_id=w.id
+       and x.seat=(e.entry_config#>>'{greatHornRecovery,seat}')::int
+      left join sag_entries p on p.id=e.source_trade_id where e.id=$1`,[entry.id]);
+    const raw=r.rows?.[0];if(!raw)return {ok:false,reason:'gh_live_intent_not_persisted'};
+    const settings=sanitizeRuntimeSettings(raw.runtime||{}), cfg=raw.entry_config||{},saved=cfg.greatHornRecovery||{};
+    settings.liveArmed=raw.runtime?.liveArmed===true;
+    if(entry.entryOrderId||raw.entry_order_id||entry.status!=='entry_pending'||raw.status!=='entry_pending'
+      ||Number(entry.remainingCount)!==Number(entry.count)||Number(raw.remaining_count)!==Number(raw.count)
+      ||Number(entry.entryFeeCents||0)!==0||Number(raw.entry_fee_cents||0)!==0
+      ||Number(entry.exitFilledCount||0)!==0||Number(raw.exit_filled_count||0)!==0
+      ||Number(entry.exitNotionalCents||0)!==0||Number(raw.exit_notional_cents||0)!==0)
+      return {ok:false,reconcileOnly:true,reason:'gh_live_intent_already_receipted_or_reconciled'};
+    if(authorityHash(cfg)!==authorityHash(entry.entryConfig))
+      return {ok:false,reconcileOnly:true,reason:'gh_live_intent_configuration_changed'};
+    if(raw.concept_name!==GH_CONCEPT||raw.execution_class!=='CAPITAL'||raw.mode!=='LIVE'
+       ||raw.status!=='entry_pending'||raw.entry_client_order_id!==entry.entryClientOrderId
+       ||raw.entry_order_id||raw.id!==stamp.positionId||String(raw.source_trade_id)!==String(stamp.parentEntryId)
+       ||raw.count!==entry.count||Number(raw.entry_price_cents)!==Number(entry.entryPriceCents)
+       ||raw.system_name!==entry.systemName||raw.owner_id!==entry.ownerId
+       ||raw.ticker!==entry.ticker||raw.event_ticker!==entry.eventTicker
+       ||saved.version!==GH_LIVE_VERSION||saved.watchId!==stamp.watchId
+       ||saved.positionId!==stamp.positionId||Number(saved.seat)!==Number(stamp.seat)
+       ||saved.watchRevision!==stamp.watchRevision
+       ||raw.seat_position!==entry.id||raw.seat_status!=='RECONCILE'
+       ||!['WATCHING','CONSUMED'].includes(raw.watch_status)
+       ||raw.watch_system!==entry.systemName||raw.watch_owner!==entry.ownerId
+       ||raw.watch_mode!=='LIVE'||Number(raw.watch_epoch)!==Number(settings.resetTimestampMs||0)
+       ||raw.watch_parent!==entry.sourceTradeId
+       ||raw.recovery_watch?.link!==saved.capturedSettings?.link
+       ||raw.recovery_watch?.link!==settings.greatHornLinkEnabled
+       ||settings.engineActive!==true||settings.greatHornEnabled!==true
+       ||settings.liveArmed!==true||settings.mode!=='LIVE'||settings.systemName!==entry.systemName
+       ||settings.ownerId!==entry.ownerId||Number(settings.resetTimestampMs||0)!==Number(cfg.resetTimestampMs||0)
+       ||Number(saved.watchRevision)>Number(raw.watch_revision)
+       ||cfg.greatHornSettingsFingerprint!==greatHornSettingsFingerprint(settings)
+       ||cfg.aurora?.frozen!==true||cfg.auroraPending?.exactFillRequired!==true
+       ||Number(cfg.auroraDamageControlPercent)!==Number(settings.greatHornAuroraDamageControlPercent))
+      return {ok:false,reason:'gh_live_intent_operator_or_seat_changed'};
+    const parent=raw.parent_record?rowEntry(raw.parent_record):null;
+    const loss=verifiedLightningLoss(parent,settings);
+    if(!loss.ok)return {ok:false,reason:'gh_live_parent_drift:'+loss.reason};
+    // Consuming the final seat deliberately makes its watch terminal and
+    // clears qualified. That must NOT revoke the SAME already-committed BUY
+    // intent; any nonterminal watch retraction must still deny dispatch.
+    if((raw.watch_status!=='CONSUMED' && raw.recovery_watch?.qualified!==true)
+       ||Number(raw.recovery_watch?.lastQuoteAtMs)<Number(saved.quoteAtMs))
+      return {ok:false,reason:'gh_live_signal_proof_missing'};
+    return {ok:true,reason:'gh_live_persisted_intent_current'};
+  }
+
+  /** A locally refused BUY or explicit broker hard reject can relinquish its
+   * unresolved intent only if no authoritative order ID was attached.
+   * Seats stay terminal and are not reused by a delayed callback/restart. */
+  async rejectGreatHornUnsubmittedIntent(entry,{reason='dispatch_rejected',brokerRejected=false}={}){
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      const row=await client.query('select * from sag_entries where id=$1 for update',[entry.id]);
+      const e=row.rows?.[0];
+      if(!e||e.status!=='entry_pending'||e.entry_order_id||e.entry_client_order_id!==entry.entryClientOrderId
+        ||entry.status!=='entry_pending'||entry.entryOrderId||entry.mode!=='LIVE'
+        ||e.mode!=='LIVE'||e.concept_name!==GH_CONCEPT||e.execution_class!=='CAPITAL'||e.archived===true
+        ||e.system_name!==entry.systemName||e.owner_id!==entry.ownerId||e.ticker!==entry.ticker
+        ||e.event_ticker!==entry.eventTicker||e.source_trade_id!==entry.sourceTradeId
+        ||Number(e.count)!==Number(entry.count)||Number(e.entry_price_cents)!==Number(entry.entryPriceCents)
+        ||Number(e.remaining_count)!==Number(e.count)||Number(entry.remainingCount)!==Number(entry.count)
+        ||Number(e.entry_fee_cents||0)!==0||Number(entry.entryFeeCents||0)!==0
+        ||Number(e.exit_filled_count||0)!==0||Number(entry.exitFilledCount||0)!==0
+        ||Number(e.exit_notional_cents||0)!==0||Number(entry.exitNotionalCents||0)!==0
+        ||authorityHash(e.entry_config)!==authorityHash(entry.entryConfig))
+        throw new Error('gh_live_intent_no_longer_safe_to_reject');
+      if(e.entry_config?.greatHornRecovery?.version!==GH_LIVE_VERSION)
+        throw new Error('gh_live_rejection_lineage_invalid');
+      await client.query(`update sag_entries set status='rejected',remaining_count=0,
+        close_reason=$2,updated_at_ms=$3 where id=$1 and status='entry_pending'`,
+        [entry.id,brokerRejected?'gh_broker_definite_reject':'gh_never_transmitted:'+String(reason).slice(0,90),Date.now()]);
+      await client.query(`update sag_great_horn_seats_v1 set status='REJECTED'
+        where position_id=$1 and status='RECONCILE'`,[entry.id]);
+      await client.query('COMMIT');started=false;
+      return {ok:true};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+
+  // CW1 isolated Great Horn-loss second-recovery authority. The original GH functions above are untouched.
+  async armCrystalWallWatchFromClosedGreatHorn(parentId){
+    // A verified loss creates observation only. Seat/BUY authority is separate.
+    // Re-read the database under a row lock: callback objects are never authoritative.
+    const client=await this.pool.connect();
+    try{
+      await client.query('BEGIN');
+      const runtime=await client.query("select value from sag_settings where key='runtime' for share");
+      const settings=sanitizeRuntimeSettings(runtime.rows[0]?.value||{});
+      if(settings.crystalWallRecoveryEnabled!==true||settings.engineActive!==true){await client.query('ROLLBACK');return {ok:false,reason:'cw1_disabled'};}
+      const rows=await client.query('select * from sag_entries where id=$1 for share',[String(parentId||'')]);
+      const parent=rows.rows[0]?rowEntry(rows.rows[0]):null;
+      const loss=verifiedGreatHornLoss(parent,settings);
+      if(!loss.ok){await client.query('ROLLBACK');return loss;}
+      const built=crystalWallRecoveryWatchFromLoss(loss,settings);
+      if(!built.ok){await client.query('ROLLBACK');return built;}
+      const w=built.watch;
+      const result=await client.query(`insert into sag_crystal_wall_recovery_watches_v1
+         (id,version,system_name,owner_id,mode,reset_epoch,parent_entry_id,ticker,event_ticker,status,revision,watch,updated_at_ms)
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,'WATCHING',1,$10,$11)
+         on conflict(system_name,owner_id,mode,reset_epoch,parent_entry_id) do nothing returning id`,
+        [w.id,w.version,w.systemName,w.ownerId,w.mode,w.resetEpoch,w.parentEntryId,w.ticker,w.eventTicker,w,Date.now()]);
+      await client.query('COMMIT');
+      return {ok:true,status:result.rowCount?'WATCHING_CREATED':'WATCH_ALREADY_PRESENT',watchId:w.id};
+    }catch(error){try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  /** Replay missed close-notification callbacks after restart, by keyset.
+   * A page only identifies possible parents. armCrystalWallWatchFromClosedGreatHorn
+   * rechecks all evidence and scope under locks; its unique parent key ensures
+   * callback+replay and concurrent workers cannot create duplicate watches.
+   */
+  async crystalWallRecoveryMissingParentPage(scope,{limit=8,beforeClosedMs=Number.MAX_SAFE_INTEGER,beforeId='\uffff'}={}){
+    const lim=Math.max(1,Math.min(32,Math.floor(Number(limit)||8)));
+      const r=await this.pool.query(`select e.id,e.closed_at_ms,e.ticker from sag_entries e
+      where e.system_name=$1 and e.owner_id=$2 and e.mode=$3
+        and e.opened_at_ms >= $4 and e.archived=false
+        and e.execution_class='CAPITAL' and e.concept_name='Great Horn Recovery'
+        and e.status='closed' and e.pnl_cents<0 and e.remaining_count=0
+        and e.closed_at_ms is not null and e.closed_at_ms <= $5
+        and (e.closed_at_ms < $6 or (e.closed_at_ms=$6 and e.id < $7))
+        and not exists(select 1 from sag_crystal_wall_recovery_watches_v1 w
+          where w.system_name=$1 and w.owner_id=$2 and w.mode=$3 and w.reset_epoch=$4
+            and w.parent_entry_id=e.id)
+      order by e.closed_at_ms desc,e.id desc limit $8`,
+      [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),Date.now(),
+       Math.min(Number.MAX_SAFE_INTEGER,Number(beforeClosedMs)||Number.MAX_SAFE_INTEGER),String(beforeId),lim]);
+    return r.rows.map(x=>({id:String(x.id),closedAtMs:Number(x.closed_at_ms),ticker:String(x.ticker)}));
+  }
+  /** Claim a bounded and fair observation page, not an execution authority.
+   * FOR UPDATE SKIP LOCKED plus scan cursor prevents stalled parents monopolizing
+   * the queue while protecting against concurrent scheduler processes.
+   */
+  /** Durable subscriptions for unresolved recovery watches, including after a
+   * process restart or after the final GreatHorn position was removed. Scope
+   * and bounded limit prevent leaking other operator/reset watch identities. */
+  async crystalWallRecoveryActiveTickers(scope,{limit=256}={}){
+    const lim=Math.max(1,Math.min(256,Math.floor(Number(limit)||256)));
+    const r=await this.pool.query(`select ticker from sag_crystal_wall_recovery_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+        and status='WATCHING' order by last_scan_ms desc,updated_at_ms desc,id desc
+      limit $5`,[scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),lim]);
+    return [...new Set(r.rows.map(row=>String(row.ticker||'')).filter(Boolean))];
+  }
+  async crystalWallRecoveryObservationPage(scope,{limit=24,priorityWatchIds=[],priorityTickers=[]}={}){
+    const lim=Math.max(1,Math.min(64,Math.floor(Number(limit)||24)));
+    const ids=[...new Set((Array.isArray(priorityWatchIds)?priorityWatchIds:[]).map(String).filter(Boolean))].slice(0,32);
+    const tickers=[...new Set((Array.isArray(priorityTickers)?priorityTickers:[]).map(String).filter(Boolean))].slice(0,16);
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local statement_timeout='4000ms'");
+      const r=await client.query(`with due as (
+        select id from sag_crystal_wall_recovery_watches_v1
+        where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+        and status='WATCHING'
+        order by case when id=any($7::text[]) then 0
+                      when ticker=any($8::text[]) then 1 else 2 end,
+                 last_scan_ms asc,updated_at_ms asc,id asc
+        limit $5 for update skip locked
+      ) update sag_crystal_wall_recovery_watches_v1 w set last_scan_ms=$6
+        from due where w.id=due.id returning w.id,w.revision,w.watch`,
+        [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0),lim,Date.now(),ids,tickers]);
+      await client.query('COMMIT');started=false;
+      return r.rows.map(row=>({...row.watch,revision:Number(row.revision),id:row.id}));
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  /** CAS persistence of one immutable, ordered observation. No row created
+   * here can enter a position, reserve cash, or submit a broker request.
+   */
+  async crystalWallRecoveryObserve(watchId,quote){
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local lock_timeout='1000ms'");
+      await client.query("set local statement_timeout='4000ms'");
+      const runtime=await client.query("select value from sag_settings where key='runtime' for share");
+      const settings=sanitizeRuntimeSettings(runtime.rows[0]?.value||{});
+      if(settings.engineActive!==true||settings.crystalWallRecoveryEnabled!==true){await client.query('ROLLBACK');started=false;return {ok:false,reason:'cw1_observation_paused'};}
+      const r=await client.query('select * from sag_crystal_wall_recovery_watches_v1 where id=$1 for update',[String(watchId||'')]);
+      const row=r.rows[0];
+      if(!row||row.status!=='WATCHING'||String(row.system_name)!==String(settings.systemName)
+        ||String(row.owner_id)!==String(settings.ownerId)||String(row.mode)!==String(settings.mode)
+        ||Number(row.reset_epoch)!==Number(settings.resetTimestampMs||0)){
+        await client.query('ROLLBACK');started=false;return {ok:false,reason:'cw1_watch_scope_or_status_changed'};
+      }
+      const parent=await client.query('select * from sag_entries where id=$1 for share',[row.parent_entry_id]);
+      const proof=verifiedGreatHornLoss(parent.rows[0]?rowEntry(parent.rows[0]):null,settings);
+      if(!proof.ok){await client.query('ROLLBACK');started=false;return {ok:false,reason:`cw1_parent_drift:${proof.reason}`};}
+      const current={...row.watch,revision:Number(row.revision)};
+      if(current.id!==row.id||current.version!==row.version||String(current.parentEntryId)!==String(row.parent_entry_id))
+        throw new Error('cw1_corrupted_watch_identity');
+      const transition=crystalWallRecoveryObservationStep(current,quote,settings);
+      if(!transition.ok||!transition.changed){await client.query('COMMIT');started=false;return {...transition,watchId:row.id};}
+      const next=transition.watch;
+      const revision=Number(row.revision)+1;
+      const updated=await client.query(`update sag_crystal_wall_recovery_watches_v1
+        set status=$2,revision=$3,watch=$4,updated_at_ms=$5
+        where id=$1 and revision=$6 returning revision`,
+        [row.id,next.status,revision,{...next,revision},Date.now(),Number(row.revision)]);
+      if(updated.rowCount!==1)throw new Error('cw1_observation_revision_conflict');
+      await client.query('COMMIT');started=false;
+      return {ok:true,changed:true,reason:transition.reason,watchId:row.id,
+        status:next.status,signalQualified:next.qualified===true,revision,watch:{...next,revision}};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+  async crystalWallRecoveryWatchSummary(scope){
+    const r=await this.pool.query(`select status,count(*)::int as n from sag_crystal_wall_recovery_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4 group by status`,
+      [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetTimestampMs||0)]);
+    return {version:'CW1-WATCH-AND-CAPITAL',capitalAdmission:scope.mode==='SIMULATION'?'SIM_CAPITAL_NATIVE_VERIFICATION_PENDING':'LIVE_BROKER_NATIVE_VERIFICATION_PENDING',byStatus:Object.fromEntries(r.rows.map(x=>[x.status,Number(x.n)]))};
+  }
+  /** CW1-P0 bounded, scope-isolated read model. Called only by explicit
+   * diagnostic/ledger export; never on the trading hot path or every SSE tick.
+   * Do not export secrets, raw broker payloads or unbounded watch JSON. */
+  async crystalWallRecoveryDiagnosticSnapshot(scope,{limit=48,fromMs=0,toMs=0}={}){
+    const lim=Math.min(64,Math.max(1,Math.floor(Number(limit)||48)));
+    const args=[String(scope.systemName),String(scope.ownerId),String(scope.mode),
+      Number(scope.resetEpoch??scope.resetTimestampMs??0),lim];
+    const w=await this.pool.query(`select id,parent_entry_id,ticker,event_ticker,status,revision,
+      watch->>'link' as link,watch->>'qualified' as qualified,
+      watch->>'lastSignalReason' as reason,watch->>'lastAskCents' as last_ask,
+      watch->>'lastBidCents' as last_bid,watch->>'lastQuoteAtMs' as last_quote_ms,
+      watch->>'armedAtMs' as armed_ms,watch->>'maximumSeats' as maximum_seats,
+      watch->>'verifiedLosingExitPriceCents' as parent_exit_cents,
+      watch->>'originalParentEntryPriceCents' as original_entry_cents,
+      updated_at_ms,last_scan_ms from sag_crystal_wall_recovery_watches_v1
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+      order by updated_at_ms desc,id desc limit $5`,args);
+    const seats=await this.pool.query(`select x.watch_id,x.seat,x.position_id,x.status,
+      e.entry_client_order_id is not null as has_broker_client_order,
+      e.entry_order_id is not null as has_broker_receipt,
+      e.status as position_status,e.opened_at_ms,e.closed_at_ms
+      from sag_crystal_wall_recovery_seats_v1 x join sag_crystal_wall_recovery_watches_v1 w on w.id=x.watch_id
+      left join sag_entries e on e.id=x.position_id
+      where w.system_name=$1 and w.owner_id=$2 and w.mode=$3 and w.reset_epoch=$4
+      order by w.updated_at_ms desc,x.seat asc limit $5`,[...args.slice(0,4),Math.min(160,lim*3)]);
+    // New GH events always carry ownerId and mode. Missing legacy owner data
+    // is not exported because it cannot be proven scoped to this operator.
+    // CW1-ROOT1: the previous audit query referenced $2,$3,$5,$6,$7
+    // without using $1 and $4. PostgreSQL cannot infer those unused input
+    // types, so EVERY export of Great Horn's watch/denial evidence failed.
+    // All seven parameters are typed and referenced. Reset epoch is a
+    // financial authority boundary, not merely a display label: old events
+    // must never appear as current-reset denials. Legacy scope-less events
+    // remain excluded rather than guessed into an operator's ledger.
+    const eventArgs=[args[0],args[1],args[2],args[3],Math.max(0,Number(fromMs)||0),
+      Math.max(0,Number(toMs)||0),lim];
+    const events=await this.pool.query(`select id,ts,level,event,
+      data->>'parentId' as parent_id,data->>'watchId' as watch_id,
+      data->>'ticker' as ticker,data->>'reason' as reason,
+      data->>'depthReason' as depth_reason,
+      data->>'availableAtLimitCount' as available_at_limit_count,
+      data->>'plannedAvailableAtLimitCount' as planned_available_at_limit_count,
+      data->>'previouslyConsumedCount' as previously_consumed_count,
+      data->>'requestedCount' as requested_count,
+      data->>'seat' as seat,data->>'seatsOpened' as seats_opened
+      from sag_audit where event like 'cw1_%'
+      and data->>'systemName'=$1::text and data->>'ownerId'=$2::text
+      and data->>'mode'=$3::text
+      and data->>'resetEpoch'=($4::bigint)::text
+      and ($5::bigint=0 or ts>=to_timestamp($5::double precision/1000.0))
+      and ($6::bigint=0 or ts<=to_timestamp($6::double precision/1000.0))
+      order by id desc limit $7::int`,eventArgs);
+    return {version:'CW1-P0-DURABLE-DECISIONS',available:true,scope:{systemName:args[0],ownerId:args[1],mode:args[2],resetEpoch:args[3]},
+      truncated:{watches:w.rowCount===lim,seats:seats.rowCount===Math.min(160,lim*3),events:events.rowCount===lim},
+      watches:w.rows.map(r=>({id:r.id,parentId:r.parent_entry_id,ticker:r.ticker,eventTicker:r.event_ticker,
+        status:r.status,revision:Number(r.revision),link:r.link==='true',qualified:r.qualified==='true',
+        reason:r.reason,lastAskCents:r.last_ask==null?null:Number(r.last_ask),
+        lastBidCents:r.last_bid==null?null:Number(r.last_bid),lastQuoteAtMs:Number(r.last_quote_ms||0),
+        armedAtMs:Number(r.armed_ms||0),maximumSeats:Number(r.maximum_seats||0),
+        parentExitCents:Number(r.parent_exit_cents||0),originalEntryCents:Number(r.original_entry_cents||0),
+        lastScanMs:Number(r.last_scan_ms||0),updatedAtMs:Number(r.updated_at_ms||0)})),
+      seats:seats.rows.map(r=>({watchId:r.watch_id,seat:Number(r.seat),positionId:r.position_id,
+        status:r.status,positionStatus:r.position_status,hasBrokerClientOrder:r.has_broker_client_order,
+        hasBrokerReceipt:r.has_broker_receipt,openedAtMs:Number(r.opened_at_ms||0),closedAtMs:Number(r.closed_at_ms||0)})),
+      events:events.rows.map(r=>({id:Number(r.id),at:r.ts,event:r.event,level:r.level,
+        parentId:r.parent_id,watchId:r.watch_id,ticker:r.ticker,reason:r.reason,
+        depthReason:r.depth_reason||null,
+        availableAtLimitCount:r.available_at_limit_count==null?null:Number(r.available_at_limit_count),
+        plannedAvailableAtLimitCount:r.planned_available_at_limit_count==null?null:Number(r.planned_available_at_limit_count),
+        previouslyConsumedCount:r.previously_consumed_count==null?null:Number(r.previously_consumed_count),
+        requestedCount:r.requested_count==null?null:Number(r.requested_count),
+        seat:r.seat==null?null:Number(r.seat),seatsOpened:r.seats_opened==null?null:Number(r.seats_opened)}))};
+  }
+
+  async starlightShadowSeats(scope,parentId){
+    const r=await this.pool.query(`select * from sag_entries where system_name=$1 and owner_id=$2
+      and mode=$3 and shadow_epoch=$4 and concept_name='Crash Recovery Hunter'
+      and source_trade_id=$5 and execution_class='SHADOW_SAINT'
+      and entry_config#>>'{starlightShadow,version}'='APS2-VIRTUAL-STARLIGHT-V1'
+      order by (entry_config#>>'{starlightShadow,seat}')::int,id`,
+      [scope.systemName,scope.ownerId,scope.mode,Number(scope.resetEpoch??scope.resetTimestampMs??0),String(parentId)]);
+    return r.rows.map(rowEntry);
+  }
+
+  async lightningParentById(id){
+    const r=await this.pool.query(`select e.*,to_jsonb(a) as lp_continuation
+      from sag_entries e left join sag_lp_continuation_v4 a on a.parent_entry_id=e.id where e.id=$1`,[String(id)]);
+    return r.rows[0]?rowEntry(r.rows[0]):null;
+  }
+  async lightningMonitorParents(settings,{limit=64}={}){
+    const lim=Math.max(1,Math.min(128,Math.floor(Number(limit)||64)));
+    const r=await this.pool.query(`select p.*,to_jsonb(a) as lp_continuation
+      from sag_lp_continuation_v4 a join sag_entries p on p.id=a.parent_entry_id
+      where a.system_name=$1 and a.owner_id=$2 and a.mode=$3 and a.reset_epoch=$4
+      and a.state in ('OPEN','AWAITING_EXIT','CLOSED_PROFIT')
+      and (p.status in ('open','exit_pending','entry_pending','pending_recovery') or a.state='CLOSED_PROFIT')
+      order by a.last_polled_at_ms,a.parent_entry_id limit $5`,
+      [settings.systemName,settings.ownerId,settings.mode,Number(settings.resetTimestampMs||0),lim]);
+    return r.rows.map(rowEntry);
+  }
+  async touchGreatHornMonitorParents(settings,ids){
+    if(!ids.length)return;
+    await this.pool.query(`update sag_lp_continuation_v4 set last_polled_at_ms=$6
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4 and parent_entry_id=any($5::text[])`,
+      [settings.systemName,settings.ownerId,settings.mode,Number(settings.resetTimestampMs||0),ids.map(String),Date.now()]);
+  }
+  async terminateGreatHornMonitor(parent,reason){
+    const a=parent?.lpContinuation;if(!a)return false;
+    const r=await this.pool.query(`update sag_lp_continuation_v4 set state='MARKET_TERMINAL',terminal_reason=$7,
+      revision=revision+1,updated_at_ms=$8 where parent_entry_id=$1 and system_name=$2 and owner_id=$3
+      and mode=$4 and reset_epoch=$5 and revision=$6 and state not in ('REVOKED','MARKET_TERMINAL')`,
+      [parent.id,a.systemName,a.ownerId,a.mode,a.resetTimestampMs,a.revision,String(reason),Date.now()]);
+    return r.rowCount===1;
+  }
+  async lightningContinuationDiagnostic(settings,{limit=64}={}){
+    const scope=[settings.systemName,settings.ownerId,settings.mode,Number(settings.resetTimestampMs||0)];
+    const summary=await this.pool.query(`select state,count(*)::int as count from sag_lp_continuation_v4
+      where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4 group by state`,scope);
+    const rows=await this.pool.query(`select * from sag_lp_continuation_v4 where system_name=$1 and owner_id=$2
+      and mode=$3 and reset_epoch=$4 order by updated_at_ms desc,parent_entry_id limit $5`,[...scope,Math.max(1,Math.min(128,limit))]);
+    return {version:LP_CONTINUATION_VERSION,summary:summary.rows,rows:rows.rows.map(mapGreatHornAuthority),limit};
+  }
+
+  async upsertOpportunityEpisode(e={}){
+    const now=Number(e.updatedAtMs||Date.now());
+    const id=String(e.id||'').trim();
+    if(!id)throw new Error('opportunity episode id required');
+    await this.pool.query(`insert into sag_opportunity_episodes_v1(
+      id,system_name,source_release,cohort_id,ticker,event_ticker,side,sport,bolt_at_ms,bolt_snapshot,athena_decision,fire_command,attack_selected,entry_id,entry_at_ms,outcome,outcome_label,tracking_complete,updated_at_ms
+    ) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+    on conflict(id) do update set
+      athena_decision=excluded.athena_decision,fire_command=excluded.fire_command,attack_selected=excluded.attack_selected,entry_id=excluded.entry_id,entry_at_ms=excluded.entry_at_ms,
+      outcome=excluded.outcome,outcome_label=excluded.outcome_label,tracking_complete=excluded.tracking_complete,updated_at_ms=excluded.updated_at_ms`,[
+      id,String(e.systemName||'SAGITTARIUS'),String(e.sourceRelease||''),String(e.cohortId||''),String(e.ticker||''),e.eventTicker?String(e.eventTicker):null,
+      String(e.side||'YES'),String(e.sport||'Unknown'),Number(e.boltAtMs||Date.now()),e.boltSnapshot||{},e.athenaDecision||{},e.fireCommand||{},e.attackSelected||null,e.entryId||null,e.entryAtMs==null?null:Number(e.entryAtMs),e.outcome||{},e.outcomeLabel||null,e.trackingComplete===true,now
+    ]);
+    return id;
+  }
+  async opportunityEpisode(id){
+    const r=await this.pool.query('select * from sag_opportunity_episodes_v1 where id=$1',[String(id)]);
+    return r.rows[0]?this.mapOpportunityEpisode(r.rows[0]):null;
+  }
+  mapOpportunityEpisode(r){
+    return {id:r.id,systemName:r.system_name,sourceRelease:r.source_release,cohortId:r.cohort_id||'',ticker:r.ticker,eventTicker:r.event_ticker,side:r.side,sport:r.sport,boltAtMs:n(r.bolt_at_ms),boltSnapshot:r.bolt_snapshot||{},athenaDecision:r.athena_decision||{},fireCommand:r.fire_command||{},attackSelected:r.attack_selected,entryId:r.entry_id,entryAtMs:r.entry_at_ms==null?null:n(r.entry_at_ms),outcome:r.outcome||{},outcomeLabel:r.outcome_label,trackingComplete:Boolean(r.tracking_complete),updatedAtMs:n(r.updated_at_ms)};
+  }
+  async opportunityEpisodes(systemName,{limit=5000,trackingComplete=null,sinceMs=null}={}){
+    const params=[String(systemName)];let where='where system_name=$1';
+    if(trackingComplete!=null){params.push(Boolean(trackingComplete));where+=` and tracking_complete=$${params.length}`;}
+    if(sinceMs!=null){params.push(Number(sinceMs)||0);where+=` and bolt_at_ms >= $${params.length}`;}
+    params.push(Math.max(1,Math.min(20_000,Math.floor(Number(limit)||5000))));
+    const r=await this.pool.query(`select * from sag_opportunity_episodes_v1 ${where} order by bolt_at_ms desc limit $${params.length}`,params);
+    return r.rows.map(x=>this.mapOpportunityEpisode(x));
+  }
+  // R54/RGM3: Athena C2 training readers project only the fields that feed the
+  // economic profile compiler. Large entry_config / Bolt / outcome JSON blobs
+  // remain durable in PostgreSQL and are never hydrated into the trading
+  // process merely to rebuild compact historical evidence.
+  async athenaEconomicOpportunityEpisodes(systemName,{limit=20000}={}){
+    const lim=Math.max(1,Math.min(20_000,Math.floor(Number(limit)||20_000)));
+    const r=await this.pool.query(`select
+      id,source_release,cohort_id,sport,tracking_complete,attack_selected,entry_id,
+      fire_command->>'selectedAttack' as fire_selected_attack,
+      fire_command->>'entryPriceCents' as fire_entry_price_cents,
+      fire_command->>'stakeCents' as fire_stake_cents,
+      fire_command#>>'{economicTarget,netPerOriginalContractCents}' as fire_target_net_per_contract_cents,
+      fire_command#>>'{survivalCertificate,status}' as arayashiki_status,
+      fire_command#>>'{survivalCertificate,version}' as arayashiki_version,
+      fire_command#>>'{survivalCertificate,policyRevision}' as arayashiki_policy_revision,
+      outcome->>'realizedPnlCents' as outcome_realized_pnl_cents,
+      outcome->>'maeCents' as outcome_mae_cents,
+      outcome->>'closeReason' as outcome_close_reason,
+      outcome_label,
+      bolt_snapshot#>>'{features,sport}' as bolt_sport,
+      bolt_snapshot#>>'{features,cosmoSources,0}' as bolt_source_feeder,
+      bolt_snapshot#>>'{features,gameMinutes}' as bolt_game_minutes,
+      bolt_snapshot#>>'{features,askCents}' as bolt_ask_cents
+      from sag_opportunity_episodes_v1
+      where system_name=$1 and tracking_complete=true
+      order by bolt_at_ms desc limit $2`,[String(systemName),lim]);
+    return r.rows.map((x)=>({
+      id:x.id,sourceRelease:x.source_release||'',cohortId:x.cohort_id||'',sport:x.sport||'Unknown',trackingComplete:Boolean(x.tracking_complete),
+      attackSelected:x.attack_selected,entryId:x.entry_id,outcomeLabel:x.outcome_label,
+      fireCommand:{selectedAttack:x.fire_selected_attack||null,entryPriceCents:x.fire_entry_price_cents,stakeCents:x.fire_stake_cents,economicTarget:{netPerOriginalContractCents:x.fire_target_net_per_contract_cents},survivalCertificate:x.arayashiki_status?{status:x.arayashiki_status,version:x.arayashiki_version||null,policyRevision:x.arayashiki_policy_revision||null}:null},
+      outcome:{realizedPnlCents:x.outcome_realized_pnl_cents,maeCents:x.outcome_mae_cents,closeReason:x.outcome_close_reason||null},
+      boltSnapshot:{features:{sport:x.bolt_sport||null,cosmoSources:x.bolt_source_feeder?[x.bolt_source_feeder]:[],gameMinutes:x.bolt_game_minutes,askCents:x.bolt_ask_cents}},
+    }));
+  }
+  async opportunitySummary(systemName){
+    const r=await this.pool.query(`select
+      count(*)::int as total,
+      count(*) filter(where coalesce((athena_decision->>'decision'),'')='FIRE')::int as fire,
+      count(*) filter(where coalesce((athena_decision->>'decision'),'')='WATCH')::int as watch,
+      count(*) filter(where coalesce((athena_decision->>'decision'),'')='REJECT')::int as reject,
+      count(*) filter(where coalesce((athena_decision->>'decision'),'')='EXPIRED')::int as expired,
+      count(*) filter(where outcome_label='CLEAN_BOLT')::int as clean,
+      count(*) filter(where outcome_label='TOXIC_LATE_BOLT')::int as toxic_late,
+      count(*) filter(where outcome_label='FALSE_BOLT')::int as false_bolt,
+      count(*) filter(where outcome_label='EXPIRED_NO_IMPULSE')::int as expired_no_impulse,
+      count(*) filter(where tracking_complete=true)::int as complete,
+      count(*) filter(where tracking_complete=false)::int as incomplete
+      from sag_opportunity_episodes_v1 where system_name=$1`,[String(systemName)]);
+    const x=r.rows[0]||{};return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,Number(v)||0]));
+  }
+
+  async reserveGreatHornPlasmaRay({systemName,fieldId,eventTicker,boltId,stakeCents,fieldBudgetCents,maxRays,expiresAtMs}){
+    const client=await this.pool.connect();const now=Date.now();
+    try{
+      await client.query('begin');
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))',[`${systemName}|athena-plasma-field|${fieldId}`]);
+      await client.query('delete from sag_lightning_plasma_reservations_v1 where system_name=$1 and expires_at_ms < $2',[String(systemName),now]);
+      const r=await client.query('select count(*)::int as rays,coalesce(sum(stake_cents),0)::double precision as stake from sag_lightning_plasma_reservations_v1 where system_name=$1 and field_id=$2',[String(systemName),String(fieldId)]);
+      const rays=Number(r.rows?.[0]?.rays||0),stake=Number(r.rows?.[0]?.stake||0),ray=Math.max(0,Number(stakeCents)||0),budget=Math.max(0,Number(fieldBudgetCents)||0),limit=Math.max(1,Math.floor(Number(maxRays)||1));
+      if(rays>=limit||stake+ray>budget+1e-9){await client.query('rollback');return{ok:false,reason:rays>=limit?'max_rays':'field_budget',rays,stakeCents:stake};}
+      try{
+        await client.query('insert into sag_lightning_plasma_reservations_v1(system_name,field_id,event_ticker,bolt_id,stake_cents,reserved_at_ms,expires_at_ms) values($1,$2,$3,$4,$5,$6,$7)',[String(systemName),String(fieldId),String(eventTicker),String(boltId),ray,now,Number(expiresAtMs||now+5000)]);
+      }catch(e){
+        if(String(e?.code||'')==='23505'){await client.query('rollback');return{ok:false,reason:'duplicate_event_or_bolt',rays,stakeCents:stake};}
+        throw e;
+      }
+      await client.query('commit');return{ok:true,rayIndex:rays+1,reservedStakeCents:stake+ray};
+    }catch(e){try{await client.query('rollback');}catch{}throw e;}finally{client.release();}
+  }
+  async linkGreatHornPlasmaReservation({systemName,fieldId,boltId,entryId}){
+    await this.pool.query('update sag_lightning_plasma_reservations_v1 set entry_id=$4 where system_name=$1 and field_id=$2 and bolt_id=$3',[String(systemName),String(fieldId),String(boltId),entryId?String(entryId):null]);
+  }
+
+  get shadowStore(){return this._shadowStore||(this._shadowStore=new ShadowStore(this,rowEntry));}
+  captureShadowScope(s){return this.shadowStore.captureScope(s);}
+  insertShadowEntry(e,scope,options){return this.shadowStore.insert(e,scope,options);}
+  insertAthenaShadowBatch(entries,scope,options){return this.shadowStore.insertAthenaBatch(entries,scope,options);}
+  openShadowEntriesPage(scope,options){return this.shadowStore.openPage(scope,options);}
+  commitShadowEvaluation(e,observation,evaluation,scope,options){return this.shadowStore.commit(e,observation,evaluation,scope,options);}
+  recordShadowWait(e,scope,reason,options){return this.shadowStore.wait(e,scope,reason,options);}
+  verifiedShadowStop(parentId,scope){return this.shadowStore.authorization(parentId,scope);}
+  pendingShadowStops(scope,options){return this.shadowStore.pending(scope,options);}
+  markShadowStopDelivered(id,hash,scope){return this.shadowStore.delivered(id,hash,scope);}
+  shadowDiagnostics(scope,options){return this.shadowStore.diagnosticRows(scope,options);}
+  shadowSummary(scope){return this.shadowStore.summary(scope);}
+  shadowProofDiagnostic(parentId,scope){return this.shadowStore.proofDiagnostic(parentId,scope);}
+  async shadowTickerEntries(scope,ticker){
+    const r=await this.pool.query(`select * from sag_entries where system_name=$1 and owner_id=$2 and mode=$3
+      and shadow_epoch=$4 and execution_class='SHADOW_SAINT' and ticker=$5 and archived=false
+      and status in ('open','entry_pending','exit_pending','pending_recovery')`,
+      [scope.systemName,scope.ownerId,scope.mode,scope.resetEpoch,ticker]);return r.rows.map(rowEntry);
+  }
+  async shadowEventPolicySnapshot(scope,eventTicker){
+    const r=await this.pool.query(`select concept_name,count(*) filter(where status in ('open','entry_pending','exit_pending','pending_recovery'))::int as active,
+      max(opened_at_ms) filter(where status<>'rejected') as latest from sag_entries
+      where system_name=$1 and owner_id=$2 and mode=$3 and shadow_epoch=$4 and execution_class='SHADOW_SAINT'
+      and coalesce(nullif(event_ticker,''),ticker)=$5 and archived=false group by concept_name`,
+      [scope.systemName,scope.ownerId,scope.mode,scope.resetEpoch,eventTicker]);
+    return {activeEntries:r.rows.reduce((a,x)=>a+Number(x.active||0),0),
+      latestHunterEntryMs:r.rows.reduce((a,x)=>Math.max(a,Number(x.latest||0)),0),
+      latestByConcept:Object.fromEntries(r.rows.map(x=>[x.concept_name,Number(x.latest||0)]))};
+  }
+
+  async close(){ await Promise.allSettled([this.pool.end(),this.lockPool.end()]); }
+  async loadSettings(defaults,{preserveRuntimeArm=false}={}){
+    const r=await this.pool.query("select value from sag_settings where key='runtime'");
+    const raw=r.rows[0]?.value||{},clean=sanitizeRuntimeSettings(raw,defaults);
+    // Startup callers remain disarmed by default. Only readback of an already
+    // authorized runtime commit may retain its persisted LIVE admission flag.
+    if(preserveRuntimeArm)clean.liveArmed=clean.mode==='LIVE'&&raw.liveArmed===true;
+    return clean;
+  }
+  // MW-R25: a single PostgreSQL transaction serializes the committed card and
+  // its band-change audit. The monotonic revision is stored independently of
+  // the sanitized operator configuration; a UI draft is not a saved setting.
+  async loadSettingsRevision(){
+    const r=await this.pool.query("select value from sag_settings where key='runtime_commit_revision'");
+    return Number(r.rows?.[0]?.value?.revision||0);
+  }
+  async saveSettings(settings){
+    const clean=sanitizeRuntimeSettings(settings);
+    // sanitizeRuntimeSettings intentionally disarms on LOAD. Applying that boot
+    // policy to a verified runtime SAVE made LIVE admission permanently false
+    // in PostgreSQL, even after successful operator/health authorization.
+    // The settings PATCH route cannot write mode/liveArmed; only the serialized
+    // internal mode/rearm controls supply this flag after their safety checks.
+    clean.liveArmed=clean.mode==='LIVE'&&settings.liveArmed===true;
+    const client=await this.pool.connect();let inTx=false;
+    try{
+      await client.query('BEGIN');inTx=true;
+      // Also serializes the first-ever save, where SELECT FOR UPDATE of the
+      // missing runtime row would otherwise protect nothing.
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))',['MW-R25-SAVED-RUNTIME-CARD']);
+      const previous=await client.query("select value from sag_settings where key='runtime' for update");
+      const prior=previous.rows?.[0]?.value||{};
+      const revisionQuery=await client.query("select value from sag_settings where key='runtime_commit_revision' for update");
+      const revision=Math.max(0,Math.trunc(Number(revisionQuery.rows?.[0]?.value?.revision||0)))+1;
+      if(!Number.isSafeInteger(revision))throw new Error('runtime_settings_revision_overflow');
+      const changedAtMs=Date.now();
+      await client.query("insert into sag_settings(key,value) values('runtime',$1) on conflict(key) do update set value=excluded.value,updated_at=now()",[clean]);
+      await client.query("insert into sag_settings(key,value) values('runtime_commit_revision',$1) on conflict(key) do update set value=excluded.value,updated_at=now()",[{revision,changedAtMs}]);
+      const fields=['crashRecoveryMinEntryCents','crashRecoveryMaxEntryCents'];
+      if(fields.some(k=>Number(prior[k])!==Number(clean[k]))){
+        await client.query(`insert into sag_audit(level,event,data) values('info','starlight_price_band_settings_committed',$1::jsonb)`,[
+          JSON.stringify({version:'MW-R25-ATOMIC-SETTINGS-HISTORY',atMs:changedAtMs,revision,
+            systemName:String(clean.systemName||''),ownerId:String(clean.ownerId||''),mode:String(clean.mode||''),resetEpoch:Number(clean.resetTimestampMs||0),
+            previous:{minEntryCents:prior.crashRecoveryMinEntryCents??null,maxEntryCents:prior.crashRecoveryMaxEntryCents??null},
+            effective:{minEntryCents:clean.crashRecoveryMinEntryCents,maxEntryCents:clean.crashRecoveryMaxEntryCents},
+            note:'exact database-settings transition, not an uncommitted browser edit'})
+        ]);
+      }
+      await client.query('COMMIT');inTx=false;
+      return {revision,changedAtMs};
+    }catch(error){if(inTx)try{await client.query('ROLLBACK');}catch(rollbackError){error.rollbackError=String(rollbackError?.message||rollbackError);}throw error;
+    }finally{client.release();}
+  }
+  async loadSoulLedger(){const r=await this.pool.query("select value from sag_settings where key='athena_soul'");return r.rows[0]?.value||null;}
+  async saveSoulLedger(value){await this.pool.query("insert into sag_settings(key,value) values('athena_soul',$1) on conflict(key) do update set value=excluded.value,updated_at=now()",[value||{}]);}
+  async saveDeploymentConfig(value){await this.pool.query("insert into sag_settings(key,value) values('deployment',$1) on conflict(key) do update set value=excluded.value,updated_at=now()",[value]);}
+
+  async upsertAthenaExclamationVote(v){
+    await this.pool.query(`
+      insert into sag_athena_exclamation_votes_v1(system_name,ticker,event_ticker,concept_name,first_qualified_at_ms,last_qualified_at_ms,refresh_count,price_cents,bid_cents,source_feeder,source_trade_id,game_minutes,snapshot)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      on conflict(system_name,ticker,concept_name) do update set
+        event_ticker=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.event_ticker else sag_athena_exclamation_votes_v1.event_ticker end,
+        first_qualified_at_ms=least(sag_athena_exclamation_votes_v1.first_qualified_at_ms,excluded.first_qualified_at_ms),
+        last_qualified_at_ms=greatest(sag_athena_exclamation_votes_v1.last_qualified_at_ms,excluded.last_qualified_at_ms),
+        refresh_count=sag_athena_exclamation_votes_v1.refresh_count+1,
+        price_cents=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.price_cents else sag_athena_exclamation_votes_v1.price_cents end,
+        bid_cents=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.bid_cents else sag_athena_exclamation_votes_v1.bid_cents end,
+        source_feeder=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.source_feeder else sag_athena_exclamation_votes_v1.source_feeder end,
+        source_trade_id=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.source_trade_id else sag_athena_exclamation_votes_v1.source_trade_id end,
+        game_minutes=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.game_minutes else sag_athena_exclamation_votes_v1.game_minutes end,
+        snapshot=case when excluded.last_qualified_at_ms >= sag_athena_exclamation_votes_v1.last_qualified_at_ms then excluded.snapshot else sag_athena_exclamation_votes_v1.snapshot end`,[
+      v.systemName,v.ticker,v.eventTicker,v.conceptName,v.firstQualifiedAtMs,v.lastQualifiedAtMs,v.refreshCount||0,
+      Math.round(Number(v.priceCents||0)),Math.round(Number(v.bidCents||0)),v.sourceFeeder||null,v.sourceTradeId||null,
+      v.gameMinutes==null?null:Number(v.gameMinutes),v.snapshot||{}
+    ]);
+  }
+  async recentAthenaExclamationVotes(systemName,sinceMs=0){
+    const r=await this.pool.query(`select * from sag_athena_exclamation_votes_v1 where system_name=$1 and last_qualified_at_ms >= $2 order by last_qualified_at_ms asc`,[systemName,sinceMs]);
+    return r.rows.map(x=>({systemName:x.system_name,ticker:x.ticker,eventTicker:x.event_ticker,conceptName:x.concept_name,firstQualifiedAtMs:n(x.first_qualified_at_ms),lastQualifiedAtMs:n(x.last_qualified_at_ms),refreshCount:n(x.refresh_count),priceCents:n(x.price_cents),bidCents:n(x.bid_cents),sourceFeeder:x.source_feeder,sourceTradeId:x.source_trade_id,gameMinutes:x.game_minutes==null?null:n(x.game_minutes),snapshot:x.snapshot||{}}));
+  }
+  async athenaExclamationVotesByTicker(systemName,ticker,sinceMs=0){
+    const r=await this.pool.query(`select * from sag_athena_exclamation_votes_v1 where system_name=$1 and ticker=$2 and last_qualified_at_ms >= $3 order by last_qualified_at_ms asc`,[systemName,ticker,sinceMs]);
+    return r.rows.map(x=>({systemName:x.system_name,ticker:x.ticker,eventTicker:x.event_ticker,conceptName:x.concept_name,firstQualifiedAtMs:n(x.first_qualified_at_ms),lastQualifiedAtMs:n(x.last_qualified_at_ms),refreshCount:n(x.refresh_count),priceCents:n(x.price_cents),bidCents:n(x.bid_cents),sourceFeeder:x.source_feeder,sourceTradeId:x.source_trade_id,gameMinutes:x.game_minutes==null?null:n(x.game_minutes),snapshot:x.snapshot||{}}));
+  }
+  async insertAthenaExclamationEvent(e){
+    const r=await this.pool.query(`insert into sag_athena_exclamation_events_v1(id,system_name,ticker,event_ticker,status,created_at_ms,first_vote_at_ms,third_vote_at_ms,expires_at_ms,convergence_span_ms,saint_count,saints,combination,review,entry_id,decided_at_ms)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) on conflict(id) do nothing`,[
+      e.id,e.systemName,e.ticker,e.eventTicker,e.status,e.createdAtMs,e.firstVoteAtMs,e.thirdVoteAtMs,e.expiresAtMs,e.convergenceSpanMs,e.saintCount,e.saints||[],e.combination||[],e.review||null,e.entryId||null,e.decidedAtMs||null
+    ]);
+    return (r.rowCount||0)>0;
+  }
+  async updateAthenaExclamationEvent(id,e){
+    await this.pool.query(`update sag_athena_exclamation_events_v1 set status=$2,review=$3,entry_id=$4,decided_at_ms=$5,saint_count=$6,saints=$7,combination=$8 where id=$1`,[id,e.status,e.review||null,e.entryId||null,e.decidedAtMs||null,e.saintCount||0,e.saints||[],e.combination||[]]);
+  }
+  async recentAthenaExclamationEvents(systemName,sinceMs=0){
+    const r=await this.pool.query(`select * from sag_athena_exclamation_events_v1 where system_name=$1 and created_at_ms >= $2 order by created_at_ms asc`,[systemName,sinceMs]);
+    return r.rows.map(x=>({id:x.id,systemName:x.system_name,ticker:x.ticker,eventTicker:x.event_ticker,status:x.status,createdAtMs:n(x.created_at_ms),firstVoteAtMs:n(x.first_vote_at_ms),thirdVoteAtMs:n(x.third_vote_at_ms),expiresAtMs:n(x.expires_at_ms),convergenceSpanMs:n(x.convergence_span_ms),saintCount:n(x.saint_count),saints:x.saints||[],combination:x.combination||[],review:x.review||null,entryId:x.entry_id,decidedAtMs:x.decided_at_ms==null?null:n(x.decided_at_ms)}));
+  }
+  async activeAthenaExclamationEvent(systemName,ticker,nowMs=Date.now()){
+    const r=await this.pool.query(`select * from sag_athena_exclamation_events_v1 where system_name=$1 and ticker=$2 and expires_at_ms>$3 order by created_at_ms desc limit 1`,[systemName,ticker,nowMs]);
+    const x=r.rows[0];
+    return x?{id:x.id,systemName:x.system_name,ticker:x.ticker,eventTicker:x.event_ticker,status:x.status,createdAtMs:n(x.created_at_ms),firstVoteAtMs:n(x.first_vote_at_ms),thirdVoteAtMs:n(x.third_vote_at_ms),expiresAtMs:n(x.expires_at_ms),convergenceSpanMs:n(x.convergence_span_ms),saintCount:n(x.saint_count),saints:x.saints||[],combination:x.combination||[],review:x.review||null,entryId:x.entry_id,decidedAtMs:x.decided_at_ms==null?null:n(x.decided_at_ms)}:null;
+  }
+  async goldenEyeState(systemName){const r=await this.pool.query('select system_name,state,updated_at_ms from sag_golden_eye_state_v1 where system_name=$1',[systemName]);return r.rows[0]||null;}
+  async saveGoldenEyeState(systemName,state){const now=Date.now();await this.pool.query(`insert into sag_golden_eye_state_v1(system_name,state,updated_at_ms) values($1,$2,$3) on conflict(system_name) do update set state=excluded.state,updated_at_ms=excluded.updated_at_ms where excluded.updated_at_ms>=sag_golden_eye_state_v1.updated_at_ms`,[systemName,state||{},now]);}
+  async manualCashoutTrainingRows(systemName,{afterMs=0,limit=5000}={}){const r=await this.pool.query("select * from sag_entries where system_name=$1 and status='closed' and close_reason='manual_cashout' and closed_at_ms>$2 order by closed_at_ms asc,id asc limit $3",[systemName,Math.max(0,n(afterMs)),Math.max(1,Math.min(20000,Math.floor(n(limit,5000))))]);return r.rows.map(rowEntry);}
+  async saveCredentials(keyId,privateKeyPem){for(const [key,value] of [['kalshi_api_key_id',encryptSecret(keyId)],['kalshi_private_key_pem',encryptSecret(privateKeyPem)]])await this.pool.query('insert into sag_secrets(key,value) values($1,$2) on conflict(key) do update set value=excluded.value,updated_at=now()',[key,value]);}
+  async loadCredentials(){try{const r=await this.pool.query("select key,value from sag_secrets where key in ('kalshi_api_key_id','kalshi_private_key_pem')");const m=new Map(r.rows.map(x=>[x.key,x.value]));if(!m.get('kalshi_api_key_id')||!m.get('kalshi_private_key_pem'))return null;return{keyId:decryptSecret(m.get('kalshi_api_key_id')),privateKeyPem:decryptSecret(m.get('kalshi_private_key_pem'))};}catch{return null;}}
+
+  // MW-R25: A durable one-entry-per-event claim. This is the final, atomic
+  // admission guard for REGULAR execution attacks, including CI1 and Galactic.
+  // A stopped/closed position remains consumed within the current reset epoch.
+  // No new reservation state exists: the committed sag_entries row IS the claim.
+  // An unfilled, conclusively rejected intent is released by status='rejected';
+  // any unresolved LIVE entry_pending/partial fill remains consumed until broker
+  // reconciliation can prove there was no fill. Starlight children use their
+  // own parent-scoped authority and do not call this method.
+  async insertRegularEntryWithEventCap(e, { resetTimestampMs, maxEntriesPerTrade, galacticExplosionEnabled, multiply } = {}) {
+    const event=String(e?.eventTicker||e?.ticker||'').trim();
+    const concept=String(e?.conceptName||'').trim();
+    const owner=String(e?.ownerId||'').trim(),sys=String(e?.systemName||'').trim();
+    const mode=String(e?.mode||'');
+    const reset=Number(resetTimestampMs);
+    const maximum=Math.max(1,Math.floor(Number(maxEntriesPerTrade)||1),Math.floor(Number(multiply)||1));
+    if(!event||!concept||!owner||!sys||!['SIMULATION','LIVE'].includes(mode)
+      ||!Number.isSafeInteger(reset)||reset<0||!Number.isSafeInteger(maximum))
+      throw new Error('mw25_invalid_durable_entry_scope');
+    if(!Number.isSafeInteger(Number(e.openedAtMs))||Number(e.openedAtMs)<reset)
+      return {ok:false,reason:'stale_reset_epoch_entry_intent',eventTicker:event,resetEpoch:reset};
+    const scoped=galacticExplosionEnabled===true?concept:null;
+    const lockKey=JSON.stringify(['MW-R25-EVENT',sys,owner,mode,reset,event,scoped||'*']);
+    const client=await this.pool.connect();let inTx=false;
+    try{
+      await client.query('BEGIN');inTx=true;
+      const lock=await client.query('select pg_try_advisory_xact_lock(hashtextextended($1,0)) as acquired',[lockKey]);
+      if(lock.rows?.[0]?.acquired!==true){await client.query('ROLLBACK');inTx=false;return {ok:false,reason:'durable_event_claim_busy'};}
+      // Include all regular executable positions, including CLOSED and pending
+      // intents, across both sides/tickers belonging to the same event.
+      // Reject-only rows may be retried, but broker-ambiguous rows MAY NOT.
+      const counted=await client.query(`select count(*)::int as used from sag_entries
+        where system_name=$1 and owner_id=$2 and mode=$3
+          and coalesce(nullif(event_ticker,''),ticker)=$5
+          and concept_name = any($6::text[]) and ($7::text is null or concept_name=$7)
+          and status <> 'rejected'
+          and (
+            case
+              when entry_config#>>'{durableEventAdmission,resetEpoch}' is not null
+                then (entry_config#>>'{durableEventAdmission,resetEpoch}')::bigint = $4
+              when entry_config->>'resetTimestampMs' is not null
+                then (entry_config->>'resetTimestampMs')::bigint = $4
+              else opened_at_ms >= $4
+            end
+            or (archived=false and status in ('open','entry_pending','exit_pending','pending_recovery'))
+          )`,[
+        sys,owner,mode,reset,event,PORTFOLIO_CONCEPT_NAMES.filter(name=>name!=='Crash Recovery Hunter'),scoped,
+      ]);
+      const used=Number(counted.rows?.[0]?.used||0);
+      if(used>=maximum){await client.query('ROLLBACK');inTx=false;return {ok:false,reason:'durable_event_lifetime_cap',used,maximum,eventTicker:event,scope:scoped||'all_regular_attacks'};}
+      const policy={version:'MW-R25-DURABLE-EVENT-CAP',scope:scoped||'all_regular_attacks',eventTicker:event,
+        resetEpoch:reset,mode,maxEntries:maximum,consumedBefore:used,claimedAtMs:Date.now(),
+        ordinaryCi1CooldownUnchanged:true,starlightParentChildExempt:true};
+      e.entryConfig={...(e.entryConfig||{}),durableEventAdmission:policy};
+      await this.insertEntry(e,client);
+      await client.query('COMMIT');inTx=false;
+      return {ok:true,reason:'durable_event_admission_committed',used,maximum,eventTicker:event,scope:policy.scope};
+    }catch(error){
+      if(inTx)try{await client.query('ROLLBACK');}catch(rollbackError){error.rollbackError=String(rollbackError?.message||rollbackError);}
+      throw error;
+    }finally{client.release();}
+  }
+
+  /** CW1 SIM/LIVE transactional capital admission; LIVE creates only a durable
+   * pending intent, never a broker fill or direct permission to POST.
+   * Runtime/parent/watch/seat lock order is global and deterministic. No BUY or
+   * portfolio row exists unless all constraints commit atomically. Each child
+   * remains in the ordinary protective ProfitGuard ledger after GH is disabled.
+   */
+  async insertCrystalWallCapitalEntry(entry,{quote,isCurrent=()=>true}={}){
+    const live=entry?.mode==='LIVE';
+    if(entry?.conceptName!==CW_CONCEPT||!['SIMULATION','LIVE'].includes(entry?.mode)
+       ||entry.entryConfig?.crystalWallRecovery?.version!==(live?CW_LIVE_VERSION:CW_SIM_VERSION)
+       ||(live&&(entry.status!=='entry_pending'||!entry.entryClientOrderId))
+       ||(!live&&entry.status!=='open')
+       ||!quote||typeof isCurrent!=='function')throw new Error('cw_sim_atomic_entry_contract_required');
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local lock_timeout='1500ms'");
+      await client.query("set local statement_timeout='5000ms'");
+      const runtime=await client.query("select value from sag_settings where key='runtime' for update");
+      const persistedRuntime=runtime.rows?.[0]?.value||{};
+      const settings=sanitizeRuntimeSettings(persistedRuntime);
+      // The sanitizer intentionally disarms startup configuration; here the
+      // PostgreSQL runtime row is the durable operator truth under FOR UPDATE.
+      settings.liveArmed=persistedRuntime.liveArmed===true;
+      const stamp=entry.entryConfig.crystalWallRecovery;
+      if(!isCurrent()||entry.entryConfig?.crystalWallRecoverySettingsFingerprint!==crystalWallRecoverySettingsFingerprint(settings)
+         ||settings.engineActive!==true||settings.crystalWallRecoveryEnabled!==true
+         ||settings.mode!==entry.mode||(live&&settings.liveArmed!==true)||settings.systemName!==entry.systemName
+         ||settings.ownerId!==entry.ownerId
+         ||Number(settings.resetTimestampMs||0)!==Number(entry.entryConfig.resetTimestampMs||0))
+        throw new Error('cw_sim_current_operator_scope_required');
+      const found=await client.query('select * from sag_crystal_wall_recovery_watches_v1 where id=$1 for update',[stamp.watchId]);
+      const wRow=found.rows[0];
+      if(!wRow||wRow.status!=='WATCHING'||wRow.system_name!==entry.systemName
+         ||wRow.owner_id!==entry.ownerId||wRow.mode!==entry.mode
+         ||Number(wRow.reset_epoch)!==Number(settings.resetTimestampMs||0))
+        throw new Error('cw_sim_watch_not_current');
+      const parentResult=await client.query('select * from sag_entries where id=$1 for share',[wRow.parent_entry_id]);
+      const parent=parentResult.rows[0]?rowEntry(parentResult.rows[0]):null;
+      const watch={...wRow.watch,id:wRow.id,revision:Number(wRow.revision),status:wRow.status};
+      const check=crystalWallRecoveryAdmissionDecision({watch,seat:Number(stamp.seat),settings,quote,parent});
+      if(!check.ok||check.positionId!==entry.id||watch.parentEntryId!==entry.sourceTradeId
+         ||Number(stamp.watchRevision)!==Number(wRow.revision)
+         ||!watch.qualified||Number(watch.lastQuoteAtMs)>Number(quote.quoteAtMs))
+        throw new Error(`cw_sim_parent_or_signal_changed:${check.reason||'watch_drift'}`);
+      
+      if(!Number.isSafeInteger(entry.count)||entry.count<1
+         ||!(entry.entryPriceCents>=Number(quote.yesAsk))
+         ||!crystalWallRecoveryOperatorBandAllowed(watch,entry.entryPriceCents,settings)
+         ||!crystalWallRecoverySpreadAllowed(quote,settings)
+         ||entry.count*entry.entryPriceCents>Number(settings.crystalWallRecoveryStakeCents)
+         ||(live?entry.entryFeeCents!==0:entry.entryFeeCents!==Number(settings.simFeeCents||0)*entry.count)
+         ||entry.entryConfig?.aurora?.frozen!==true
+         ||Number(entry.entryConfig.aurora.damageControlPercent)!==Number(settings.crystalWallRecoveryAuroraDamageControlPercent)
+         ||!(Number(entry.entryConfig.finalEntryConfirmation?.bookProof?.verifiedAtMs)>Date.now()-5000)
+         ||Number(entry.entryConfig.aurora.originalContractCount)!==entry.count
+         ||Number(entry.entryConfig.aurora.entryPriceCents)!==entry.entryPriceCents
+         ||entry.entryConfig.aurora.dangerPriceCents!==entry.stopPriceCents)
+        throw new Error('cw_sim_immutable_financial_parameters_invalid');
+      // The DB transaction serializes this group's seats. Validate the
+      // previously committed contract footprint against the caller's frozen
+      // REST depth witness; never grant an unlimited second SIM fill at a
+      // price level that could only support the first seat.
+      const priorQuantity=await client.query(`select coalesce(sum(e.count),0)::double precision as contracts
+        from sag_crystal_wall_recovery_seats_v1 x join sag_entries e on e.id=x.position_id
+        where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
+      const priorCount=Number(priorQuantity.rows?.[0]?.contracts||0);
+      const bookProof=entry.entryConfig?.finalEntryConfirmation?.bookProof;
+      if(!Number.isFinite(priorCount)||priorCount<0||(!live&&!Number.isSafeInteger(priorCount))
+         ||!Number.isSafeInteger(Number(bookProof?.availableAtLimitCount))
+         ||Number(bookProof?.existingGroupQuantity)!==priorCount
+         ||Number(bookProof?.availableAtLimitCount)<(live?0:priorCount)+entry.count)
+        throw new Error('cw_sim_cumulative_rest_depth_or_group_changed');
+      const duplicates=await client.query('select id,status from sag_entries where id=$1',[entry.id]);
+      if(duplicates.rowCount)throw new Error('cw_sim_seat_already_consumed');
+      const capacity=await client.query(`select count(*)::int as active from sag_entries
+        where system_name=$1 and owner_id=$3 and mode=$4 and archived=false
+          and ${CAPITAL_SQL} and concept_name=any($2::text[])
+          and status in ('open','entry_pending','exit_pending','pending_recovery')`,
+        [entry.systemName,PORTFOLIO_CONCEPT_NAMES,entry.ownerId,entry.mode]);
+      if(Number(capacity.rows[0]?.active||0)>=Math.max(1,Number(settings.maxPositions)||1))
+        throw new Error('cw_sim_global_capacity_exceeded');
+      // Keep the existing Galactic Explosion cross-attack exact-ticker policy.
+      // The configured GH Multiply seats for ONE verified GreatHorn parent are
+      // a single bounded recovery group, not a cross-concept ticker bypass.
+      if(settings.galacticExplosionEnabled!==true){
+        const overlaps=await client.query(`select id,concept_name,source_trade_id from sag_entries
+          where system_name=$1 and ticker=$2 and owner_id=$6 and mode=$7
+          and archived=false and ${CAPITAL_SQL}
+          and concept_name=any($3::text[])
+          and status in ('open','entry_pending','exit_pending','pending_recovery')
+          and not (concept_name=$4 and source_trade_id=$5)
+          limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,CW_CONCEPT,parent.id,entry.ownerId,entry.mode]);
+        if(overlaps.rowCount)throw new Error('cw_sim_cross_attack_exact_ticker_conflict');
+      }
+      // A recovered LIVE pending intent is a real broker obligation, even if
+      // the POST response was lost. Block any additional GH capital intent
+      // until ALL earlier owner-wide capital entries have been reconciled.
+      // This is deliberately stricter than a per-ticker or per-seat admission:
+      // a single current broker balance must never be spent twice by GH.
+      if(live){
+        const outstanding=await client.query(`select id from sag_entries
+          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
+          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
+          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
+        if(outstanding.rowCount)throw new Error('cw_live_outstanding_owner_order_requires_reconciliation');
+      }
+      // A different owner's completed SIM profits must not finance this
+      // owner's GH purchases. Legacy/open exposure in this owner's system
+      // remains reserved even when its entry predates the current reset.
+      if(!live){
+        const cash=await this.simulationCashAggregate(entry.systemName,
+          {simFeeCents:settings.simFeeCents,ownerId:entry.ownerId,
+           realizedSinceMs:Number(settings.resetTimestampMs||0)},client);
+        if(Number(settings.startingCapitalCents||0)+cash.realizedCents-cash.reservedCents
+           <entry.count*entry.entryPriceCents+entry.entryFeeCents)
+          throw new Error('cw_sim_insufficient_available_cash');
+      }
+      const seat=Number(stamp.seat);
+      const seats=await client.query(`insert into sag_crystal_wall_recovery_seats_v1(watch_id,seat,position_id,status)
+        values($1,$2,$3,'RESERVED') on conflict do nothing returning seat`,[watch.id,seat,entry.id]);
+      if(seats.rowCount!==1)throw new Error('cw_sim_seat_already_reserved');
+      // The SQL fence has an independent scope/lineage/seat check. The capability
+      // is transaction-local, never granted to caller-owned pooled queries.
+      await client.query(live?"select set_config('sagittarius.cw1_live_entry','admitted',true)":"select set_config('sagittarius.cw1_sim_entry','admitted',true)");
+      if(!isCurrent())throw new Error('cw_sim_authority_changed_at_insert');
+      const allowed=live?AUTHORIZED_CW_LIVE_INSERTS:AUTHORIZED_CW_SIM_INSERTS;
+      allowed.add(client);
+      try{await this.insertEntry(entry,client);}finally{allowed.delete(client);}
+      const seatUpdate=await client.query(`update sag_crystal_wall_recovery_seats_v1 set status='${live?'RECONCILE':'FILLED'}'
+        where watch_id=$1 and seat=$2 and position_id=$3 and status='RESERVED'`,[watch.id,seat,entry.id]);
+      if(seatUpdate.rowCount!==1)throw new Error('cw_sim_seat_commit_missing');
+      const remaining=await client.query('select count(*)::int as occupied from sag_crystal_wall_recovery_seats_v1 where watch_id=$1',[watch.id]);
+      if(Number(remaining.rows?.[0]?.occupied)===Number(watch.maximumSeats)){
+        const consumed=await client.query(`update sag_crystal_wall_recovery_watches_v1
+          set status='CONSUMED',watch=watch||jsonb_build_object('status','CONSUMED',
+            'qualified',false,'lastSignalReason','cw_sim_all_seats_consumed'),
+            revision=revision+1,updated_at_ms=$2 where id=$1 and revision=$3`,
+          [watch.id,Date.now(),Number(wRow.revision)]);
+        if(consumed.rowCount!==1)throw new Error('cw_sim_group_consumed_revision_conflict');
+      }
+      if(!isCurrent())throw new Error('cw_sim_authority_changed_before_commit');
+      await client.query('COMMIT');started=false;
+      return {ok:true,entry,watchId:watch.id,seat};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+
+  async insertCrystalWallSimulationEntry(entry,options={}){
+    if(entry?.mode!=='SIMULATION')throw new Error('cw_sim_only');
+    return this.insertCrystalWallCapitalEntry(entry,options);
+  }
+
+  async insertCrystalWallLiveEntry(entry,options={}){
+    if(entry?.mode!=='LIVE')throw new Error('cw_live_only');
+    return this.insertCrystalWallCapitalEntry(entry,options);
+  }
+
+  /** Read-only durable proof used before AND during the broker queue. Never
+   * grants capital permission on a reconstructed caller-side parent snapshot. */
+  async verifyCrystalWallLiveIntent(entry){
+    const stamp=entry?.entryConfig?.crystalWallRecovery;
+    if(entry?.conceptName!==CW_CONCEPT||entry?.mode!=='LIVE'||!entry?.entryClientOrderId
+       ||stamp?.version!==CW_LIVE_VERSION)return {ok:false,reason:'cw_live_intent_missing'};
+    const r=await this.pool.query(`select e.*, s.value as runtime, w.watch as recovery_watch,
+      w.status as watch_status,w.revision as watch_revision,w.system_name as watch_system,
+      w.owner_id as watch_owner,w.mode as watch_mode,w.reset_epoch as watch_epoch,
+      w.parent_entry_id as watch_parent, x.status as seat_status,x.position_id as seat_position,
+      p.id as parent_id, to_jsonb(p) as parent_record
+      from sag_entries e join sag_settings s on s.key='runtime'
+      left join sag_crystal_wall_recovery_watches_v1 w on w.id=e.entry_config#>>'{crystalWallRecovery,watchId}'
+      left join sag_crystal_wall_recovery_seats_v1 x on x.watch_id=w.id
+       and x.seat=(e.entry_config#>>'{crystalWallRecovery,seat}')::int
+      left join sag_entries p on p.id=e.source_trade_id where e.id=$1`,[entry.id]);
+    const raw=r.rows?.[0];if(!raw)return {ok:false,reason:'cw_live_intent_not_persisted'};
+    const settings=sanitizeRuntimeSettings(raw.runtime||{}), cfg=raw.entry_config||{},saved=cfg.crystalWallRecovery||{};
+    settings.liveArmed=raw.runtime?.liveArmed===true;
+    if(entry.entryOrderId||raw.entry_order_id||entry.status!=='entry_pending'||raw.status!=='entry_pending'
+      ||Number(entry.remainingCount)!==Number(entry.count)||Number(raw.remaining_count)!==Number(raw.count)
+      ||Number(entry.entryFeeCents||0)!==0||Number(raw.entry_fee_cents||0)!==0
+      ||Number(entry.exitFilledCount||0)!==0||Number(raw.exit_filled_count||0)!==0
+      ||Number(entry.exitNotionalCents||0)!==0||Number(raw.exit_notional_cents||0)!==0)
+      return {ok:false,reconcileOnly:true,reason:'cw_live_intent_already_receipted_or_reconciled'};
+    if(authorityHash(cfg)!==authorityHash(entry.entryConfig))
+      return {ok:false,reconcileOnly:true,reason:'cw_live_intent_configuration_changed'};
+    if(raw.concept_name!==CW_CONCEPT||raw.execution_class!=='CAPITAL'||raw.mode!=='LIVE'
+       ||raw.status!=='entry_pending'||raw.entry_client_order_id!==entry.entryClientOrderId
+       ||raw.entry_order_id||raw.id!==stamp.positionId||String(raw.source_trade_id)!==String(stamp.parentEntryId)
+       ||raw.count!==entry.count||Number(raw.entry_price_cents)!==Number(entry.entryPriceCents)
+       ||raw.system_name!==entry.systemName||raw.owner_id!==entry.ownerId
+       ||raw.ticker!==entry.ticker||raw.event_ticker!==entry.eventTicker
+       ||saved.version!==CW_LIVE_VERSION||saved.watchId!==stamp.watchId
+       ||saved.positionId!==stamp.positionId||Number(saved.seat)!==Number(stamp.seat)
+       ||saved.watchRevision!==stamp.watchRevision
+       ||raw.seat_position!==entry.id||raw.seat_status!=='RECONCILE'
+       ||!['WATCHING','CONSUMED'].includes(raw.watch_status)
+       ||raw.watch_system!==entry.systemName||raw.watch_owner!==entry.ownerId
+       ||raw.watch_mode!=='LIVE'||Number(raw.watch_epoch)!==Number(settings.resetTimestampMs||0)
+       ||raw.watch_parent!==entry.sourceTradeId
+       ||raw.recovery_watch?.link!==saved.capturedSettings?.link
+       ||raw.recovery_watch?.link!==settings.crystalWallRecoveryLinkEnabled
+       ||settings.engineActive!==true||settings.crystalWallRecoveryEnabled!==true
+       ||settings.liveArmed!==true||settings.mode!=='LIVE'||settings.systemName!==entry.systemName
+       ||settings.ownerId!==entry.ownerId||Number(settings.resetTimestampMs||0)!==Number(cfg.resetTimestampMs||0)
+       ||Number(saved.watchRevision)>Number(raw.watch_revision)
+       ||cfg.crystalWallRecoverySettingsFingerprint!==crystalWallRecoverySettingsFingerprint(settings)
+       ||cfg.aurora?.frozen!==true||cfg.auroraPending?.exactFillRequired!==true
+       ||Number(cfg.auroraDamageControlPercent)!==Number(settings.crystalWallRecoveryAuroraDamageControlPercent))
+      return {ok:false,reason:'cw_live_intent_operator_or_seat_changed'};
+    const parent=raw.parent_record?rowEntry(raw.parent_record):null;
+    const loss=verifiedGreatHornLoss(parent,settings);
+    if(!loss.ok)return {ok:false,reason:'cw_live_parent_drift:'+loss.reason};
+    // Consuming the final seat deliberately makes its watch terminal and
+    // clears qualified. That must NOT revoke the SAME already-committed BUY
+    // intent; any nonterminal watch retraction must still deny dispatch.
+    if((raw.watch_status!=='CONSUMED' && raw.recovery_watch?.qualified!==true)
+       ||Number(raw.recovery_watch?.lastQuoteAtMs)<Number(saved.quoteAtMs))
+      return {ok:false,reason:'cw_live_signal_proof_missing'};
+    return {ok:true,reason:'cw_live_persisted_intent_current'};
+  }
+
+  /** A locally refused BUY or explicit broker hard reject can relinquish its
+   * unresolved intent only if no authoritative order ID was attached.
+   * Seats stay terminal and are not reused by a delayed callback/restart. */
+  async rejectCrystalWallUnsubmittedIntent(entry,{reason='dispatch_rejected',brokerRejected=false}={}){
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      const row=await client.query('select * from sag_entries where id=$1 for update',[entry.id]);
+      const e=row.rows?.[0];
+      if(!e||e.status!=='entry_pending'||e.entry_order_id||e.entry_client_order_id!==entry.entryClientOrderId
+        ||entry.status!=='entry_pending'||entry.entryOrderId||entry.mode!=='LIVE'
+        ||e.mode!=='LIVE'||e.concept_name!==CW_CONCEPT||e.execution_class!=='CAPITAL'||e.archived===true
+        ||e.system_name!==entry.systemName||e.owner_id!==entry.ownerId||e.ticker!==entry.ticker
+        ||e.event_ticker!==entry.eventTicker||e.source_trade_id!==entry.sourceTradeId
+        ||Number(e.count)!==Number(entry.count)||Number(e.entry_price_cents)!==Number(entry.entryPriceCents)
+        ||Number(e.remaining_count)!==Number(e.count)||Number(entry.remainingCount)!==Number(entry.count)
+        ||Number(e.entry_fee_cents||0)!==0||Number(entry.entryFeeCents||0)!==0
+        ||Number(e.exit_filled_count||0)!==0||Number(entry.exitFilledCount||0)!==0
+        ||Number(e.exit_notional_cents||0)!==0||Number(entry.exitNotionalCents||0)!==0
+        ||authorityHash(e.entry_config)!==authorityHash(entry.entryConfig))
+        throw new Error('cw_live_intent_no_longer_safe_to_reject');
+      if(e.entry_config?.crystalWallRecovery?.version!==CW_LIVE_VERSION)
+        throw new Error('cw_live_rejection_lineage_invalid');
+      await client.query(`update sag_entries set status='rejected',remaining_count=0,
+        close_reason=$2,updated_at_ms=$3 where id=$1 and status='entry_pending'`,
+        [entry.id,brokerRejected?'cw_broker_definite_reject':'cw_never_transmitted:'+String(reason).slice(0,90),Date.now()]);
+      await client.query(`update sag_crystal_wall_recovery_seats_v1 set status='REJECTED'
+        where position_id=$1 and status='RECONCILE'`,[entry.id]);
+      await client.query('COMMIT');started=false;
+      return {ok:true};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
+  }
+
   async insertStarlightCapitalEntry(){
     throw new Error('aps2_new_capital_starlight_forbidden');
   }
@@ -992,12 +2405,16 @@ export class Database {
       if(Number(seats.rows[0]?.n||0)>=multiply)throw new Error('lp_scalein_multiply_full');
       if(!lightningEntryAuroraProof(entry,settings))throw new Error('lp_scalein_own_aurora_required');
       const capacity=await client.query(`select count(*)::int as active from sag_entries
-        where system_name=$1 and archived=false and ${CAPITAL_SQL} and concept_name=any($2::text[])
-        and status in ('open','entry_pending','exit_pending','pending_recovery')`,[entry.systemName,PORTFOLIO_CONCEPT_NAMES]);
+        where system_name=$1 and owner_id=$3 and mode=$4 and archived=false
+        and ${CAPITAL_SQL} and concept_name=any($2::text[])
+        and status in ('open','entry_pending','exit_pending','pending_recovery')`,
+        [entry.systemName,PORTFOLIO_CONCEPT_NAMES,entry.ownerId,entry.mode]);
       if(Number(capacity.rows[0]?.active||0)>=Math.max(1,Number(settings.maxPositions)||1))
         throw new Error('lp_scalein_capital_capacity_at_commit');
       if(entry.mode==='SIMULATION'){
-        const cash=await this.simulationCashAggregate(entry.systemName,{simFeeCents:settings.simFeeCents},client);
+        const cash=await this.simulationCashAggregate(entry.systemName,
+          {simFeeCents:settings.simFeeCents,ownerId:entry.ownerId,
+           realizedSinceMs:Number(settings.resetTimestampMs||0)},client);
         if(Number(settings.startingCapitalCents||0)+cash.realizedCents-cash.reservedCents
           <entry.count*entry.entryPriceCents+entry.entryFeeCents)throw new Error('lp_scalein_sim_cash_at_commit');
       }
@@ -1029,6 +2446,16 @@ export class Database {
       where e.id=$1 and r.key='runtime'`,[entry.id]);
     const raw=r.rows[0],settings=raw?.runtime,stamp=entry.entryConfig.lightningPlasmaScaleIn;
     const persistedConfig=raw?.entry_config||{},persistedStamp=persistedConfig.lightningPlasmaScaleIn||{};
+    // A receipt or reconciled quantity belongs to the original broker intent.
+    // Neither a delayed dispatch callback nor a restarted worker may BUY again.
+    if(entry.entryOrderId||raw?.entry_order_id
+      ||entry.status!=='entry_pending'||(raw&&raw.status!=='entry_pending')
+      ||Number(entry.remainingCount)!==Number(entry.count)
+      ||(raw&&Number(raw.remaining_count)!==Number(raw.count))
+      ||Number(entry.exitFilledCount||0)!==0||Number(raw?.exit_filled_count||0)!==0
+      ||Number(entry.exitNotionalCents||0)!==0||Number(raw?.exit_notional_cents||0)!==0
+      ||Number(entry.entryFeeCents||0)!==0||Number(raw?.entry_fee_cents||0)!==0)
+      return {ok:false,reconcileOnly:true,reason:'lp_scalein_intent_already_receipted_or_reconciled'};
     if(!raw || raw.status!=='entry_pending' || raw.entry_client_order_id!==entry.entryClientOrderId
       || Number(raw.count)!==Number(entry.count)||Number(raw.entry_price_cents)!==Number(entry.entryPriceCents)
       || persistedConfig.aps2LegacyIntent?.reconcileOnly===true
@@ -1060,6 +2487,28 @@ export class Database {
     return {ok:true,parentKind:eligibility.kind,parentRevision:eligibility.revision};
   }
 
+  async rejectUndispatchedLightningIntent(entry,reason,entryConfig=entry?.entryConfig){
+    if(!entry?.id||entry.mode!=='LIVE'||entry.conceptName!=='Lightning Plasma'
+      ||!entry.entryClientOrderId||entry.entryOrderId||entry.status!=='entry_pending')
+      return {rejected:false,entry:null};
+    const r=await this.pool.query(`update sag_entries set status='rejected',remaining_count=0,
+      close_reason=$8,entry_config=$9::jsonb,updated_at_ms=$10
+      where id=$1 and system_name=$2 and owner_id=$3 and mode='LIVE'
+       and ticker=$4 and entry_client_order_id=$5 and count=$6 and entry_price_cents=$7
+       and concept_name='Lightning Plasma' and status='entry_pending' and archived=false
+       and execution_class='CAPITAL' and entry_config->>'executionClass'='CAPITAL'
+       and coalesce(entry_order_id,'')='' and remaining_count=count
+       and coalesce(exit_filled_count,0)=0 and coalesce(exit_notional_cents,0)=0
+       and coalesce(entry_fee_cents,0)=0 and entry_config=$11::jsonb
+      returning *`,[entry.id,entry.systemName,entry.ownerId,entry.ticker,entry.entryClientOrderId,
+        Number(entry.count),Number(entry.entryPriceCents),String(reason).slice(0,240),
+        JSON.stringify(entryConfig||{}),Date.now(),JSON.stringify(entry.entryConfig||{})]);
+    // A failed CAS means reconciliation or another writer owns the intent.
+    // Do not release inventory, overwrite its receipt, or report a false reject.
+    return r.rows[0]?{rejected:true,entry:rowEntry(r.rows[0])}
+      :{rejected:false,entry:await this.entryById(entry.id)};
+  }
+
   async verifyStarlightBrokerIntent(){
     // Existing receipts are reconciled by the ordinary receipt manager. This
     // method can never authorize a new or retry Starlight BUY after cutover.
@@ -1067,12 +2516,22 @@ export class Database {
   }
 
   async insertEntry(e,queryClient=this.pool){
+    if(e.conceptName==='Great Horn Recovery'
+      && !(e.mode==='SIMULATION'&&AUTHORIZED_GH_SIM_INSERTS.has(queryClient))
+      && !(e.mode==='LIVE'&&AUTHORIZED_GH_LIVE_INSERTS.has(queryClient)))
+      throw new Error('gh1_only_atomic_capital_admission');
+    if(e.conceptName==='Crystal Wall Recovery'
+      && !(e.mode==='SIMULATION'&&AUTHORIZED_CW_SIM_INSERTS.has(queryClient))
+      && !(e.mode==='LIVE'&&AUTHORIZED_CW_LIVE_INSERTS.has(queryClient)))
+      throw new Error('cw1_only_atomic_capital_admission');
     if(this.shadowArchitectureRequired && e.conceptName==='Crash Recovery Hunter' && !isShadowSaintEntry(e))
       throw new Error('aps2_new_capital_starlight_forbidden');
     if(this.shadowArchitectureRequired && e.conceptName==='Lightning Plasma' && e.entryConfig?.lightningPlasmaScaleIn && !isShadowSaintEntry(e) && !AUTHORIZED_STARLIGHT_INSERTS.has(queryClient))
       return this.insertLightningPlasmaScaleInEntry(e);
     if(this.shadowArchitectureRequired && PORTFOLIO_CONCEPTS.has(e.conceptName) && !isShadowSaintEntry(e)
-      && (e.conceptName!=='Lightning Plasma' || !e.entryConfig?.lightningPlasmaScaleIn || !AUTHORIZED_STARLIGHT_INSERTS.has(queryClient)))
+      && (e.conceptName!=='Lightning Plasma' || !e.entryConfig?.lightningPlasmaScaleIn || !AUTHORIZED_STARLIGHT_INSERTS.has(queryClient))
+      && (e.conceptName!=='Great Horn Recovery' || !(AUTHORIZED_GH_SIM_INSERTS.has(queryClient)||AUTHORIZED_GH_LIVE_INSERTS.has(queryClient)))
+      && (e.conceptName!=='Crystal Wall Recovery' || !(AUTHORIZED_CW_SIM_INSERTS.has(queryClient)||AUTHORIZED_CW_LIVE_INSERTS.has(queryClient))))
       throw new Error('aps2_only_verified_lightning_may_open_capital');
     if(isShadowSaintEntry(e) && (queryClient===this.pool || !e.shadowEntryHash || e.shadowRevision!==1))throw new Error('shadow_atomic_admission_required');
     const cols=[
@@ -1097,7 +2556,7 @@ export class Database {
     await queryClient.query(`insert into sag_entries(${cols.join(',')}) values(${marks})`,vals);
     return e;
   }
-  async updateEntry(id,patch,expectedExitReceipt=null){
+  async updateEntry(id,patch,expectedExitReceipt=null,expectedEntryReceipt=null){
     const col={status:'status',entryPriceCents:'entry_price_cents',exitPriceCents:'exit_price_cents',currentPriceCents:'current_price_cents',peakPriceCents:'peak_price_cents',stopPriceCents:'stop_price_cents',stopLossCents:'stop_loss_cents',count:'count',remainingCount:'remaining_count',pnlCents:'pnl_cents',entryFeeCents:'entry_fee_cents',profitHarvestPeakPnlCents:'profit_harvest_peak_pnl_cents',exitFeeCents:'exit_fee_cents',exitFilledCount:'exit_filled_count',exitNotionalCents:'exit_notional_cents',exitAttemptBookMs:'exit_attempt_book_ms',entryOrderId:'entry_order_id',entryClientOrderId:'entry_client_order_id',exitOrderId:'exit_order_id',exitClientOrderId:'exit_client_order_id',closeReason:'close_reason',updatedAtMs:'updated_at_ms',closedAtMs:'closed_at_ms',archived:'archived',volume24h:'volume_24h',gameStartTimeMs:'game_start_time_ms',lowestPriceAfterEntryCents:'lowest_price_after_entry_cents',maeCents:'mae_cents',maeAtMs:'mae_at_ms',recoveryToEntryAtMs:'recovery_to_entry_at_ms',recoveryToGreenAtMs:'recovery_to_green_at_ms',recoveryGreenPriceCents:'recovery_green_price_cents',researchTrackingComplete:'research_tracking_complete',entryConfig:'entry_config',feederState:'feeder_state',stopGuardState:'stop_guard_state',profitGuardState:'profit_guard_state',apexProfitGuardState:'apex_profit_guard_state',postExitState:'post_exit_state',exitExecutionState:'exit_execution_state'};
     const jsonFields=new Set(['entryConfig','feederState','stopGuardState','profitGuardState','apexProfitGuardState','postExitState','exitExecutionState']);
     const sets=[],vals=[];for(const[k,v]of Object.entries(patch))if(col[k]){const value=jsonFields.has(k)?(v||{}):entryStorageValue(k,v);vals.push(value);sets.push(`${col[k]}=$${vals.length}`);}if(!sets.length)return;
@@ -1106,12 +2565,63 @@ export class Database {
     if(expectedExitReceipt){
       const clientOrderId=String(expectedExitReceipt.clientOrderId||'');
       const priorCount=Number(expectedExitReceipt.appliedFillCount);
-      if(!clientOrderId||!Number.isFinite(priorCount)||priorCount<0)throw new Error('invalid_expected_exit_receipt');
-      vals.push(clientOrderId);where+=` and exit_client_order_id=$${vals.length}`;
+      const snapshot=expectedExitReceipt.snapshot;
+      if((!clientOrderId&&!snapshot)||!Number.isFinite(priorCount)||priorCount<0)throw new Error('invalid_expected_exit_receipt');
+      vals.push(clientOrderId||null);where+=` and exit_client_order_id is not distinct from $${vals.length}::text`;
       vals.push(priorCount);where+=` and coalesce((exit_execution_state->>'appliedFillCount')::double precision,0)=$${vals.length}`;
+      if(snapshot){
+        // A queued SELL must still own the exact position and receipt it read.
+        // This also fences reservation/withdrawal of an unsent intent, for which
+        // the expected client ID is legitimately null. Telemetry is not fenced.
+        const e=snapshot;
+        if(String(e.id)!==String(id)||e.mode!=='LIVE'||e.archived===true
+          ||!['open','exit_pending','pending_recovery'].includes(e.status)||!e.systemName||!e.ownerId||!e.ticker
+          ||String(e.exitClientOrderId||'')!==clientOrderId)
+          throw new Error('invalid_expected_exit_snapshot');
+        where+=' and archived=false';
+        const fields={systemName:['system_name','text'],ownerId:['owner_id','text'],mode:['mode','text'],
+          ticker:['ticker','text'],conceptName:['concept_name','text'],status:['status','text'],
+          entryOrderId:['entry_order_id','text'],entryClientOrderId:['entry_client_order_id','text'],
+          exitOrderId:['exit_order_id','text'],count:['count','double precision'],
+          remainingCount:['remaining_count','double precision'],entryPriceCents:['entry_price_cents','double precision'],
+          entryFeeCents:['entry_fee_cents','double precision'],exitFilledCount:['exit_filled_count','double precision'],
+          exitFeeCents:['exit_fee_cents','double precision'],exitNotionalCents:['exit_notional_cents','double precision'],
+          pnlCents:['pnl_cents','double precision'],closedAtMs:['closed_at_ms','bigint']};
+        for(const [key,[column,type]] of Object.entries(fields)){
+          const fallback=['entryFeeCents','exitFilledCount','exitFeeCents','exitNotionalCents','pnlCents'].includes(key)?0:null;
+          vals.push(entryStorageValue(key,e[key]??fallback));where+=` and ${column} is not distinct from $${vals.length}::${type}`;
+        }
+        vals.push(e.exitExecutionState||{});where+=` and exit_execution_state=$${vals.length}::jsonb`;
+        vals.push(e.entryConfig||{});where+=` and entry_config=$${vals.length}::jsonb`;
+      }
+    }
+    if(expectedEntryReceipt){
+      const e=expectedEntryReceipt;
+      if(expectedExitReceipt||String(e.id)!==String(id)||e.status!=='entry_pending'||e.mode!=='LIVE'
+        ||!e.systemName||!e.ownerId||!e.ticker||!e.entryClientOrderId)
+        throw new Error('invalid_expected_entry_receipt');
+      // The POST response and recovery worker are independent writers. Only
+      // the unchanged original intent may be promoted/rejected by either one.
+      where+=" and status='entry_pending' and archived=false";
+      const fields={systemName:['system_name','text'],ownerId:['owner_id','text'],mode:['mode','text'],
+        ticker:['ticker','text'],entryClientOrderId:['entry_client_order_id','text'],
+        entryOrderId:['entry_order_id','text'],exitClientOrderId:['exit_client_order_id','text'],
+        exitOrderId:['exit_order_id','text'],count:['count','double precision'],
+        remainingCount:['remaining_count','double precision'],entryPriceCents:['entry_price_cents','double precision'],
+        entryFeeCents:['entry_fee_cents','double precision'],exitFilledCount:['exit_filled_count','double precision'],
+        exitFeeCents:['exit_fee_cents','double precision'],exitNotionalCents:['exit_notional_cents','double precision'],
+        pnlCents:['pnl_cents','double precision'],closedAtMs:['closed_at_ms','bigint']};
+      for(const [key,[column,type]] of Object.entries(fields)){
+        const fallback=['entryFeeCents','exitFilledCount','exitFeeCents','exitNotionalCents','pnlCents'].includes(key)?0:null;
+        vals.push(entryStorageValue(key,e[key]??fallback));
+        where+=` and ${column} is not distinct from $${vals.length}::${type}`;
+      }
+      vals.push(e.entryConfig||{});where+=` and entry_config=$${vals.length}::jsonb`;
     }
     const result=await this.pool.query(`update sag_entries set ${sets.join(',')} where ${where}`,vals);
-    if(result?.rowCount===0)throw new Error(expectedExitReceipt?'sag_exit_receipt_concurrent_change':'sag_entry_update_missing');
+    if(expectedEntryReceipt&&result?.rowCount!==1)throw new Error('sag_entry_receipt_concurrent_change');
+    if(expectedExitReceipt&&result?.rowCount!==1)throw new Error('sag_exit_receipt_concurrent_change');
+    if(result?.rowCount===0)throw new Error('sag_entry_update_missing');
   }
   async entries(systemName,{limit=5000,includeArchived=false}={}){const r=await this.pool.query(`select * from sag_entries where system_name=$1 ${includeArchived?'':'and archived=false'} order by opened_at_ms desc limit $2`,[systemName,limit]);return r.rows.map(rowEntry);}
   async feederSignalLinkedHunters(systemName,{limit=20000}={}){
@@ -1201,6 +2711,7 @@ export class Database {
       'aurora',coalesce(entry_config->'aurora','{}'::jsonb),
       'infinityBreak',coalesce(entry_config->'infinityBreak','{}'::jsonb),'executionClass',entry_config->>'executionClass',
       'profitAuthority',entry_config->'profitAuthority',
+      'greatHornRecovery',coalesce(entry_config->'greatHornRecovery','{}'::jsonb),
       'simFeeCents',entry_config->'simFeeCents','entryFillProof',entry_config->'entryFillProof',
       'virtualInfinity',coalesce(entry_config->'virtualInfinity','{}'::jsonb),
       'dragonSource',case when entry_config#>'{dragonSource,signalPriceCents}' is null then '{}'::jsonb else jsonb_build_object('signalPriceCents',entry_config#>'{dragonSource,signalPriceCents}') end,
@@ -1235,7 +2746,7 @@ export class Database {
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
       where system_name=$1 and owner_id=$2 and archived=false and ${CAPITAL_SQL}
         and concept_name=any($3::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery')
-        and (concept_name<>'Lightning Plasma' or mode is distinct from $4 or opened_at_ms<$5)
+        and (concept_name not in ('Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery') or mode is distinct from $4 or opened_at_ms<$5)
       order by opened_at_ms asc`,[systemName,ownerId,PORTFOLIO_CONCEPT_NAMES,mode,Math.max(0,Number(resetTimestampMs)||0)]);
     return r.rows.map(rowEntry);
   }
@@ -1244,6 +2755,49 @@ export class Database {
     const lim=Math.max(1,Math.min(200,Math.floor(Number(limit)||100))),reset=Math.max(0,Number(resetTimestampMs)||0), book=mode?String(mode):null;
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and ($5::text is null or mode=$5) and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and concept_name = any($2::text[]) and status='closed' and count>0 and ($3::bigint=0 or opened_at_ms >= $3) and ($6::text is null or owner_id=$6) order by closed_at_ms desc nulls last,id limit $4`,[String(systemName),['Lightning Plasma'],reset,lim,book,ownerId==null?null:String(ownerId)]);
     return r.rows.map(rowEntry);
+  }
+  // Read-only operator history for the two CAPITAL execution attacks. Unlike
+  // /api/state's bounded recent rows, keyset pagination can reach every
+  // current-reset entry without hydrating the history on every SSE update.
+  // No trades, protections, balances, settings or schema are ever modified.
+  async capitalTradeHistoryPage(systemName,{ownerId,mode,resetTimestampMs,status,limit=100,
+    beforeAtMs=null,beforeId=null,snapshotCutoffMs=null}={}){
+    if(!systemName||!ownerId||!['SIMULATION','LIVE'].includes(String(mode))
+      ||!Number.isSafeInteger(Number(resetTimestampMs))||Number(resetTimestampMs)<0
+      ||!['open','closed'].includes(status))throw new Error('invalid_capital_history_scope');
+    const lim=Math.max(1,Math.min(100,Math.trunc(Number(limit)||100)));
+    const cursorPresent=beforeAtMs!==null||beforeId!==null;
+    if(cursorPresent&&(!Number.isSafeInteger(Number(beforeAtMs))||Number(beforeAtMs)<0
+      ||typeof beforeId!=='string'||beforeId.length<1||beforeId.length>256))
+      throw new Error('invalid_capital_history_cursor');
+    if(snapshotCutoffMs!==null&&(!Number.isSafeInteger(Number(snapshotCutoffMs))||Number(snapshotCutoffMs)<0))
+      throw new Error('invalid_capital_history_cutoff');
+    const cutoff=snapshotCutoffMs===null?Date.now():Number(snapshotCutoffMs);
+    const isOpen=status==='open';
+    // A closed row without a close timestamp must still be reachable. The
+    // coalesced time is a deterministic display ordering key, not an exit fact.
+    const orderAt=isOpen?'opened_at_ms':'coalesce(closed_at_ms,opened_at_ms)';
+    const stateFilter=isOpen?`(${ACTUAL_OPEN_SQL})`:`status='closed' and count>0`;
+    const values=[String(systemName),String(ownerId),String(mode),Number(resetTimestampMs),
+      cursorPresent?Number(beforeAtMs):null,cursorPresent?beforeId:null,cutoff,lim+1];
+    const client=await this.pool.connect();
+    try{
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      await client.query("set local statement_timeout='4000ms'");
+      const result=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
+        where system_name=$1 and owner_id=$2 and mode=$3 and archived=false and ${CAPITAL_SQL}
+        and concept_name in ('Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery') and opened_at_ms >= $4
+        and ${stateFilter} and ${orderAt} <= $7
+        and ($5::bigint is null or (${orderAt} < $5 or (${orderAt} = $5 and id < $6)))
+        order by ${orderAt} desc,id desc limit $8`,values);
+      await client.query('COMMIT');
+      const hasMore=result.rows.length>lim,rows=result.rows.slice(0,lim).map(rowEntry),last=rows.at(-1);
+      return {version:'CAPITAL-TRADE-HISTORY-V1',status,
+        scope:{systemName:String(systemName),ownerId:String(ownerId),mode:String(mode),resetTimestampMs:Number(resetTimestampMs)},
+        snapshotCutoffMs:cutoff,rows,hasMore,nextCursor:hasMore&&last
+          ?{beforeAtMs:isOpen?last.openedAtMs:(last.closedAtMs??last.openedAtMs),beforeId:last.id}:null};
+    }catch(error){try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
   }
   async starlightHistoryRows(systemName,{mode=null,limit=5000,resetTimestampMs=0}={}){
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
@@ -1318,14 +2872,18 @@ export class Database {
       order by opened_at_ms desc limit $2`,[String(systemName),lim]);
     return r.rows.map((x)=>({id:x.id,conceptName:x.concept_name,ticker:x.ticker,eventTicker:x.event_ticker||x.ticker,entryPriceCents:n(x.entry_price_cents),openedAtMs:n(x.opened_at_ms),entryConfig:x.concept_name==='Dragon'?{dragonSource:{signalPriceCents:n(x.dragon_signal_price_cents)}}:{}})).reverse();
   }
-  async simulationCashAggregate(systemName,{simFeeCents=0}={},queryClient=this.pool){
+  async simulationCashAggregate(systemName,{simFeeCents=0,ownerId=null,realizedSinceMs=0}={},queryClient=this.pool){
     const fee=Math.max(0,Number(simFeeCents)||0);
     const r=await queryClient.query(`select
-      coalesce(sum(pnl_cents) filter(where mode='SIMULATION' and concept_name = any($2::text[])),0)::double precision as realized_cents,
+      coalesce(sum(pnl_cents) filter(where mode='SIMULATION' and concept_name = any($2::text[])
+        and ($5::bigint=0 or opened_at_ms >= $5)),0)::double precision as realized_cents,
       coalesce(sum((entry_price_cents*greatest(0,remaining_count)) +
         case when count>0 then (case when entry_fee_cents>0 then entry_fee_cents else $3::double precision*count end)*(greatest(0,remaining_count)/count) else 0 end)
         filter(where mode='SIMULATION' and concept_name = any($2::text[]) and status in ('open','entry_pending','exit_pending','pending_recovery')),0)::double precision as reserved_cents
-      from sag_entries where system_name=$1 and archived=false and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT')`,[String(systemName),PORTFOLIO_CONCEPT_NAMES,fee]);
+      from sag_entries where system_name=$1 and archived=false
+       and ($4::text is null or owner_id=$4)
+       and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT')`,
+       [String(systemName),PORTFOLIO_CONCEPT_NAMES,fee,ownerId==null?null:String(ownerId),Number(realizedSinceMs)||0]);
     return{realizedCents:n(r.rows[0]?.realized_cents),reservedCents:n(r.rows[0]?.reserved_cents)};
   }
   async hunterEventPolicySnapshot(systemName,eventTicker){
@@ -1441,7 +2999,7 @@ export class Database {
     ) select
       coalesce((select jsonb_agg(to_jsonb(p)) from portfolio p),'[]'::jsonb) as portfolio,
       coalesce((select jsonb_agg(to_jsonb(s)) from signals s),'[]'::jsonb) as signals,
-      coalesce((select jsonb_agg(to_jsonb(l)) from linked l),'[]'::jsonb) as linked`,[String(systemName),['Crash Recovery Hunter','Lightning Plasma'],FEEDER_CONCEPT_NAMES,reset,book]);
+      coalesce((select jsonb_agg(to_jsonb(l)) from linked l),'[]'::jsonb) as linked`,[String(systemName),['Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery'],FEEDER_CONCEPT_NAMES,reset,book]);
     const x=r.rows[0]||{};return{portfolio:Array.isArray(x.portfolio)?x.portfolio:[],signals:Array.isArray(x.signals)?x.signals:[],linked:Array.isArray(x.linked)?x.linked:[]};
   }
   async expirePhoenixSignals(systemName, nowMs=Date.now(), {forceAll=false,limit=256}={}){
@@ -1465,7 +3023,21 @@ export class Database {
     const r=await this.pool.query("select concept_name, source_trade_id from sag_entries where system_name=$1 and mode=$2 and archived=false and source_trade_id like 'CRASH:%' and status not in ('rejected','entry_ioc_unfilled')",[String(systemName),String(mode)]);
     return r.rows.map(x=>({conceptName:x.concept_name,sourceTradeId:x.source_trade_id}));
   }
-  async entryByConceptSourceTradeId(systemName,conceptName,sourceTradeId){const r=await this.pool.query('select * from sag_entries where system_name=$1 and concept_name=$2 and source_trade_id=$3 and archived=false order by opened_at_ms desc limit 1',[String(systemName),String(conceptName),String(sourceTradeId)]);return r.rows[0]?rowEntry(r.rows[0]):null;}
+  async entryByConceptSourceTradeId(systemName,conceptName,sourceTradeId,{ownerId=null,mode=null,resetEpoch=null}={}){
+    // Legacy callers remain unchanged. A recovery caller must supply its
+    // COMPLETE parent scope so an unrelated child cannot consume its watch.
+    const r=await this.pool.query(`select * from sag_entries where system_name=$1
+      and concept_name=$2 and source_trade_id=$3 and archived=false
+      and ($4::text is null or owner_id=$4) and ($5::text is null or mode=$5)
+      and ($6::bigint is null or
+        (case when coalesce(execution_class,entry_config->>'executionClass')='SHADOW_SAINT'
+          then shadow_epoch else (entry_config#>>'{starlightRecovery,resetEpoch}')::bigint end)=$6)
+      order by opened_at_ms desc,id desc limit 1`,
+      [String(systemName),String(conceptName),String(sourceTradeId),
+        ownerId==null?null:String(ownerId),mode==null?null:String(mode),
+        resetEpoch==null?null:Number(resetEpoch)]);
+    return r.rows[0]?rowEntry(r.rows[0]):null;
+  }
   async liveOpenHunterEntries(ownerId){const r=await this.pool.query("select * from sag_entries where owner_id=$1 and archived=false and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and concept_name = any($2::text[]) and mode='LIVE' and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc",[ownerId,PORTFOLIO_CONCEPT_NAMES]);return r.rows.map(rowEntry);}
   async entryById(id){const r=await this.pool.query('select * from sag_entries where id=$1',[id]);return r.rows[0]?rowEntry(r.rows[0]):null;}
 
@@ -1540,11 +3112,26 @@ export class Database {
     return r.rows[0]||null;
   }
   async listStarlightWatches(scope){
+    // Retained compatibility for consumers that expect a bounded snapshot.
     const r=await this.pool.query(`select revision,watch,status from sag_starlight_recovery_v1
       where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
       order by case when status in ('CONSUMED','BLOCKED','EXPIRED') then 1 else 0 end asc,
         updated_at_ms desc limit 10000`,
       [String(scope.systemName),String(scope.ownerId),String(scope.mode),Number(scope.resetEpoch||0)]);
+    return r.rows;
+  }
+  async pageStarlightRecoveryWatches(scope,{limit=512,afterUpdatedAtMs=null,afterAuthorizationId=''}={}){
+    // Executable recovery authority must never silently disappear behind the
+    // former 10,000-row snapshot cap after restart. Read only unresolved
+    // watches in keyset order and expose a stable cursor for the next page.
+    const cap=Math.max(1,Math.min(512,Math.floor(Number(limit)||512)));
+    const r=await this.pool.query(`select authorization_id,updated_at_ms,revision,watch,status
+      from sag_starlight_recovery_v1 where system_name=$1 and owner_id=$2
+      and mode=$3 and reset_epoch=$4 and status not in ('CONSUMED','BLOCKED','EXPIRED')
+      and ($5::bigint is null or (updated_at_ms,authorization_id)>($5::bigint,$6::text))
+      order by updated_at_ms asc,authorization_id asc limit $7`,
+      [String(scope.systemName),String(scope.ownerId),String(scope.mode),Number(scope.resetEpoch||0),
+       afterUpdatedAtMs==null?null:Number(afterUpdatedAtMs),String(afterAuthorizationId),cap]);
     return r.rows;
   }
 
@@ -1603,7 +3190,7 @@ export class Database {
   }
   async pruneGameClockStates(systemName,beforeMs){await this.pool.query('delete from sag_game_clock_authority where system_name=$1 and last_updated_ms<$2',[systemName,Number(beforeMs)||0]);}
 
-  async createRecoveryObservation(o){await this.pool.query(`insert into sag_recovery_observations_v2(id,system_name,original_entry_id,ticker,concept_name,sport,entry_price_cents,exit_price_cents,drop_cents,game_minutes_at_entry,exit_at_ms,prices,trough_cents,rebound_cents,recovered,recovery_at_ms,time_to_recover_ms,tracking_complete,settled,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do nothing`,[o.id,o.systemName,o.originalEntryId,o.ticker,o.conceptName,o.sport,o.entryPriceCents,o.exitPriceCents,o.dropCents,o.gameMinutesAtEntry||0,o.exitAtMs,JSON.stringify(o.prices||[]),o.troughCents,o.reboundCents||0,Boolean(o.recovered),o.recoveryAtMs||null,o.timeToRecoverMs||0,Boolean(o.trackingComplete),Boolean(o.settled),o.finalResult||null,o.updatedAtMs||Date.now()]);}
+  async createRecoveryObservation(o){await this.pool.query(`insert into sag_recovery_observations_v2(id,system_name,original_entry_id,ticker,concept_name,sport,entry_price_cents,exit_price_cents,drop_cents,game_minutes_at_entry,exit_at_ms,prices,trough_cents,rebound_cents,recovered,recovery_at_ms,time_to_recover_ms,tracking_complete,settled,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do nothing`,[o.id,o.systemName,o.originalEntryId,o.ticker,o.conceptName,o.sport,Math.round(n(o.entryPriceCents)),Math.round(n(o.exitPriceCents)),Math.round(n(o.dropCents)),o.gameMinutesAtEntry||0,o.exitAtMs,JSON.stringify(o.prices||[]),Math.round(n(o.troughCents)),Math.round(n(o.reboundCents)),Boolean(o.recovered),o.recoveryAtMs||null,o.timeToRecoverMs||0,Boolean(o.trackingComplete),Boolean(o.settled),o.finalResult||null,o.updatedAtMs||Date.now()]);}
   async recoveryObservations(systemName,{complete=null,limit=5000}={}){const cond=complete===null?'':'and tracking_complete=$3';const args=complete===null?[systemName,limit]:[systemName,limit,complete];const r=await this.pool.query(`select * from sag_recovery_observations_v2 where system_name=$1 ${cond} order by updated_at_ms desc limit $2`,args);return r.rows;}
   async recoveryObservationByOriginalEntryId(systemName,originalEntryId){const r=await this.pool.query('select id,original_entry_id,tracking_complete,updated_at_ms from sag_recovery_observations_v2 where system_name=$1 and original_entry_id=$2 order by updated_at_ms desc limit 1',[systemName,originalEntryId]);return r.rows[0]||null;}
   async recoveryTrackingCount(systemName){const r=await this.pool.query('select count(*)::int as count from sag_recovery_observations_v2 where system_name=$1 and tracking_complete=false',[systemName]);return Number(r.rows[0]?.count||0);}
@@ -1620,7 +3207,7 @@ export class Database {
     ) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
     on conflict(system_name,original_entry_id,trigger_stage) do nothing returning coverage_kind`,[
       o.id,o.systemName,o.originalEntryId,o.triggerStage,o.ticker,o.mode,o.conceptName,o.sourceFeeder||null,o.sport||'Unknown',
-      Number(o.entryPriceCents||0),Number(o.triggerPriceCents||0),Number(o.triggerDropCents||0),Number(o.triggerLossCents||0),Number(o.dangerLineCents||0),
+      Math.round(n(o.entryPriceCents)),Math.round(n(o.triggerPriceCents)),Math.round(n(o.triggerDropCents)),Number(o.triggerLossCents||0),Math.round(n(o.dangerLineCents)),
       Number(o.gameMinutesAtEntry||0),o.crashBucket||'UNKNOWN',Number(o.originalCount||0),Number(o.trackedCount||0),Number(o.entryFeeCents||0),Number(o.baseRealizedPnlCents||0),Number(o.triggerAtMs||Date.now()),
       Boolean(o.trackingComplete),Boolean(o.recovered),o.recoveryAtMs||null,o.coverageKind||'causal_from_trigger',o.state||{},Number(o.updatedAtMs||Date.now()),
     ]);
@@ -1897,6 +3484,46 @@ export class Database {
       lastHarvestAtMs:Number(byEvent.harvest_executed?.lastAtMs||0)||null,
       recent:recent.rows.map((r)=>({hunterId:r.hunter_id,ticker:r.ticker,eventType:r.event_type,atMs:Number(r.at_ms||0),data:r.data||{}})),
     };
+  }
+  async initOperationalSchema(){await this.pool.query(OPS_SCHEMA_SQL);}
+  async saveOperationalState(scope,instanceId,state){
+    const payload=JSON.stringify(state);
+    if(Buffer.byteLength(payload)>131072)throw new Error('operational_snapshot_too_large');
+    await this.pool.query(`insert into sag_operational_state_v1(scope,instance_id,state) values($1,$2,$3::jsonb)
+      on conflict(scope) do update set instance_id=excluded.instance_id,state=excluded.state,updated_at=now()`,[scope,instanceId,payload]);
+  }
+  async syncOperationalAlerts(scope,reasons){
+    const codes=[...new Set((reasons||[]).map(x=>String(x).slice(0,160)))].slice(0,32);
+    const client=await this.pool.connect();
+    try{
+      await client.query('begin');
+      for(const code of codes)await client.query(`insert into sag_operational_alerts_v1(scope,code,state) values($1,$2,'ACTIVE')
+        on conflict(scope,code) do update set last_at=now(),occurrences=sag_operational_alerts_v1.occurrences+1,
+        revision=sag_operational_alerts_v1.revision+case when sag_operational_alerts_v1.state<>'ACTIVE' then 1 else 0 end,
+        next_attempt_at=case when sag_operational_alerts_v1.state<>'ACTIVE' then now() else sag_operational_alerts_v1.next_attempt_at end,
+        state='ACTIVE',resolved_at=null`,[scope,code]);
+      await client.query(`update sag_operational_alerts_v1 set state='RESOLVED',resolved_at=now(),last_at=now(),revision=revision+1,next_attempt_at=now()
+        where scope=$1 and state='ACTIVE' and not(code=any($2::text[]))`,[scope,codes]);
+      await client.query('commit');
+    }catch(error){await client.query('rollback').catch(()=>{});throw error;}finally{client.release();}
+  }
+  async operationalAlertsDue(scope,limit=8,scopePrefix=null){
+    const r=await this.pool.query(`select scope,code,state,revision,attempts from sag_operational_alerts_v1
+      where (scope=$1 or ($3::text is not null and left(scope,length($3))=$3)) and delivered_revision<revision and next_attempt_at<=now() order by next_attempt_at limit $2`,[scope,Math.max(1,Math.min(32,Number(limit)||8)),scopePrefix]);
+    return r.rows;
+  }
+  async recordOperationalAlertDelivery(scope,code,revision,delivered){
+    // Revision CAS prevents an acknowledgement for ACTIVE from consuming a
+    // newer RESOLVED alert. At-least-once delivery; receivers deduplicate keys.
+    await this.pool.query(`update sag_operational_alerts_v1 set attempts=least(attempts+1,1000000),
+      delivered_revision=case when $4 then $3 else delivered_revision end,
+      next_attempt_at=now()+make_interval(secs=>least(300,power(2,least(attempts,8))::int))
+      where scope=$1 and code=$2 and revision=$3`,[scope,code,revision,delivered===true]);
+  }
+  async operationalStorageStats(){
+    const r=await this.pool.query(`select pg_database_size(current_database())::text as database_bytes,
+      pg_total_relation_size('sag_audit')::text as audit_bytes,pg_total_relation_size('sag_entries')::text as ledger_bytes`);
+    return r.rows[0]||{};
   }
   async audit(level,event,data={}){await this.pool.query('insert into sag_audit(level,event,data) values($1,$2,$3)',[level,event,data]);}
   async recentAudit(limit=100){const r=await this.pool.query('select id,ts,level,event,data from sag_audit order by id desc limit $1',[limit]);return r.rows;}

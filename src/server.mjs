@@ -1,6 +1,7 @@
 import {EXECUTION_REPORT_VERSION,EXECUTION_ATTACKS,actualOpenExposure,executionValuation} from './executionReporting.mjs';
 import http from 'node:http';
 import { BUILD_INFO } from './authority.mjs';
+import { OPERATOR_ACCESS_VERSION } from './operatorAccess.mjs';
 import { FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, PORTFOLIO_CONCEPTS, isShadowSaintEntry } from './doctrine.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -102,11 +103,18 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
   if(historyUnknown)gaps.push('historical_economic_state_at_cutoff_not_recorded');
   if(capital&&actualExposure&&!closedInSnapshot&&unrealized==null)gaps.push('current_executable_mark_unavailable');
   if(row.peakPriceCents==null)gaps.push('peak_not_recorded');
-  if(!row.exitAttemptBookMs)gaps.push('exit_quote_age_not_recorded');
+  // HC2-R1: exitAttemptBookMs is the order-book observation TIMESTAMP,
+  // not its age at the exit decision. No matching decision timestamp is stored
+  // on every row, so historical quote age must remain unknown rather than an
+  // epoch-sized value or a fabricated age based on a later ledger update.
+  const exitBookAt=num(row.exitAttemptBookMs);
+  const exitQuoteObservedAtMs=exitBookAt>0&&!cutoffAfter(exitBookAt,snapshotCutoffMs)?exitBookAt:null;
+  gaps.push('exit_quote_age_not_recorded');
+  if(exitQuoteObservedAtMs==null)gaps.push('exit_quote_observation_timestamp_unavailable');
   if(!Array.isArray(config.peakObservations))gaps.push('peak_path_not_retained');
   return {
     positionId:String(row.id),
-    executionIds:{entryOrderId:row.entryOrderId||null,entryClientOrderId:row.entryClientOrderId||null,exitOrderId:closedInSnapshot?row.exitOrderId||null:null,exitClientOrderId:closedInSnapshot?row.exitClientOrderId||null:null},
+    executionIds:{entryOrderId:historyUnknown?null:row.entryOrderId||null,entryClientOrderId:row.entryClientOrderId||null,exitOrderId:historyUnknown?null:row.exitOrderId||null,exitClientOrderId:historyUnknown?null:row.exitClientOrderId||null},
     parentEntryId:config.parentEntryId||row.sourceTradeId||null,
     cloneGroupId:frozen.snap.cloneGroupId||row.sourceTradeId||String(row.id),
     lightningContinuation:config.lightningPlasmaScaleIn?{...config.lightningPlasmaScaleIn}:null,
@@ -125,12 +133,14 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
     quantity:qty,remainingQuantity:historyUnknown?null:num(row.remainingCount),exitFilledQuantity:historyUnknown?null:num(row.exitFilledCount),
     feesCents:fees,realizedNetCents:realized,unrealizedNetCents:unrealized,
     exitReason:closedInSnapshot?row.closeReason||null:null,
+    admissionReason:!historyUnknown&&row.status==='rejected'?row.closeReason||null:null,
+    pendingReason:!historyUnknown&&['entry_pending','exit_pending','pending_recovery','reconciliation_orphaned'].includes(row.status)?row.closeReason||null:null,
     valuation:capital?{priceCents:historyUnknown?null:mark?.priceCents??null,atMs:historyUnknown?null:mark?.atMs??null,source:mark?.source||'unavailable',complete:unrealized!=null,reason:historyUnknown?'historical_economic_state_at_cutoff_not_recorded':mark?.reason||null}:{priceCents:valuationAfterCutoff?null:num(row.currentPriceCents),atMs:valuationAfterCutoff?null:num(row.updatedAtMs),source:'virtual_reference_stored_mark'},
     snapshotId:frozen.id,
     admissionEvidence:config.durableEventAdmission||null,
     starlightBandDecision:config.starlightRecovery?.priceBandDecision||null,
     observations:{peakPriceCents:num(row.peakPriceCents),troughPriceCents:num(row.lowestPriceAfterEntryCents),priceBasis:'stored_column_not_executable_proof',maeCents:num(row.maeCents)},
-    exitEvidence:{quoteAgeMs:num(row.exitAttemptBookMs),executableFullPositionNet:null,reason:closedInSnapshot?row.closeReason||null:null,note:'A stored peak is not proof a full-position exit was executable.'},
+    exitEvidence:{quoteAgeMs:null,quoteObservedAtMs:exitQuoteObservedAtMs,quoteAgeUnavailableReason:'exit_decision_time_not_recorded',executableFullPositionNet:null,reason:closedInSnapshot?row.closeReason||null:null,note:'A stored peak is not proof a full-position exit was executable.'},
     gaps,includedInSnapshot:atSnapshot,
   };
 }
@@ -260,7 +270,7 @@ export function buildLedgerExportPackage({records,meta,maxBytes=EXPORT_PART_MAX_
   packList('snapshots','snapshots',snapList.slice(0,40),{note:'Newest frozen entry extracts only. Older snapshots omitted to keep the download at or under 1 MB.'});
   coverage.rawEvidenceOmitted=true;
   coverage.gaps.push('raw_entry_evidence_omitted_to_keep_download_under_1mb');
-  const summary={...header,kind:'diagnostic-summary',summaryOnly:true,completeDataset:'trades-*.json; snapshots-*.json (see coverage for omitted evidence)',coverage,totals,strategyBreakdown,accountTotals,virtualTotals,cosmosTotals,health:meta.health||null,settingsAtExport:meta.settingsAtExport||null,settingsAtExportRole:'current_configuration_not_a_substitute_for_missing_frozen_snapshots',unrecoverable:['peak_path_observations_not_retained','legacy_pre_r25_configuration_change_log_not_retained','executable_full_position_exit_net_not_retained_unless_stored_on_the_row'],dashboardDifference:'Homepage closed table is capped at 60 recent rows. This ledger is every retained row since reset up to the snapshot cutoff.',entryChokeDiagnostics:meta.entryChokeDiagnostics||null,starlightRecovery:meta.starlightRecovery||{available:false,reason:'not_collected'},lightningPlasmaScaleIn:meta.lightningPlasmaScaleIn||{available:false,reason:'not_collected'},lightningContinuation:meta.lightningContinuation||{available:false,reason:'not_collected'},financialSnapshotNote:'Incremental export at a fixed cutoff; rows changed after cutoff explicitly carry unknown historical economics. Missing executable marks are not zero profit.'};
+  const summary={...header,kind:'diagnostic-summary',summaryOnly:true,completeDataset:'trades-*.json; snapshots-*.json (see coverage for omitted evidence)',coverage,totals,strategyBreakdown,accountTotals,virtualTotals,cosmosTotals,health:meta.health||null,settingsAtExport:meta.settingsAtExport||null,settingsAtExportRole:'current_configuration_not_a_substitute_for_missing_frozen_snapshots',unrecoverable:['peak_path_observations_not_retained','legacy_pre_r25_configuration_change_log_not_retained','executable_full_position_exit_net_not_retained_unless_stored_on_the_row'],dashboardDifference:'Homepage closed table is capped at 60 recent rows. This ledger is every retained row since reset up to the snapshot cutoff.',entryChokeDiagnostics:meta.entryChokeDiagnostics||null,starlightRecovery:meta.starlightRecovery||{available:false,reason:'not_collected'},lightningPlasmaScaleIn:meta.lightningPlasmaScaleIn||{available:false,reason:'not_collected'},greatHornDiagnostics:meta.greatHornDiagnostics||{available:false,reason:'not_collected'},lightningContinuation:meta.lightningContinuation||{available:false,reason:'not_collected'},financialSnapshotNote:'Incremental export at a fixed cutoff; rows changed after cutoff explicitly carry unknown historical economics. Missing executable marks are not zero profit.'};
   pack('diagnostic-summary.json',{...summary,part:1,partCount:1,runtime:meta.runtime||null,unavailable:summary.unrecoverable});
   const logBody=projected.map((r)=>[r.positionId,r.ticker,r.attack,r.mode,r.executionClass,r.status,r.entryPriceCents,r.exitPriceCents,r.quantity,r.realizedNetCents,r.exitReason||'-',r.snapshotId,(r.gaps||[]).join(',')].join('|'));
   const logParts=[];let buf=[];
@@ -381,7 +391,33 @@ async function collectLedgerExportJob(engine,{budgetMs=15000,pageLimit=80,maxPag
   const starlightRecovery={runtime:engine.starlightRecoveryDiagnostics?.(32)||null,durable:durableStarlight};
   let lightningContinuation={available:false,reason:'not_supported'};
   try{if(typeof engine.db?.lightningContinuationDiagnostic==='function')lightningContinuation={available:true,...await engine.db.lightningContinuationDiagnostic(settings,{limit:32})};}catch(error){lightningContinuation={available:false,reason:String(error?.message||error).slice(0,240)};}
-  const built=buildLedgerExportPackage({records:rows,meta:{starlightRecovery,lightningContinuation,lightningPlasmaScaleIn:engine.lightningPlasmaScaleInRuntime?.()||null,exportId,systemName:settings.systemName,ownerId:settings.ownerId,resetTimestampMs:reset,snapshotCutoffMs:cutoff,mode,expectedCount:incomplete?Math.max(rows.length+1,Number(expected)||0):expected??rows.length,health:engine.health||null,exportedAtMs:cutoff,periodFromMs:fromMs||reset,periodToMs:toMs||cutoff,settingsAtExport:settings,runtime:{health:engine.health||null,pressure:engine.resourcePressureState||null},entryChokeDiagnostics:{
+  let greatHornDiagnostics={available:false,reason:'not_supported'};
+  try{
+    if(typeof engine.db?.greatHornDiagnosticSnapshot==='function')
+      greatHornDiagnostics=await engine.db.greatHornDiagnosticSnapshot(settings,
+        {limit:48,fromMs:fromMs||reset,toMs:toMs||cutoff});
+  }catch(error){greatHornDiagnostics={available:false,reason:'gh1_diagnostic_query_failed',
+    error:String(error?.message||error).slice(0,240)};}
+  let crystalWallRecoveryDiagnostics={available:false,reason:'not_supported'};
+  try{
+    if(typeof engine.db?.crystalWallRecoveryDiagnosticSnapshot==='function')
+      crystalWallRecoveryDiagnostics=await engine.db.crystalWallRecoveryDiagnosticSnapshot(settings,
+        {limit:48,fromMs:fromMs||reset,toMs:toMs||cutoff});
+  }catch(error){crystalWallRecoveryDiagnostics={available:false,reason:'cw1_diagnostic_query_failed',
+    error:String(error?.message||error).slice(0,240)};}
+  const built=buildLedgerExportPackage({records:rows,meta:{starlightRecovery,lightningContinuation,greatHornDiagnostics,crystalWallRecoveryDiagnostics,lightningPlasmaScaleIn:engine.lightningPlasmaScaleInRuntime?.()||null,exportId,systemName:settings.systemName,ownerId:settings.ownerId,resetTimestampMs:reset,snapshotCutoffMs:cutoff,mode,expectedCount:incomplete?Math.max(rows.length+1,Number(expected)||0):expected??rows.length,health:engine.health||null,exportedAtMs:cutoff,periodFromMs:fromMs||reset,periodToMs:toMs||cutoff,settingsAtExport:settings,runtime:{health:engine.health||null,pressure:engine.resourcePressureState||null,
+      greatHorn:{version:'GH1-ROOT1-RUNTIME-DIAGNOSTICS',enabled:settings.greatHornEnabled===true,
+        observer:engine.greatHornObserverStatus||null,replay:engine.greatHornReplayStatus||null,
+        lastObserverSuccessMs:Number(engine.greatHornLastObserverSuccessMs||0),
+        queuedWatchIds:engine.greatHornWakeIds?.size||0,
+        queuedTickers:engine.greatHornWakeTickers?.size||0,
+        priorityTickers:engine.greatHornPriorityTickers?.size||0},
+      crystalWallRecovery:{version:'CW1-RECOVERY-RUNTIME-DIAGNOSTICS',enabled:settings.crystalWallRecoveryEnabled===true,
+        observer:engine.crystalWallRecoveryObserverStatus||null,replay:engine.crystalWallRecoveryReplayStatus||null,
+        lastObserverSuccessMs:Number(engine.crystalWallRecoveryLastObserverSuccessMs||0),
+        queuedWatchIds:engine.crystalWallRecoveryWakeIds?.size||0,
+        queuedTickers:engine.crystalWallRecoveryWakeTickers?.size||0,
+        priorityTickers:engine.crystalWallRecoveryPriorityTickers?.size||0}},entryChokeDiagnostics:{
       entryAdmission:engine.entryAdmissionSnapshot?.()||null,
       candidateFunnel:(()=>{const f=engine.entryCandidateFunnelSummary?.()||null;return f?{...f,recent:(f.recent||[]).slice(0,24)}:null;})(),
       entryPipeline:(()=>{const p=engine.strategy?.entryPipelineSummary?.()||null;return p?{...p,recent:(p.recent||[]).slice(0,24)}:null;})(),
@@ -589,16 +625,37 @@ const bootView=(runtime)=>({
   lastAttemptMs:runtime.boot?.lastAttemptMs||0,
   attempts:runtime.boot?.attempts||0,
   lastError:runtime.boot?.lastError||null,
+  lastErrorStage:runtime.boot?.lastErrorStage||null,
+  lastErrorMessage:runtime.boot?.lastErrorMessage||null,
 });
 
-export function startServer(runtime,port,rootDir){const clients=new Set(),blockedClients=new WeakSet();let pushing=false,lastPushAtMs=0;const push=async()=>{const engine=runtime.engine;if(pushing||!clients.size||!engine)return;const pressure=String(engine.resourcePressureState||'GREEN');const cadence=['PRESSURE','TRADE_PRIORITY','HARD_RESEARCH_SHED'].includes(pressure)?5000:pressure==='COMPACT'?3000:2000;const now=Date.now();if(now-lastPushAtMs<cadence)return;pushing=true;try{const state=await engine.state();lastPushAtMs=Date.now();const serializeStartedAt=Date.now();const payload=JSON.stringify(state);const serializeMs=Math.max(0,Date.now()-serializeStartedAt);engine.recordOperatorPayload?.({bytes:Buffer.byteLength(payload,'utf8'),serializeMs,sse:true});const msg=`data: ${payload}\n\n`;for(const r of clients){if(blockedClients.has(r))continue;const accepted=r.write(msg);if(accepted===false){blockedClients.add(r);r.once('drain',()=>blockedClients.delete(r));}}}catch{}finally{pushing=false;}};const timer=setInterval(push,1000);
+export function startServer(runtime,port,rootDir){const clients=new Set(),blockedClients=new WeakSet();
+const maxClients=64;let pushing=false,lastPushAtMs=0;const push=async()=>{const engine=runtime.engine;if(pushing||!clients.size||!engine)return;const pressure=String(engine.resourcePressureState||'GREEN');const cadence=['PRESSURE','TRADE_PRIORITY','HARD_RESEARCH_SHED'].includes(pressure)?5000:pressure==='COMPACT'?3000:2000;const now=Date.now();if(now-lastPushAtMs<cadence)return;pushing=true;try{const state=await engine.state();if(!clients.size)return;lastPushAtMs=Date.now();const serializeStartedAt=Date.now();const payload=JSON.stringify(state);const serializeMs=Math.max(0,Date.now()-serializeStartedAt);engine.recordOperatorPayload?.({bytes:Buffer.byteLength(payload,'utf8'),serializeMs,sse:true});const msg=`data: ${payload}\n\n`;for(const r of clients){if(blockedClients.has(r))continue;const accepted=r.write(msg);if(accepted===false){blockedClients.add(r);r.once('drain',()=>blockedClients.delete(r));}}}catch{}finally{pushing=false;}};const timer=setInterval(push,1000);
   const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url,'http://localhost');const engine=runtime.engine;
+    res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
+    res.setHeader('Content-Security-Policy',"frame-ancestors 'none'");
+    // Cross-origin writes are refused in both passwordless SIM and protected
+    // LIVE. This does not replace upstream network access protection.
+    if(!['GET','HEAD','OPTIONS'].includes(req.method)){
+      const origin=req.headers.origin;
+      let unsafe=req.headers['sec-fetch-site']==='cross-site';
+      if(origin){try{unsafe=unsafe||new URL(origin).host!==req.headers.host;}catch{unsafe=true;}}
+      if(unsafe)return json(res,403,{error:'cross_origin_operator_write_rejected'});
+    }
+    engine?.recomputeHealth?.();
     // Railway uses /health strictly as container liveness. Trading readiness is
     // intentionally separate so a slow Kalshi websocket or database retry can
     // never make Railway kill an otherwise healthy HTTP process.
-    if(u.pathname==='/health')return json(res,200,{ok:true,processAlive:true,build:BUILD_INFO,boot:bootView(runtime),engineReady:Boolean(engine),tradingReady:Boolean(engine&&!engine.health.degraded)});
-    if(u.pathname==='/ready'){if(!engine)return json(res,503,{ok:false,ready:false,boot:bootView(runtime)});engine.recomputeHealth();const h=engine.health;return json(res,h.degraded?503:200,{ok:!h.degraded,ready:!h.degraded,restOk:h.restOk,websocketOk:h.websocketOk,websocketFresh:h.websocketFresh,reconciliationOk:h.reconciliationOk,protectionOk:h.protectionOk,protectionFresh:h.protectionFresh,scannerFresh:h.scannerFresh,shadowSchemaReady:h.shadowSchemaReady,shadowWorkerFresh:h.shadowWorkerFresh,shadowWorkerOk:h.shadowWorkerOk,shadowLastError:h.shadowLastError,lastWsMessageMs:h.lastWsMessageMs,lastProtectionMs:h.lastProtectionMs,lastFullScanMs:engine.lastFullScanMs,lastError:h.lastError||null});}
-    if(u.pathname==='/api/events'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});res.write('retry: 2000\n\n');clients.add(res);req.on('close',()=>{clients.delete(res);blockedClients.delete(res);});return;}
+    if(u.pathname==='/health')return json(res,200,{ok:true,processAlive:true,build:BUILD_INFO,boot:bootView(runtime),engineReady:Boolean(engine),tradingReady:Boolean(engine&&!engine.health.degraded),controlPlaneAuthConfigured:false,controlPlaneAuthVersion:OPERATOR_ACCESS_VERSION,simulationPasswordRequired:false,livePasswordRequired:false,networkAccessRestrictionRequiredForLive:true});
+    if(u.pathname==='/ready'){if(!engine)return json(res,503,{ok:false,ready:false,boot:bootView(runtime),controlPlaneAuthConfigured:false});engine.recomputeHealth();const h=engine.health,ready=!h.degraded;return json(res,ready?200:503,{ok:ready,ready,controlPlaneAuthConfigured:false,restOk:h.restOk,websocketOk:h.websocketOk,websocketFresh:h.websocketFresh,reconciliationOk:h.reconciliationOk,protectionOk:h.protectionOk,protectionFresh:h.protectionFresh,scannerFresh:h.scannerFresh,shadowSchemaReady:h.shadowSchemaReady,shadowWorkerFresh:h.shadowWorkerFresh,shadowWorkerOk:h.shadowWorkerOk,operational:h.operational||null,reconciliationFresh:h.reconciliationFresh,shadowLastError:h.shadowLastError,lastWsMessageMs:h.lastWsMessageMs,lastProtectionMs:h.lastProtectionMs,lastFullScanMs:engine.lastFullScanMs,lastError:h.lastError||null});}
+    // No application-level username/password, Basic challenge, or pairing link.
+    // Cross-origin write rejection above is unchanged. Restrict deployment
+    // ingress before allowing access to real-money operator controls.
+    if(u.pathname==='/api/events'){
+      if(clients.size>=maxClients)return json(res,503,{error:'operator_stream_capacity_reached'});
+      res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});
+      res.write('retry: 2000\n\n');clients.add(res);
+      req.on('close',()=>{clients.delete(res);blockedClients.delete(res);});return;}
     if(u.pathname.startsWith('/api/')&&!engine)return json(res,503,{error:'engine_booting',boot:bootView(runtime)});
     if(u.pathname==='/api/shadow-saints/proof'&&req.method==='GET'){
       const evidence=await engine.shadowProofDiagnostic(u.searchParams.get('parentId'));
@@ -611,9 +668,38 @@ export function startServer(runtime,port,rootDir){const clients=new Set(),blocke
         beforeId:u.searchParams.get('beforeId')||''});
       return json(res,200,{...page,rows:page.rows.map(e=>engine.compactShadowDiagnostic(e))});
     }
+    if(u.pathname==='/api/capital-trades'&&req.method==='GET'){
+      // Pure history read: scope is server-owned, never accepted from the URL.
+      // Trading authority, order endpoints and LIVE protections are untouched.
+      const status=u.searchParams.get('status');
+      if(!['open','closed'].includes(status))return json(res,400,{error:'invalid_capital_history_status'});
+      const limitText=u.searchParams.get('limit');
+      if(limitText!==null&&(!/^\d{1,3}$/.test(limitText)||Number(limitText)<1||Number(limitText)>100))
+        return json(res,400,{error:'invalid_capital_history_limit'});
+      const hasBefore=u.searchParams.has('beforeAtMs')||u.searchParams.has('beforeId');
+      if(hasBefore&&(!/^(0|[1-9]\d{0,15})$/.test(u.searchParams.get('beforeAtMs')||'')
+          ||!(u.searchParams.get('beforeId')||'').trim()||String(u.searchParams.get('beforeId')).length>256))
+        return json(res,400,{error:'invalid_capital_history_cursor'});
+      const cutoffText=u.searchParams.get('snapshotCutoffMs');
+      if(cutoffText!==null&&!/^(0|[1-9]\d{0,15})$/.test(cutoffText))
+        return json(res,400,{error:'invalid_capital_history_cutoff'});
+      if(typeof engine.db?.capitalTradeHistoryPage!=='function')return json(res,503,{error:'capital_history_reader_unavailable'});
+      const scope={systemName:engine.settings.systemName,ownerId:engine.settings.ownerId,
+        mode:engine.settings.mode,resetTimestampMs:Number(engine.settings.resetTimestampMs||0)};
+      const page=await engine.db.capitalTradeHistoryPage(scope.systemName,{...scope,status,
+        limit:limitText===null?100:Number(limitText),
+        beforeAtMs:hasBefore?Number(u.searchParams.get('beforeAtMs')):null,
+        beforeId:hasBefore?u.searchParams.get('beforeId'):null,
+        snapshotCutoffMs:cutoffText===null?null:Number(cutoffText)});
+      return json(res,200,{...page,rows:page.rows.map(row=>engine.compactDashboardEntry(row))});
+    }
     if(u.pathname==='/api/state'&&req.method==='GET')return json(res,200,await engine.state());
+    if(u.pathname==='/api/operational-health'&&req.method==='GET'){
+      engine.recomputeHealth();return json(res,engine.health.degraded?503:200,{health:engine.health,operational:engine.operational?.snapshot(engine.settings,engine.operationalQueues())||null,
+        database:engine.db?.resourceSnapshot?.()||null,brokerRequests:engine.kalshi?.resourceSnapshot?.()||null});
+    }
     if(u.pathname==='/api/settings'&&req.method==='PATCH')return json(res,200,await engine.patchSettings(await body(req)));
-    if(u.pathname==='/api/mode'&&req.method==='POST'){const b=await body(req);return json(res,200,await engine.setMode(b.mode,b.confirmation||''));}
+    if(u.pathname==='/api/mode'&&req.method==='POST'){const b=await body(req);const changed=await engine.setMode(b?.mode,b?.confirmation||'');return json(res,200,changed);}
     if(u.pathname==='/api/engine'&&req.method==='POST'){const b=await body(req);return json(res,200,await engine.setEngine(Boolean(b.active)));}
     if(u.pathname==='/api/run-scan'&&req.method==='POST'){engine.requestScan();return json(res,202,{ok:true,requested:true});}
     if(u.pathname==='/api/reset-defaults'&&req.method==='POST')return json(res,200,await engine.resetOperatorSettingsToFactory());
@@ -642,5 +728,12 @@ export function startServer(runtime,port,rootDir){const clients=new Set(),blocke
     if(req.method!=='GET')return json(res,404,{error:'not_found'});
     const rel=u.pathname==='/'?'index.html':normalize(u.pathname).replace(/^[/\\]+/,'');if(rel.includes('..'))return json(res,403,{error:'forbidden'});const file=join(rootDir,'public',rel);try{const data=await readFile(file);res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream','cache-control':'no-store'});res.end(data);}catch{const data=await readFile(join(rootDir,'public','index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});res.end(data);}
   }catch(e){json(res,500,{error:String(e?.message||e)});}});
+  server.endOperatorStreams=()=>{
+    // SSE responses otherwise keep server.close() pending indefinitely during
+    // SIGTERM, starving the engine's orderly persistence/lock release.
+    for(const client of clients){try{client.end();}catch{}}
+    clients.clear();
+  };
+  server.headersTimeout=15_000;server.requestTimeout=30_000;server.keepAliveTimeout=5000;server.maxConnections=128;
   server.listen(port,'0.0.0.0');server.on('close',()=>clearInterval(timer));return server;
 }

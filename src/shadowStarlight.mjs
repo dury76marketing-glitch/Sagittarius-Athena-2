@@ -6,9 +6,49 @@ import { authorityHash, verifyAthenaFireCommandHash } from './authority.mjs';
 import { SHADOW_PROTOCOL, executionSettingsHash, validateShadowEntryWitness,
   shadowEntryHash, shadowAdmissionId } from './shadowProtocol.mjs';
 import { athenaStarlightTriggerDecision } from './athenaStarlightTrigger.mjs';
-import { isShadowSaintEntry, starlightParentLossMayArmRecovery } from './doctrine.mjs';
+import { isShadowSaintEntry, starlightParentLossMayArmRecovery, calculateAuroraSnapshotFromFeeModel } from './doctrine.mjs';
 export const STARLIGHT_SHADOW_VERSION='APS2-VIRTUAL-STARLIGHT-V1';
 export const APS2_VERSION='APS2-SHADOW-STARLIGHT-V1';
+// CAPDOOR-R1: one policy shared by durable JS admission and its mirrored SQL fence.
+// Link's stop is a verified parent authorization, NOT a buy price or entry-band
+// ceiling. Non-Link recovery retains its original operator band constraints.
+export function starlightAdmissionPolicy({settings={},watch={},entry={},snapshot={},aurora={}}={}){
+  const requested=Number(settings.crashRecoveryHunterAuroraDamageControlPercent);
+  const effective=Number(aurora.damageControlPercent);
+  const isLink=snapshot.link===true;
+  if(isLink!==(watch.link===true) || (isLink&&settings.crashRecoveryHunterLinkEnabled!==true))
+    return {ok:false,reason:'aps2_starlight_link_authority_changed'};
+  const low=Number(settings.crashRecoveryMinEntryCents),high=Number(settings.crashRecoveryMaxEntryCents);
+  const stop=Number(watch.stopPriceCents),price=Number(entry.entryPriceCents);
+  if(!(low>0&&high>=low&&high<100&&stop>0&&stop<100&&price>0&&price<100))
+    return {ok:false,reason:'aps2_starlight_band_invalid'};
+  if(!isLink && (stop<low||stop>high||price<low||price>high))
+    return {ok:false,reason:'aps2_starlight_band_changed'};
+  if(!(requested>0&&requested<=95)||!aurora.ok||aurora.frozen!==true)
+    return {ok:false,reason:'aps2_starlight_independent_aurora_required'};
+  if(aurora.virtualRecoveryEnvelope===true){
+    const attempted=Number(aurora.virtualRecoveryAttemptedPercent);
+    if(aurora.virtualRecoveryPolicy!=='FEE_ENVELOPE_ONLY'
+      || Number(aurora.virtualRecoveryRequestedPercent)!==requested
+      || ![20,45,99].includes(attempted)
+      || effective!==Math.min(95,attempted) || effective===requested)
+      return {ok:false,reason:'aps2_starlight_virtual_aurora_fallback_invalid'};
+    const params={entryPriceCents:price,count:Number(entry.count),entryFeeCents:Number(entry.entryFeeCents),
+      mode:String(entry.mode||''),simFeeCents:Number(settings.simFeeCents||0)};
+    const original=calculateAuroraSnapshotFromFeeModel({...params,damageControlPercent:requested});
+    const retried=calculateAuroraSnapshotFromFeeModel({...params,damageControlPercent:attempted});
+    if(original.ok||original.reason!=='fee_budget_exhausts_aurora_loss_envelope'
+      || !retried.ok || retried.damageControlPercent!==effective
+      || retried.dangerPriceCents!==Number(aurora.dangerPriceCents)
+      || retried.stopDistanceCents!==Number(aurora.stopDistanceCents))
+      return {ok:false,reason:'aps2_starlight_virtual_aurora_fallback_unproven'};
+  }else if(effective!==requested || aurora.virtualRecoveryPolicy!=null
+    || aurora.virtualRecoveryRequestedPercent!=null || aurora.virtualRecoveryAttemptedPercent!=null){
+    return {ok:false,reason:'aps2_starlight_independent_aurora_required'};
+  }
+  return {ok:true,link:isLink,auroraRequestedPercent:requested,auroraEffectivePercent:effective};
+}
+
 const scopeArgs=s=>[s.systemName,s.ownerId,s.mode,s.resetEpoch];
 const same=(a,b)=>String(a??'')===String(b??'');
 export async function admitShadowStarlight(store,entry,scope,client,settings){
@@ -55,11 +95,8 @@ export async function admitShadowStarlight(store,entry,scope,client,settings){
     and execution_class='SHADOW_SAINT'`,[...scopeArgs(scope),entry.sourceTradeId]);
   if(seats.rows.length>=groupMaximum||seats.rows.some(r=>Number(r.entry_config?.starlightShadow?.seat)===stamp.seat))
     throw new Error('aps2_starlight_parent_seat_used');
-  const minimum=Number(settings.crashRecoveryMinEntryCents),maximumPrice=Number(settings.crashRecoveryMaxEntryCents);
-  const stop=Number(watch.stopPriceCents);
-  if(!(minimum>0&&maximumPrice>=minimum&&maximumPrice<100)||stop<minimum||stop>maximumPrice
-    ||entry.entryPriceCents<minimum||entry.entryPriceCents>maximumPrice)
-    throw new Error('aps2_starlight_band_changed');
+  const admission=starlightAdmissionPolicy({settings,watch,entry,snapshot,aurora:config.aurora});
+  if(!admission.ok)throw new Error(admission.reason);
   if(!(Number(settings.crashRecoveryStakeCents)>0)
     ||entry.count*entry.entryPriceCents>Number(settings.crashRecoveryStakeCents)+1e-8)
     throw new Error('aps2_starlight_reference_stake_exceeded');
@@ -69,10 +106,7 @@ export async function admitShadowStarlight(store,entry,scope,client,settings){
     watch:{...watch,revision:Number(row.revision),status:row.status},quote:witness?.quote,
     stamp:snapshot.athenaTrigger,requireStamp:true});
   if(!rise.ok)throw new Error(rise.reason);
-  if(snapshot.link===true&&!rise.enabled&&Number(witness.averagePriceCents)>stop)
-    throw new Error('aps2_starlight_link_price_exceeds_stop');
   if(config.freezingCoffin?.enabled===true||config.aurora?.frozen!==true||config.aurora?.ok!==true
-    ||Number(config.aurora.damageControlPercent)!==Number(settings.crashRecoveryHunterAuroraDamageControlPercent)
     ||config.aurora.mode!==entry.mode||Number(config.aurora.entryPriceCents)!==entry.entryPriceCents
     ||Number(config.aurora.originalContractCount)!==entry.count)
     throw new Error('aps2_starlight_independent_aurora_required');
@@ -123,7 +157,7 @@ begin
  select * into proof from sag_shadow_stops_v3 where parent_entry_id=NEW.source_trade_id;
  if parent.id is null or parent.execution_class is distinct from 'SHADOW_SAINT' or parent.archived
   or parent.status is distinct from 'closed' or parent.close_reason is distinct from 'hard_stop_loss'
-  or parent.pnl_cents>=0 or parent.remaining_count<>0 or parent.concept_name in ('Crash Recovery Hunter','Lightning Plasma')
+  or parent.pnl_cents>=0 or parent.remaining_count<>0 or parent.concept_name is distinct from 'Athena Exclamation'
   or parent.system_name is distinct from NEW.system_name or parent.owner_id is distinct from NEW.owner_id
   or parent.mode is distinct from NEW.mode or parent.shadow_epoch is distinct from NEW.shadow_epoch
   or parent.ticker is distinct from NEW.ticker or parent.event_ticker is distinct from NEW.event_ticker
@@ -158,8 +192,16 @@ begin
   and entry_config#>>'{starlightShadow,seat}'=stamp->>'seat') then raise exception 'aps2_starlight_seat_consumed';end if;
  quote:=NEW.entry_config#>'{shadowSaint,entryExecution,quote}';at_ms:=(extract(epoch from clock_timestamp())*1000)::bigint;
  aurora:=NEW.entry_config->'aurora';
- if not coalesce(NEW.entry_price_cents between (cfg->>'crashRecoveryMinEntryCents')::numeric and (cfg->>'crashRecoveryMaxEntryCents')::numeric
-  and (w.watch->>'stopPriceCents')::numeric between (cfg->>'crashRecoveryMinEntryCents')::numeric and (cfg->>'crashRecoveryMaxEntryCents')::numeric
+ if not coalesce(
+  ( (rec->>'link'='true' and w.watch->>'link'='true' and cfg->>'crashRecoveryHunterLinkEnabled'='true')
+    or (coalesce(rec->>'link','false')='false' and coalesce(w.watch->>'link','false')='false'
+       and NEW.entry_price_cents between (cfg->>'crashRecoveryMinEntryCents')::numeric and (cfg->>'crashRecoveryMaxEntryCents')::numeric
+       and (w.watch->>'stopPriceCents')::numeric between (cfg->>'crashRecoveryMinEntryCents')::numeric and (cfg->>'crashRecoveryMaxEntryCents')::numeric))
+  and (cfg->>'crashRecoveryMinEntryCents')::numeric>0
+  and (cfg->>'crashRecoveryMaxEntryCents')::numeric>=(cfg->>'crashRecoveryMinEntryCents')::numeric
+  and (cfg->>'crashRecoveryMaxEntryCents')::numeric<100
+  and (w.watch->>'stopPriceCents')::numeric between 1 and 99
+  and NEW.entry_price_cents between 1 and 99
   and NEW.entry_price_cents*NEW.count<=(cfg->>'crashRecoveryStakeCents')::numeric
   and quote->>'ticker'=NEW.ticker and quote->>'eventTicker'=NEW.event_ticker and quote->>'status'='active'
   and coalesce(quote->>'result','')='' and coalesce(quote->>'bookInvalid','false')<>'true'
@@ -168,7 +210,16 @@ begin
   and aurora->>'frozen'='true' and aurora->>'ok'='true' and aurora->>'mode'=NEW.mode
   and (aurora->>'entryPriceCents')::numeric=NEW.entry_price_cents
   and (aurora->>'originalContractCount')::int=NEW.count
-  and (aurora->>'damageControlPercent')::numeric=(cfg->>'crashRecoveryHunterAuroraDamageControlPercent')::numeric
+  and ((coalesce(aurora->>'virtualRecoveryEnvelope','false')='false'
+        and (aurora->>'damageControlPercent')::numeric=(cfg->>'crashRecoveryHunterAuroraDamageControlPercent')::numeric
+        and aurora->>'virtualRecoveryPolicy' is null and aurora->>'virtualRecoveryRequestedPercent' is null
+        and aurora->>'virtualRecoveryAttemptedPercent' is null)
+      or (aurora->>'virtualRecoveryEnvelope'='true'
+        and aurora->>'virtualRecoveryPolicy'='FEE_ENVELOPE_ONLY'
+        and (aurora->>'virtualRecoveryRequestedPercent')::numeric=(cfg->>'crashRecoveryHunterAuroraDamageControlPercent')::numeric
+        and (aurora->>'virtualRecoveryAttemptedPercent')::numeric in (20,45,99)
+        and (aurora->>'damageControlPercent')::numeric=least(95,(aurora->>'virtualRecoveryAttemptedPercent')::numeric)
+        and (aurora->>'damageControlPercent')::numeric<>(cfg->>'crashRecoveryHunterAuroraDamageControlPercent')::numeric))
   and coalesce(NEW.entry_config#>>'{freezingCoffin,enabled}','false')<>'true',false)
  then raise exception 'aps2_starlight_execution_evidence_invalid';end if;
  return NEW;

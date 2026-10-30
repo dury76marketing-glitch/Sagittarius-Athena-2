@@ -1,3 +1,4 @@
+import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
 import {LatestStateWriter,deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { observationOrder } from './authority.mjs';
 import { randomUUID } from 'node:crypto';
@@ -1189,7 +1190,7 @@ export class LearningEngine {
     const originalCount=Math.max(1,n(entry.count));
     const trackedCount=Math.max(1,n(entry.remainingCount,originalCount));
     const feePerContract=n(entry?.entryConfig?.simFeeCents,2);
-    const totalEntryFee=n(entry.entryFeeCents)>0?n(entry.entryFeeCents):feePerContract*originalCount;
+    const totalEntryFee=n(entry.entryFeeCents)>0||hasKnownZeroLiveEntryFee(entry)?n(entry.entryFeeCents):feePerContract*originalCount;
     const allocatedEntryFee=totalEntryFee*(trackedCount/originalCount);
     const baseRealizedPnlCents=n(entry.pnlCents);
     const trigger=n(triggerPriceCents,n(entry.currentPriceCents));

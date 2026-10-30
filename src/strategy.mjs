@@ -1406,22 +1406,60 @@ export class StrategyEngine {
     this.pruneLiveBrokerHardRejects();
   }
 
+  async persistPendingEntryResult(entry,patch){
+    try{
+      await this.db.updateEntry(entry.id,patch,null,entry);
+      return {applied:true,entry:{...entry,...patch}};
+    }catch(error){
+      if(String(error?.message||'')!=='sag_entry_receipt_concurrent_change')throw error;
+      await this.audit('entry_receipt_concurrent_change',{id:entry.id,ticker:entry.ticker,
+        clientOrderId:entry.entryClientOrderId,orderId:entry.entryOrderId||null},'warning');
+      // Never overwrite a newer receipt or discard its owned exposure.
+      const current=await this.db.entryById(entry.id);
+      if(!current)throw new Error('entry_receipt_conflict_current_row_missing');
+      return {applied:false,entry:current};
+    }
+  }
+
+  async rejectUndispatchedLightningEntry(entry,reason,entryConfig=entry.entryConfig){
+    let released;
+    try{
+      if(typeof this.db.rejectUndispatchedLightningIntent!=='function')throw new Error('lp_safe_intent_release_unavailable');
+      released=await this.db.rejectUndispatchedLightningIntent(entry,reason,entryConfig);
+    }catch(error){
+      await this.audit('lp_intent_release_pending_reconciliation',{id:entry.id,ticker:entry.ticker,
+        reason,message:String(error?.message||error)},'warning');
+      return entry;
+    }
+    if(released.rejected)return null;
+    await this.audit('lp_intent_release_changed_pending_reconciliation',{id:entry.id,ticker:entry.ticker,
+      reason,status:released.entry?.status||null,orderId:released.entry?.entryOrderId||null},'warning');
+    return released.entry||entry;
+  }
+
   async simulationAvailableCashCents(entriesOverride = null) {
     const s = this.getSettings();
     // HF5: callers that already loaded the ledger (dashboard/state collection)
     // may reuse it. Entry authorization still calls this without an override and
     // therefore performs its own fresh durable read before spending capital.
-    if(!Array.isArray(entriesOverride)&&typeof this.db?.simulationCashAggregate==='function'){const a=await this.db.simulationCashAggregate(s.systemName,{simFeeCents:Number(s.simFeeCents||0)});return Number(s.startingCapitalCents||0)+Number(a.realizedCents||0)-Number(a.reservedCents||0);}
+    if(!Array.isArray(entriesOverride)&&typeof this.db?.simulationCashAggregate==='function'){
+      const a=await this.db.simulationCashAggregate(s.systemName,{simFeeCents:Number(s.simFeeCents||0),
+        ownerId:s.ownerId,realizedSinceMs:Number(s.resetTimestampMs||0)});
+      return Number(s.startingCapitalCents||0)+Number(a.realizedCents||0)-Number(a.reservedCents||0);
+    }
     const entries = Array.isArray(entriesOverride) ? entriesOverride : await this.db.entries(s.systemName, { limit: 5000 });
-    const hunters = entries.filter((e) => e.mode === 'SIMULATION' && !isShadowSaintEntry(e) && PORTFOLIO_CONCEPTS.has(e.conceptName));
+    const hunters = entries.filter((e) => e.mode === 'SIMULATION' && e.archived!==true
+      && String(e.systemName)===String(s.systemName) && String(e.ownerId)===String(s.ownerId)
+      && !isShadowSaintEntry(e) && PORTFOLIO_CONCEPTS.has(e.conceptName));
     const fee = Number(s.simFeeCents || 0);
     let realized = 0;
     let reserved = 0;
     for (const e of hunters) {
-      realized += Number(e.pnlCents || 0);
+      if(!Number(s.resetTimestampMs||0)||Number(e.openedAtMs)>=Number(s.resetTimestampMs))
+        realized += Number(e.pnlCents || 0);
       if (!openLike(e.status)) continue;
       const originalCount = Math.max(0, Number(e.count || 0));
-      const remaining = Math.max(0, Number(e.remainingCount || originalCount));
+      const remaining = Math.max(0, Number(e.remainingCount ?? originalCount));
       const storedEntryFee = Number(e.entryFeeCents || 0);
       const totalEntryFee = storedEntryFee > 0 ? storedEntryFee : fee * originalCount;
       const remainingEntryFee = originalCount > 0 ? totalEntryFee * (remaining / originalCount) : 0;
@@ -2053,8 +2091,20 @@ export class StrategyEngine {
       : {kind:'SIM_PER_CONTRACT',simFeeCents:Math.max(0,Number(s.simFeeCents||0))};
     const entryFeeCents=feeModel.kind==='SIM_PER_CONTRACT'?feeModel.simFeeCents*count
       : kalshiGeneralTakerFeeEstimateCents({count,priceCents:entry});
-    const aurora=calculateAuroraSnapshotFromFeeModel({entryPriceCents:entry,count,entryFeeCents,
-      mode:s.mode,simFeeCents:Number(s.simFeeCents||0),damageControlPercent:auroraPercentFor(s,concept),calculatedAtMs:now});
+    const requestedAuroraPercent=auroraPercentFor(s,concept);
+    let aurora=calculateAuroraSnapshotFromFeeModel({entryPriceCents:entry,count,entryFeeCents,
+      mode:s.mode,simFeeCents:Number(s.simFeeCents||0),damageControlPercent:requestedAuroraPercent,calculatedAtMs:now});
+    // Virtual-only fee-budget recovery: audit attempted and effective Aurora.
+    // Capital Lightning/Great Horn never use this fallback.
+    if(!aurora.ok && aurora.reason==='fee_budget_exhausts_aurora_loss_envelope' && concept==='Crash Recovery Hunter'){
+      for(const percent of [20,45,99]){
+        const retry=calculateAuroraSnapshotFromFeeModel({entryPriceCents:entry,count,entryFeeCents,
+          mode:s.mode,simFeeCents:Number(s.simFeeCents||0),damageControlPercent:percent,calculatedAtMs:now});
+        if(retry.ok){aurora={...retry,virtualRecoveryEnvelope:true,
+          virtualRecoveryPolicy:'FEE_ENVELOPE_ONLY',virtualRecoveryRequestedPercent:requestedAuroraPercent,
+          virtualRecoveryAttemptedPercent:percent};break;}
+      }
+    }
     if(!aurora.ok){trace('SHADOW_SAINT','BLOCKED',aurora.reason);return null;}
     const coffin=applyFreezingCoffin({...structuredClone(frozenEntryConfig),aurora},s,entry,now,concept);
     if(coffin.rejected){trace('SHADOW_SAINT','BLOCKED',coffin.rejected.reason);return null;}
@@ -2120,6 +2170,10 @@ export class StrategyEngine {
 
   async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, ci1SourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, ci1FireCommand = null, liveWatch = null, legacyCompatibility = false, stackSeat = false, stackIndex = 1, stackParentId = null, observationRelease = false, starlightRecovery = false, starlightRecoverySnapshot = null, lightningPlasmaScaleIn = false, parentStarlightId = null, shadowAdmissionBatch = null } = {}) {
     const s = structuredClone(this.getSettings());
+    if(concept==='Momentum Hunter' || concept==='Great Horn Recovery' || concept==='Crystal Wall Recovery'){
+      await this.audit('gh1_legacy_or_unverified_entry_denied',{concept,ticker:q?.ticker||null,reason:'gh1_capital_authorization_not_certified'});
+      return null;
+    }
     if(starlightRecovery===true && concept!=='Crash Recovery Hunter'){
       await this.audit('starlight_recovery_authority_invalid',{concept,ticker:q?.ticker||null,reason:'recovery_authority_restricted_to_starlight'});
       return null;
@@ -2160,10 +2214,12 @@ export class StrategyEngine {
           claimSettingsCommitRevision:claimedBand.settingsCommitRevision??null});
         return null;
       }
-      if(!Number.isFinite(minEntry)||!Number.isFinite(maxEntry)||minEntry>maxEntry||stop<minEntry||stop>maxEntry){
-        await this.audit('starlight_link_blocked',{ticker:q?.ticker||null,reason:'link_stop_outside_band',stopPriceCents:stop,minEntryCents:minEntry,maxEntryCents:maxEntry});
+      if(!Number.isFinite(minEntry)||!Number.isFinite(maxEntry)||minEntry<1||maxEntry>99||minEntry>maxEntry){
+        await this.audit('starlight_link_blocked',{ticker:q?.ticker||null,reason:'link_band_unusable',stopPriceCents:stop,minEntryCents:minEntry,maxEntryCents:maxEntry});
         return null;
       }
+      // Stop authenticates the parent loss. Link executes at a FRESH ask;
+      // this price is not required to match the stop or operator entry band.
       // The parent stop is an authorization/limit, NEVER a replacement market quote.
     }
     const cardIdentity=(card)=>JSON.stringify(['mode','systemName','ownerId','resetTimestampMs','andromedaThunderWaveLevel',...EDITABLE_NUMERIC_SETTINGS,...EDITABLE_BOOLEAN_SETTINGS].map(k=>[k,card[k]]));
@@ -2532,19 +2588,9 @@ export class StrategyEngine {
         if(linkEntry){
           const stop=Number(starlightRecoverySnapshot.stopPriceCents);
           if(!(stop>0)||stop>100){trace('STARLIGHT_LINK','BLOCKED','stop_price_invalid');return null;}
-          // Legacy Link uses the stop as a ceiling. A positive Athena rise
-          // uses current executable liquidity inside the same operator band.
-          const boundary=hunterEntryBoundaryQualifiedAtQuote(concept,executionQuote,s,plan);
-          if(!boundary.ok){
-            trace('STARLIGHT_LINK','BLOCKED',boundary.reason||'entry_band');return null;
-          }
-          if(!rise.enabled && (Number(plan.averagePriceCents)>stop+1e-9 || Number(plan.bestAskCents)>stop+1e-9)){
-            // RCV3: a passing band check says "qualified"; it is not the
-            // reason for rejecting a quote above the original stop ceiling.
-            trace('STARLIGHT_LINK','BLOCKED','no_executable_ask_at_parent_stop',{
-              stopPriceCents:stop,averagePriceCents:Number(plan.averagePriceCents),bestAskCents:Number(plan.bestAskCents)});return null;
-          }
-          trace('STARLIGHT_LINK','PASS',rise.enabled?'athena_rise_at_current_executable_price':'executable_within_parent_stop_limit',{stopPriceCents:stop,actualAsk:executionQuote.yesAsk,athenaTrigger:rise});
+          // Link ON: current executable ask, not a price cap tied to the stop.
+          // The ordinary full book/size/spread/stake/Aurora checks remain below.
+          trace('STARLIGHT_LINK','PASS','verified_athena_stop_current_executable_ask',{stopPriceCents:stop,actualAsk:executionQuote.yesAsk,athenaTrigger:rise});
         }else{
           const liveSignal=starlightRecoverySignalState(live,executionQuote,s,Date.now());
           if(!liveSignal.qualified){trace('STARLIGHT_RECOVERY','BLOCKED',liveSignal.reason);return null;}
@@ -2705,11 +2751,12 @@ export class StrategyEngine {
           if(!rise.ok)return rise;
           if(starlightRecoverySnapshot?.link===true && currentSettings.crashRecoveryHunterLinkEnabled===true){
             const stop=Number(starlightRecoverySnapshot.stopPriceCents);
-            if(!(stop>0)||(!rise.enabled&&(Number(quote.yesAsk)>stop+1e-9||Number(plan.averagePriceCents)>stop+1e-9))
-              ||!hunterEntryBoundaryQualifiedAtQuote(concept,quote,currentSettings,plan).ok
-              ||(rise.enabled && Number(quote.yesAsk)>Number(q.yesAsk)))
+            // Fresh quote must not deteriorate above the executable plan.
+            // No stop-price ceiling or ordinary Starlight price band on Link.
+            if(!(stop>0)||stop>100 || !(Number(quote.yesAsk)>0)
+              ||Number(quote.yesAsk)>Number(plan.bestAskCents)+1e-9)
               return {ok:false,reason:'starlight_link_execution_price_changed'};
-            return {ok:true,atMs:at,route:rise.enabled?'starlight_athena_original_entry_rise':'starlight_link_stop_price',
+            return {ok:true,atMs:at,route:'starlight_link_current_executable_ask',
               stopPriceCents:stop,...(rise.enabled?{athenaTrigger:rise.stamp}:{})};
           }
           const signal=starlightRecoverySignalState(live,quote,currentSettings,at);
@@ -3040,20 +3087,17 @@ export class StrategyEngine {
       if(typeof this.db.acquireHunterTickerLock==='function'){
         brokerMutationUnlock=await this.db.acquireHunterTickerLock(s.systemName,`broker:${q.ticker}`);
         if(!brokerMutationUnlock){
-          const patch={status:'rejected',remainingCount:0,closeReason:'broker_mutation_lock_busy',updatedAtMs:Date.now()};
-          await this.db.updateEntry(id,patch);e={...e,...patch};
           await this.audit('live_broker_mutation_ticker_db_lock_busy',{id,ticker:q.ticker,concept,operation:'entry'},'warning');
           trace('EXECUTION','BLOCKED','ticker_broker_mutation_lock_busy',{hunterId:id});
-          return null;
+          return this.rejectUndispatchedLightningEntry(e,'broker_mutation_lock_busy');
         }
       }
       let result,submissionAttempted=false;
       try{
         const confirmation=finalConfirmation();recordFinalConfirmation(confirmation);
         if(!confirmation.ok){
-          const patch={status:'rejected',remainingCount:0,closeReason:'confirmation_invalidated_before_submit',entryConfig:{...pendingConfig,finalEntryConfirmation:confirmation},updatedAtMs:Date.now()};
-          await this.db.updateEntry(id,patch);
-          return null;
+          return await this.rejectUndispatchedLightningEntry(e,'confirmation_invalidated_before_submit',
+            {...pendingConfig,finalEntryConfirmation:confirmation});
         }
         frozenEntryConfig.finalEntryConfirmation=structuredClone(confirmation);
         if(this.db.shadowArchitectureRequired===true){
@@ -3061,8 +3105,8 @@ export class StrategyEngine {
             ? await this.db.verifyLightningPlasmaScaleInIntent(e)
             : await this.db.verifyStarlightBrokerIntent(e,{quote:this.market?.getQuote?.(exactTicker)});
           if(!durable.ok){
-            await this.db.updateEntry(id,{status:'rejected',remainingCount:0,closeReason:durable.reason,updatedAtMs:Date.now()});
-            trace('EXECUTION','BLOCKED',durable.reason);return null;
+            trace('EXECUTION','BLOCKED',durable.reason);
+            return await this.rejectUndispatchedLightningEntry(e,durable.reason);
           }
         }
         if(concept!=='Lightning Plasma'||isShadowSaintEntry(e)||!e?.entryConfig?.lightningPlasmaScaleIn)throw new Error('aps2_only_lightning_broker_entry_authorized');
@@ -3071,12 +3115,25 @@ export class StrategyEngine {
         if(scaleInCapital || (starlightRecovery===true && (starlightRecoverySnapshot?.athenaTrigger || athenaStarlightTriggerConfig(this.getSettings(),starlightRecoverySnapshot?.parentConcept).enabled))){
           const last=finalConfirmation();recordFinalConfirmation(last);
           if(!last.ok){
-            await this.db.updateEntry(id,{status:'rejected',remainingCount:0,closeReason:last.reason,updatedAtMs:Date.now()});
-            trace('EXECUTION','BLOCKED',last.reason);return null;
+            trace('EXECUTION','BLOCKED',last.reason);
+            return await this.rejectUndispatchedLightningEntry(e,last.reason);
           }
         }
         submissionAttempted=true;
-        result=await this.kalshi.placeOrder({ticker:q.ticker,action:'buy',count:plannedCount,priceCents:q.yesAsk,clientOrderId:entryClientOrderId,exchangeIndex:shardPreflight.exchangeIndex,timeInForce:fullConfiguredSizeRequired?'fill_or_kill':'immediate_or_cancel'});
+        result=await this.kalshi.placeOrder({ticker:q.ticker,action:'buy',count:plannedCount,priceCents:q.yesAsk,clientOrderId:entryClientOrderId,exchangeIndex:shardPreflight.exchangeIndex,timeInForce:fullConfiguredSizeRequired?'fill_or_kill':'immediate_or_cancel'},{
+          // HC2-R1: the bounded broker lane can wait AFTER all checks above.
+          // Keep the original durable intent and ticker lock while waiting;
+          // re-check the SAME authority only when this request may dispatch.
+          beforeDispatch:async()=>{
+            const current=finalConfirmation();recordFinalConfirmation(current);
+            if(!current.ok)return current;
+            if(this.db.shadowArchitectureRequired===true){
+              return this.db.verifyLightningPlasmaScaleInIntent(e);
+            }
+            return {ok:true};
+          },
+          confirmDispatch:()=>{const current=finalConfirmation();recordFinalConfirmation(current);return current;},
+        });
       }catch(error){
         if(!submissionAttempted)throw error;
         await this.audit('live_entry_submit_exception_pending_reconciliation',{id,ticker:q.ticker,concept,clientOrderId:entryClientOrderId,message:String(error?.message||error)},'warning');
@@ -3088,6 +3145,16 @@ export class StrategyEngine {
         }
       }
       const entryOrderId=result?.orderId||null;
+      if(result?.notSubmitted===true){
+        // Unlike a network timeout, this rejection is produced by the LOCAL
+        // dispatch boundary before any BUY was sent. It can safely release a
+        // no-fill intent, and must not poison broker hard-reject suppression.
+        const reason=String(result.localRejectionReason||'dispatch_not_authorized');
+        const dispatchProof={version:'HC2-R1-DISPATCH',submitted:false,reason,atMs:Date.now()};
+        trace('EXECUTION','BLOCKED',reason,{hunterId:id,submitted:false});
+        await this.audit('live_entry_dispatch_refused',{id,concept,ticker:q.ticker,clientOrderId:entryClientOrderId,reason});
+        return this.rejectUndispatchedLightningEntry(e,'live_entry_not_dispatched',{...pendingConfig,dispatchProof});
+      }
       // R12: an immediate LIVE BUY response can precede complete fills history.
       // When an authoritative order inspector is available, do not promote a
       // planned-size intent into confirmed inventory from an unverified POST.
@@ -3097,7 +3164,7 @@ export class StrategyEngine {
           .catch(()=>({found:false,authoritative:false,order:null}));
         if (!inspected?.authoritative || !inspected.order) {
           const patch={entryOrderId,status:'entry_pending',updatedAtMs:Date.now()};
-          await this.db.updateEntry(id,patch);e={...e,...patch};
+          const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;e=saved.entry;
           await this.audit('live_entry_immediate_fill_awaiting_verification',
             {id,ticker:q.ticker,concept,clientOrderId:entryClientOrderId,orderId:entryOrderId,
               reportedFillCount:result?.fillCount??null,reason:inspected?.reason||'broker_truth_incomplete'},'warning');
@@ -3109,7 +3176,7 @@ export class StrategyEngine {
         // No exact order ID means neither the POST response nor a negative
         // list query can release this durable intent without exposure risk.
         const patch={entryOrderId,status:'entry_pending',updatedAtMs:Date.now()};
-        await this.db.updateEntry(id,patch);e={...e,...patch};
+        const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;e=saved.entry;
         await this.audit('live_entry_missing_order_id_awaiting_reconciliation',
           {id,ticker:q.ticker,concept,clientOrderId:entryClientOrderId,reportedFillCount:result?.fillCount??null},'warning');
         return e;
@@ -3117,8 +3184,9 @@ export class StrategyEngine {
       const liveClass=classifyLiveOrderResult(result);
       if(liveClass.kind==='fill'||Number(result?.fillCount)>0){
         const count=Number(result.fillCount);
-        const entry=Math.round(Number(result.averageFillPriceCents ?? q.yesAsk));
+        const entry=Number(result.averageFillPriceCents ?? q.yesAsk);
         const entryFeeCents=Number.isFinite(Number(result.feePaidCents))?Number(result.feePaidCents):Number(auroraPreflight.entryFeeCents||0);
+        const entryFillProof={version:'ENTRY-FILL-REPORT-V1',authoritative:true,filledCount:count,averageFillPriceCents:entry,feePaidCents:entryFeeCents,orderId:entryOrderId,clientOrderId:entryClientOrderId,observedAtMs:Date.now()};
         let aurora=calculateAuroraSnapshotFromFeeModel({entryPriceCents:entry,count,entryFeeCents,mode:'LIVE',simFeeCents:simFeePerContract,damageControlPercent:auroraPercentFor(s,concept),calculatedAtMs:Date.now()});
         if(!aurora.ok){
           // The BUY is already durably owned. If the actual fill/fee economics
@@ -3126,10 +3194,10 @@ export class StrategyEngine {
           // fabricate a stop snapshot. Persist the fault and immediately create
           // a durable full-position flattening obligation. U-SG1/protection
           // then retries safe execution until the owned quantity is closed.
-          const config={...frozenEntryConfig,auroraFault:{version:AURORA_EXECUTION.version,policyRevision:AURORA_EXECUTION.policyRevision,reason:aurora.reason||'exact_fill_fee_overrun',unprotectable:true,detectedAtMs:Date.now()}};
+          const config={...frozenEntryConfig,entryFillProof,auroraFault:{version:AURORA_EXECUTION.version,policyRevision:AURORA_EXECUTION.policyRevision,reason:aurora.reason||'exact_fill_fee_overrun',unprotectable:true,detectedAtMs:Date.now()}};
           const patch={status:'exit_pending',entryPriceCents:entry,currentPriceCents:entry,peakPriceCents:entry,stopPriceCents:Math.max(0,entry-1),stopLossCents:1,count,remainingCount:count,entryFeeCents,entryOrderId,entryClientOrderId,entryConfig:config,closeReason:'aurora_covenant_fault',updatedAtMs:Date.now()};
-          await this.db.updateEntry(id,patch);
-          e={...e,...patch};
+          const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;
+          e=saved.entry;
           try{this.onHunterOpened?.(e);}catch{}
           await this.audit('aurora_live_exact_fee_covenant_unprotectable',{id,ticker:q.ticker,concept,reason:aurora.reason,entryPriceCents:entry,count,entryFeeCents},'error');
           trace('AURORA','BLOCKED','live_exact_fee_covenant_unprotectable',{hunterId:id});
@@ -3140,20 +3208,20 @@ export class StrategyEngine {
           // R11: The broker has ALREADY filled real contracts. Never return
           // without replacing the original planned-size entry_pending row by
           // the actual filled exposure and a durable protection obligation.
-          const config={...frozenEntryConfig,aurora,freezingCoffinFault:{version:'R11-COFFIN-FILL-FAULT',reason:coffin.rejected.reason,detectedAtMs:Date.now()}};
+          const config={...frozenEntryConfig,entryFillProof,aurora,freezingCoffinFault:{version:'R11-COFFIN-FILL-FAULT',reason:coffin.rejected.reason,detectedAtMs:Date.now()}};
           const patch={status:'exit_pending',closeReason:'freezing_coffin_covenant_fault',entryPriceCents:entry,currentPriceCents:entry,peakPriceCents:entry,
             stopPriceCents:Math.max(0,entry-1),stopLossCents:1,count,remainingCount:count,entryFeeCents,entryOrderId,entryClientOrderId,entryConfig:config,updatedAtMs:Date.now()};
-          await this.db.updateEntry(id,patch);e={...e,...patch};
+          const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;e=saved.entry;
           try{this.onHunterOpened?.(e);}catch{}
           await this.audit('freezing_coffin_postfill_protection_committed',{id,ticker:q.ticker,concept,reason:coffin.rejected.reason,filledCount:count},'error');
           return e;
         }
-        const config={...coffin.config,entryFillProof:{version:'ENTRY-FILL-REPORT-V1',authoritative:true,filledCount:count,orderId:entryOrderId,clientOrderId:entryClientOrderId,observedAtMs:Date.now()}};
+        const config={...coffin.config,entryFillProof};
         const stop=coffin.stop||aurora;
         const nonterminalBuy=['resting','pending','active','open','accepted'].includes(String(result?.status||'').toLowerCase());
         const patch={status:nonterminalBuy?'entry_pending':'open',entryPriceCents:entry,currentPriceCents:entry,peakPriceCents:entry,stopPriceCents:stop.dangerPriceCents,stopLossCents:stop.stopDistanceCents,count,remainingCount:count,entryFeeCents,entryOrderId,entryClientOrderId,entryConfig:config,updatedAtMs:Date.now()};
-        await this.db.updateEntry(id,patch);
-        e={...e,...patch};
+        const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;
+        e=saved.entry;
         if(nonterminalBuy){
           await this.audit('live_entry_nonterminal_partial_held',{id,ticker:q.ticker,concept,orderId:entryOrderId,confirmedFillCount:count},'warning');
           trace('EXECUTION','PASS','live_partial_pending_terminal_broker_status',{orderId:entryOrderId,count});
@@ -3166,18 +3234,20 @@ export class StrategyEngine {
       }
       if(liveClass.kind==='ambiguous'||result?.ambiguous){
         const patch={entryOrderId,status:'entry_pending',entryConfig:{...pendingConfig,finalEntryConfirmation:frozenEntryConfig.finalEntryConfirmation||pendingConfig.finalEntryConfirmation||null},updatedAtMs:Date.now()};
-        await this.db.updateEntry(id,patch);e={...e,...patch};
+        const saved=await this.persistPendingEntryResult(e,patch);if(!saved.applied)return saved.entry;e=saved.entry;
         trace('EXECUTION','PASS','live_ambiguous_pending',{orderId:entryOrderId,hunterId:id});
         return e;
       }
       if(liveClass.kind==='rejected'){
-        await this.db.updateEntry(id,{status:'rejected',remainingCount:0,entryOrderId,closeReason:liveClass.reason,updatedAtMs:Date.now()});
+        const saved=await this.persistPendingEntryResult(e,{status:'rejected',remainingCount:0,entryOrderId,closeReason:liveClass.reason,updatedAtMs:Date.now()});
+        if(!saved.applied)return saved.entry;
         this.rememberLiveBrokerHardReject(concept,q.ticker,boltId,{httpStatus:result?.httpStatus||null,brokerErrorCode:result?.brokerErrorCode||null,exchangeIndex:shardPreflight.exchangeIndex});
         trace('EXECUTION','BLOCKED',liveClass.reason,{orderId:entryOrderId,httpStatus:result?.httpStatus||null,brokerErrorCode:result?.brokerErrorCode||null,exchangeIndex:shardPreflight.exchangeIndex});
         await this.audit('live_entry_broker_rejected',{id,concept,ticker:q.ticker,orderId:entryOrderId,count:plannedCount,limitCents:q.yesAsk,reason:liveClass.reason,httpStatus:result?.httpStatus||null,brokerError:result?.brokerError||null,brokerErrorCode:result?.brokerErrorCode||null,brokerErrorDetails:result?.brokerErrorDetails??null,exchangeIndex:shardPreflight.exchangeIndex},'warning');
         return null;
       }
-      await this.db.updateEntry(id,{status:'rejected',remainingCount:0,entryOrderId,closeReason:'entry_ioc_unfilled',updatedAtMs:Date.now()});
+      const saved=await this.persistPendingEntryResult(e,{status:'rejected',remainingCount:0,entryOrderId,closeReason:'entry_ioc_unfilled',updatedAtMs:Date.now()});
+      if(!saved.applied)return saved.entry;
       trace('EXECUTION','BLOCKED','live_ioc_unfilled',{orderId:entryOrderId});
       await this.audit('live_entry_ioc_unfilled',{id,concept,ticker:q.ticker,orderId:entryOrderId,count:plannedCount,limitCents:q.yesAsk});
       return null;
@@ -3833,7 +3903,7 @@ export class StrategyEngine {
     const created = [];
 
     const momentum = entries.filter((e) => e.conceptName === 'Momentum Hunter');
-    if (isModelEnabled(s, 'Momentum Hunter')) for (const feeder of feeders) {
+    if (false /* GH1 retired Momentum Hunter; historical rows remain */) for (const feeder of feeders) {
       if ((feeder.peakPriceCents || feeder.entryPriceCents) - feeder.entryPriceCents < Number(s.momentumMinRiseCents ?? MOMENTUM.minRiseCents)) continue;
       if (momentum.some((e) => e.ticker === feeder.ticker && e.openedAtMs > feeder.openedAtMs)) continue;
       const q = marketMap.get(feeder.ticker);

@@ -24,7 +24,7 @@ export function isShadowSaintConcept(concept){
 }
 
 export const RETIRED_PORTFOLIO_CONCEPTS = new Set(['Dragon Recovery Hunter', 'Golden Dragon Hunter']);
-export const PORTFOLIO_CONCEPTS = new Set([...ACTIVE_PORTFOLIO_CONCEPTS, ...RETIRED_PORTFOLIO_CONCEPTS]);
+export const PORTFOLIO_CONCEPTS = new Set([...ACTIVE_PORTFOLIO_CONCEPTS, ...RETIRED_PORTFOLIO_CONCEPTS, 'Great Horn Recovery', 'Crystal Wall Recovery']);
 export const ACTIVE_FEEDER_CONCEPTS = new Set(['Pegasus', 'Dragon', 'Phoenix']);
 export const RETIRED_FEEDER_CONCEPTS = new Set(['Sagittarius', 'Golden Dragon']);
 export const FEEDER_CONCEPTS = new Set([...ACTIVE_FEEDER_CONCEPTS, ...RETIRED_FEEDER_CONCEPTS]);
@@ -43,7 +43,9 @@ export const EXECUTION_ATTACK_DISPLAY = Object.freeze({
   'Wave Surfer': Object.freeze({ name:'Pegasus Ryu Sei Ken', legacy:'Wave Surfer / Wave Hunter' }),
   'Crash Recovery Hunter': Object.freeze({ name:'Starlight Extinction', legacy:'Crash Recovery Hunter' }),
   'Recovery Hunter': Object.freeze({ name:'Crystal Wall', legacy:'Recovery Hunter' }),
-  'Momentum Hunter': Object.freeze({ name:'Great Horn', legacy:'Momentum Hunter' }),
+  'Momentum Hunter': Object.freeze({ name:'Great Horn (legacy)', legacy:'Momentum Hunter' }),
+  'Great Horn Recovery': Object.freeze({ name:'Great Horn', legacy:'GH1 / Lightning loss recovery' }),
+  'Crystal Wall Recovery': Object.freeze({ name:'Crystal Wall Recovery', legacy:'CW1 / Great Horn loss recovery' }),
   'Lightning Plasma': Object.freeze({ name:'Lightning Plasma', legacy:'Lightning Plasma / LP1' }),
 });
 
@@ -380,11 +382,12 @@ export const LIGHTNING_PLASMA_SCALEIN = Object.freeze({
   maxThresholdCents:50,
 });
 
-// Recovery policy: LP losses are terminal for the Starlight handoff, in
-// both the old virtual Saint and the new real scale-in. This does NOT alter
-// the other original shadow Saints' eligibility or virtual execution.
+// Capital-chain doctrine: ONLY a verified virtual Athena Exclamation hard
+// stop may mint a virtual Starlight recovery watch. Other shadow Saints still
+// execute their original paper strategies; their losses cannot grant capital
+// authority indirectly through Starlight -> Lightning -> Great Horn.
 export function starlightParentLossMayArmRecovery(entry){
-  return Boolean(entry) && !['Lightning Plasma','Crash Recovery Hunter'].includes(String(entry.conceptName||''))
+  return entry?.conceptName==='Athena Exclamation'
     && entry.entryConfig?.lightningPlasmaScaleIn == null;
 }
 
