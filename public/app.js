@@ -51,13 +51,8 @@ function markFinancialSnapshotUnavailable(reason){
   }
   // Virtual reporting is a separate read-only channel, but stale shadow
   // results must not masquerade as a current verified snapshot either.
-  for(const row of document.querySelectorAll('#attackBody tr[data-shadow-attack-index]')){
-    for(const cell of row.querySelectorAll('[data-shadow-metric]')){
-      cell.textContent='Unavailable';cell.classList.add('muted');
-    }
-    const note=row.querySelector('[data-shadow-note]');
-    if(note)note.textContent='Virtual snapshot unavailable until refresh';
-  }
+  const virtualSummary=$('shadowSaintSummaryBody');
+  if(virtualSummary)virtualSummary.innerHTML='<tr><td colspan="8" class="muted">Virtual snapshot unavailable until verified refresh.</td></tr>';
   // Keep already-loaded same-scope history available for review, but label
   // it stale. A mode/reset change must never show the previous mode's rows.
   if(STATE&&capitalHistoryScope&&capitalHistoryScope!==capitalHistoryKey(STATE)){
@@ -289,13 +284,16 @@ function shadowAttackDisplayMetrics(s,a){
     pnl:money(realized),pnlClass:pnlClass(realized),
     note:`VIRTUAL ONLY · closed net ${money(realized)} · open mark ${money(unrealized)} · neither affects capital P/L`};
 }
-function renderShadowAttackRow(s,a,i){
-  const m=shadowAttackDisplayMetrics(s,a);
-  return `<tr class="shadow-attack-row" data-shadow-attack-index="${i}"><td></td>`+
-    `<td class="shadow-attack-summary"><strong>SHADOW · VIRTUAL RESULTS</strong><div data-shadow-note>${esc(m.note)}</div></td>`+
-    `<td class="muted">—</td>`+
-    ATTACK_METRIC_KEYS.map(key=>`<td data-shadow-metric="${key}"${key==='pnl'?` class="${esc(m.pnlClass)}"`:''}>${esc(m[key])}</td>`).join('')+
-    `</tr>`;
+// Virtual Shadow Saints aggregates are displayed in the dedicated research
+// section, never as additional capital/attack rows or Cosmos references.
+function renderShadowSaintSummary(s){
+  const body=$('shadowSaintSummaryBody');if(!body)return;
+  const labels=[['Athena Exclamation','Athena Exclamation'],['Crash Recovery Hunter','Starlight Extinction'],['Lightning Plasma','Lightning Plasma']];
+  body.innerHTML=labels.map(([legacy,label])=>{
+    const metrics=shadowAttackDisplayMetrics(s,{legacy});
+    const cells=ATTACK_METRIC_KEYS.map(key=>`<td${key==='pnl'?` class="${esc(metrics.pnlClass)}"`:''}>${esc(metrics[key])}</td>`).join('');
+    return `<tr><td>${esc(label)}</td>${cells}</tr>`;
+  }).join('');
 }
 function attackDisplayMetrics(s,a){
   // Athena Exclamation is intentionally SHADOW ONLY. Do not mislabel its
@@ -386,9 +384,9 @@ function renderAttacks(s){
     const enabled=s.settings?.[a.key]===true,m=attackDisplayMetrics(s,a);
     const cells=ATTACK_METRIC_KEYS.map(key=>`<td data-attack-metric="${key}"${key==='pnl'?` class="${esc(m.pnlClass)}"`:''}>${esc(m[key])}</td>`).join('');
     const cw=a.legacy==='Crystal Wall Recovery';
-    const label=i===0?'SHADOW / VIRTUAL ONLY · CAPITAL N/A':i===1?'CAPITAL STARLIGHT · SHADOW SHOWN BELOW':i===2?'CHAIN 1 · CAPITAL · SHADOW SHOWN BELOW':i<5?'CHAIN 1 · CAPITAL RECOVERY':i===5?'CHAIN 2 · CAPITAL CLONE':'CHAIN 2 · CAPITAL RECOVERY';
+    const label=i===0?'SHADOW / VIRTUAL ONLY · CAPITAL N/A':i===1?'CAPITAL STARLIGHT · VIRTUAL IN SHADOW SAINTS':i===2?'CHAIN 1 · CAPITAL · VIRTUAL IN SHADOW SAINTS':i<5?'CHAIN 1 · CAPITAL RECOVERY':i===5?'CHAIN 2 · CAPITAL CLONE':'CHAIN 2 · CAPITAL RECOVERY';
     const primary=heading+`<tr data-attack-index="${i}"${cw?' id="crystalWallRecoverySettings"':''} class="${enabled?'':'model-disabled'}${cw?' cw-recovery-row':''}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(a.name)}</div><div class="legacy-name">${esc(label)}${i>2?' · LIVE ENTRY RELEASE GATED':''}</div><div class="concept-desc">${esc(a.desc)}</div>${i===0?`<div class="shadow-inline-note" data-shadow-note>${esc(m.note)}</div>`:''}${attackControlsHtml(s,a)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(a.key)}" data-model-name="${esc(a.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td>${cells}</tr>`;
-    return primary+(SHADOW_CARD_NAMES.has(a.legacy)&&a.legacy!=='Athena Exclamation'?renderShadowAttackRow(s,a,i):'');
+    return primary;
   }).join('');
 }
 function renderAttackMetrics(s){
@@ -405,17 +403,7 @@ function renderAttackMetrics(s){
       const note=row.querySelector('[data-shadow-note]');
       if(note&&note.textContent!==m.note)note.textContent=m.note;
     }
-    if(SHADOW_CARD_NAMES.has(a.legacy)&&a.legacy!=='Athena Exclamation'){
-      const shadowRow=b.querySelector(`tr[data-shadow-attack-index="${i}"]`);
-      if(!shadowRow)continue;
-      const shadow=shadowAttackDisplayMetrics(s,a);
-      for(const key of ATTACK_METRIC_KEYS){
-        const cell=shadowRow.querySelector(`[data-shadow-metric="${key}"]`);if(!cell)continue;
-        const value=String(shadow[key]);if(cell.textContent!==value)cell.textContent=value;
-        if(key==='pnl'&&cell.className!==shadow.pnlClass)cell.className=shadow.pnlClass;
-      }
-      const note=shadowRow.querySelector('[data-shadow-note]');if(note&&note.textContent!==shadow.note)note.textContent=shadow.note;
-    }
+
   }
 }
 function renderCosmos(s){const b=$('cosmoBody');if(!b)return;b.innerHTML=COSMOS.map((c,i)=>{if(s.conceptAggregateComplete===false&&c.legacy!=='Gemini'){const enabled=s.settings?.[c.key]===true;return `<tr class="${enabled?'':'model-disabled'}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(c.name)}</div><div class="concept-desc">${esc(c.desc||'Reference intelligence for Atomic Thunder Bolt and Athena.')}</div>${cosmoControlsHtml(s,c)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(c.key)}" data-model-name="${esc(c.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td>${Array(6).fill('<td class="muted">Unavailable</td>').join('')}</tr>`;}const st=c.legacy==='Gemini'?(s.gemini||{}):statFor(s,c.legacy),enabled=s.settings?.[c.key]===true;const shadowTrades=c.legacy==='Gemini'?(st.total??0):(st.feederSignals??st.total??0);const open=st.open||0;const fed=c.legacy==='Gemini'?'-':(st.fedHunters??0);const pnl=c.legacy==='Gemini'?(st.pnlCents??0):st.pnlCents;return `<tr class="${enabled?'':'model-disabled'}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(c.name)}</div><div class="concept-desc">${esc(c.desc||'Reference intelligence for Atomic Thunder Bolt and Athena.')}</div>${cosmoControlsHtml(s,c)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(c.key)}" data-model-name="${esc(c.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td><td>${shadowTrades}</td><td>${open}</td><td>${pc(st.avgEntryCents)}</td><td>${pc(st.avgCurrentCents)}</td><td>${fed}</td><td class="${pnlClass(pnl)}">${money(pnl)}</td></tr>`;}).join('');}
@@ -1198,6 +1186,7 @@ function renderShadowDashboard(s){
       setText('shadowHistoryMessage','Historical periods selected. Refresh to load older-reset virtual records for this owner and mode.');
     }
   }
+  renderShadowSaintSummary(s);
   const d=s.shadowDiagnostics||{},worker=d.worker||{},summary=d.summary;
   const age=worker.lastSuccessAtMs?duration(Date.now()-worker.lastSuccessAtMs):'never';
   const currentCounts=summary?.classification==='VIRTUAL_ONLY'&&summary?.scope?.resetEpoch===Number(s.settings?.resetTimestampMs)

@@ -64,12 +64,9 @@
 .capital-results-table tbody tr:nth-child(even){background:#f8fafc}
 .capital-results-table tbody td{padding:9px 7px}
 
-/* R8: virtual research remains visually and financially separate from capital. */
-#attackBody tr.shadow-attack-row td{background:#f3f7ff;border-bottom:2px solid #d6e2f2;font-size:12px;vertical-align:middle}
-#attackBody tr.shadow-attack-row .shadow-attack-summary{padding:9px 11px;line-height:1.45;color:#36517a}
-#attackBody tr.shadow-attack-row .shadow-attack-summary strong{display:block;letter-spacing:.045em;font-size:11px}
-#attackBody tr.shadow-attack-row [data-shadow-note]{font-size:11px;color:#53657a;overflow-wrap:anywhere}
-#attackBody tr.shadow-attack-row [data-shadow-metric]{font-variant-numeric:tabular-nums;font-weight:600}
+/* Shadow Saints research aggregates remain separate from capital attack rows. */
+#shadowSaintSummaryBody td{font-variant-numeric:tabular-nums}
+#shadowSaintSummaryBody td:first-child{font-weight:600}
 
 /* R9: Athena is shadow-only, so virtual performance belongs to its primary attack row. */
 .shadow-inline-note{font-size:12px;color:#31537c;font-weight:600;margin-top:5px;line-height:1.35}
