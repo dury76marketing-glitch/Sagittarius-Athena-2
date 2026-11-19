@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import {env,normalizeStartupExecutionMode,sanitizeRuntimeSettings,preserveExecutionArm} from '../src/config.mjs';
-import {Q17_SIM_ONLY,Q17_DATABASE_ACK,assertQ17IsolatedDatabase,q17SimSettings,q17AssertPublicMarketRequest,q17ForbiddenLiveExecution} from '../src/q17Profile.mjs';
+import {env,RELEASE,EDITABLE_NUMERIC_SETTINGS,EDITABLE_BOOLEAN_SETTINGS,normalizeStartupExecutionMode,sanitizeRuntimeSettings,preserveExecutionArm} from '../src/config.mjs';
+import {Q17_SIM_ONLY,Q17_RELEASE,Q17_DATABASE_ACK,assertQ17IsolatedDatabase,q17SimSettings,q17AssertPublicMarketRequest,q17ForbiddenLiveExecution} from '../src/q17Profile.mjs';
 import {KalshiClient} from '../src/kalshi.mjs';
 import {SagittariusEngine} from '../src/engine.mjs';
 assert.equal(Q17_SIM_ONLY,true);
@@ -30,6 +30,52 @@ try{
 }finally{globalThis.fetch=prior;}
 await assert.rejects(()=>SagittariusEngine.prototype.setMode.call({},'LIVE','ENABLE LIVE TRADING'),/q17_sim_only_mode_immutable/);
 import {readFileSync} from 'node:fs';
+
+// Q17-R2: prevent recurrence of Plasma/Arrow-to-Starlight card mapping and
+// stale release labels. This validation reads exactly the shipped dashboard
+// and the backend's real editable-settings allowlists.
+import vm from 'node:vm';
+assert.equal(Q17_RELEASE, RELEASE, 'Q-17 product and backend release must match');
+const dashboardSource=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+const dashboardHtml=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
+assert(dashboardHtml.includes('Q-17 R3 &mdash; SIMULATION ONLY'), 'dashboard release banner must match R2');
+const attackStart=dashboardSource.indexOf('const ATTACKS=[');
+const attackEnd=dashboardSource.indexOf('\nconst COSMOS=',attackStart);
+assert(attackStart>=0&&attackEnd>attackStart,'attack-card source definitions required');
+const cards=vm.runInNewContext(dashboardSource.slice(attackStart,attackEnd)+'\nATTACKS;',{}, {timeout:5000});
+assert.equal(cards.length,8,'eight attack/recovery cards expected');
+const numericKeys=new Set(EDITABLE_NUMERIC_SETTINGS);
+const booleanKeys=new Set(EDITABLE_BOOLEAN_SETTINGS);
+const expectedAurora={
+  'Crash Recovery Hunter':'crashRecoveryHunterAuroraDamageControlPercent',
+  'Lightning Plasma':'lightningPlasmaAuroraDamageControlPercent',
+  'Great Horn Recovery':'greatHornAuroraDamageControlPercent',
+  'Crystal Wall Recovery':'crystalWallRecoveryAuroraDamageControlPercent',
+  'Sagittarius Arrow Recovery':'sagittariusArrowAuroraDamageControlPercent',
+  'Scarlet Needle Recovery':'scarletNeedleCapitalAuroraDamageControlPercent',
+  'Pegasus Ryu Sei Ken Recovery':'pegasusRyuSeiKenCapitalAuroraDamageControlPercent',
+};
+for(const card of cards){
+  const editKeys=[card.stake,card.min,card.max,card.multiply,card.rays,card.repeats,...(card.fields||[]).map(f=>f[0])].filter(Boolean);
+  for(const key of editKeys)assert(numericKeys.has(key),`${card.name}: unknown numeric setting ${key}`);
+  for(const key of [card.key,card.x1,card.real].filter(Boolean))assert(booleanKeys.has(key),`${card.name}: unknown boolean setting ${key}`);
+  if(expectedAurora[card.legacy]){
+    const auroraFields=(card.fields||[]).filter(f=>f[1]==='Aurora %');
+    assert.deepEqual(Array.from(auroraFields,f=>f[0]),[expectedAurora[card.legacy]],`${card.name}: wrong Aurora owner`);
+  }
+  if(['Lightning Plasma','Sagittarius Arrow Recovery'].includes(card.legacy)){
+    assert(!editKeys.some(k=>k.startsWith('crashRecovery')||k.startsWith('starlight')),`${card.name}: leaked Starlight card setting`);
+  }
+}
+assert(dashboardSource.includes("save.closest('tr')"),'save action must target its card row');
+assert(dashboardSource.includes("row.querySelectorAll('[data-setting-key]')"),'card saves must gather only row-local editable settings');
+const arrowSimSource=readFileSync(new URL('../src/sagittariusArrowSimCapital.mjs',import.meta.url),'utf8');
+assert(arrowSimSource.includes("structuralRole:'ATHENA_VERIFIED_SHADOW_LOSS_INDEPENDENT_RECOVERY'"),
+  'Arrow simulated capital lineage must identify its verified Athena SHADOW parent');
+assert(!arrowSimSource.includes("structuralRole:'STARLIGHT_OPEN_CAPITAL_RECOVERY'"),
+  'Arrow must not describe a Starlight capital parent');
+console.log('Q17 eight attack-card key ownership, Aurora mapping, and release label: PASS');
+
 const wsSource=readFileSync(new URL('../src/market.mjs',import.meta.url),'utf8');
 assert(!wsSource.includes("subscribe({channels:['fill','market_positions','user_orders']})"),'Q17 must not subscribe account/order streams');
 // Exercise the real HTTP route gate, not only the module-level mode guard.

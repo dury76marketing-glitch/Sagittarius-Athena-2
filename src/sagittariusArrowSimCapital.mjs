@@ -99,7 +99,7 @@ export function createSagittariusArrowCapitalEntry({watch,parent,quote,plan,sett
     lossAuthority:AURORA_EXECUTION.lossAuthority,
     auroraStopWindowMinutes:Math.max(1,Math.min(720,Math.round(Number(settings.auroraStopWindowMinutes)||90))),
     economicTarget:{version:'SA1-INDEPENDENT-ECONOMIC-TARGET',netPerOriginalContractCents:minimumNet},
-    model:{structuralRole:'STARLIGHT_OPEN_CAPITAL_RECOVERY',stakeCents:stake,
+    model:{structuralRole:'ATHENA_VERIFIED_SHADOW_LOSS_INDEPENDENT_RECOVERY',stakeCents:stake,
       minEntryCents:Number(settings.sagittariusArrowMinEntryCents),maxEntryCents:Number(settings.sagittariusArrowMaxEntryCents),
       minCrashCents:Number(settings.sagittariusArrowMinCrashCents),minReboundCents:Number(settings.sagittariusArrowMinReboundCents),
       minUpwardTicks:Number(settings.sagittariusArrowMinUpwardTicks),stopProtection:'Aurora Execution'},
