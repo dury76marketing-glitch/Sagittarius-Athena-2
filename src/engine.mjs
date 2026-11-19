@@ -8858,6 +8858,9 @@ export class SagittariusEngine {
     while (Date.now() - start < 50_000 && this.running) {
       const t = Date.now();
       timestamps.push(t);
+      // R7: the delay decision is outside the try/catch below. R6 scoped
+      // openNow to the try block, causing ReferenceError on every fast tick.
+      let openNow=0;
       try {
         if (first) {
           const trackers = await this.db.trackers(this.settings.systemName, 500);
@@ -8892,11 +8895,17 @@ export class SagittariusEngine {
           await this.evaluateEntryChain(marketList, trackerMap, map);
           first = false;
         }
-        const openNow=this.protectedTickers?.size||0;
-        const before = openNow>0 ? await this.openMemoryHunterCount() : 0;
-        if(openNow>0 && Date.now()-(this.health.lastProtectionMs||0)>=1_000)await this.runProtectionSweep('fast_phase');
-        const after = openNow>0 ? await this.openMemoryHunterCount() : 0;
-        closed += Math.max(0, before - after);
+        openNow=this.protectedTickers?.size||0;
+        // R7: the before/after counts are REPORTING ONLY. R6 queried PG
+        // twice on every 450ms fast-phase turn, even when no sweep ran.
+        // The due predicate and protection sweep are unchanged: only skip
+        // those redundant reporting reads when there is no sweep to count.
+        if(openNow>0 && Date.now()-(this.health.lastProtectionMs||0)>=1_000){
+          const before=await this.openMemoryHunterCount();
+          await this.runProtectionSweep('fast_phase');
+          const after=await this.openMemoryHunterCount();
+          closed+=Math.max(0,before-after);
+        }
         // A new stop-loss can arm mid-cycle. Recovery has a bounded independent
         // REST/READY wakeup, rather than waiting for another 5-minute discovery.
         // Starlight wake/poll/reconcile is independently scheduled. A slow
@@ -9028,7 +9037,7 @@ export class SagittariusEngine {
       // hostage. The read lane limits still-running PostgreSQL work even after
       // its display deadline. Financial totals above remain from the coherent
       // read-only executionPerformanceSnapshot; this is only a secondary card.
-      if(typeof this.db.conceptStatsAggregate==='function'){
+      if(!this.resourceResearchDeferred&&typeof this.db.conceptStatsAggregate==='function'){
         const scopeKey=JSON.stringify([settings.systemName,settings.ownerId,settings.mode,Number(settings.resetTimestampMs||0)]);
         conceptAggregate=await this.operatorOptionalRead(`concept_aggregate:${scopeKey}`,
           ()=>this.db.conceptStatsAggregate(settings.systemName,{resetTimestampMs:settings.resetTimestampMs,mode:settings.mode}))
@@ -9284,6 +9293,18 @@ export class SagittariusEngine {
     const now=Date.now();
     const settings={...this.settings};
     const scopeKey=JSON.stringify([settings.systemName,settings.ownerId,settings.mode,Number(settings.resetTimestampMs||0)]);
+    // R6: optional operator reads must yield to trade, protection, and financial
+    // database work during resource pressure. They must neither queue new SQL
+    // nor report stale cached telemetry as current/complete.
+    if(this.resourceResearchDeferred===true){
+      const prior=this.operatorTelemetryCacheScopeKey===scopeKey?this.operatorTelemetryCache||{}:{};
+      return {trackers:prior.trackers||[],trackerAggregate:prior.trackerAggregate||null,
+        audit:prior.audit||[],recoveryTracking:Number(prior.recoveryTracking||0),
+        atomicThunder:prior.atomicThunder||{},opportunitySummary:prior.opportunitySummary||{},
+        diagnosticTelemetryComplete:false,
+        diagnosticTelemetryFailedFields:['trackers','trackerAggregate','audit','recoveryTracking','atomicThunder','opportunitySummary'],
+        diagnosticTelemetryStatus:'RESOURCE_SHED'};
+    }
     if(!force&&this.operatorTelemetryCacheScopeKey===scopeKey&&this.operatorTelemetryCache
       &&now-this.operatorTelemetryAtMs<=OPERATOR_PLANE_ISOLATION.slowTelemetryTtlMs)return this.operatorTelemetryCache;
     if(this.operatorTelemetryPromise&&this.operatorTelemetryPromiseScopeKey===scopeKey)return this.operatorTelemetryPromise;
