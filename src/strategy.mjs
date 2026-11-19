@@ -55,16 +55,17 @@ import { phoenixSignalActive, revalidatePhoenixQualification } from './phoenix.m
 const pendingAthenaShadowBatches=new WeakMap();
 const nowId = () => randomUUID();
 
-function applyFreezingCoffin(config, settings, entryPriceCents, atMs, concept=''){
-  // Starlight freezes its own Aurora. Coffin must not become its exit authority.
-  if(String(concept)==='Crash Recovery Hunter') return {config, stop:null};
-  // Lightning Plasma capital scale-in freezes its own Aurora percent.
-  // Freezing Coffin is a shadow-saint stop and must not replace it.
-  if(String(concept)==='Lightning Plasma' && (config?.lightningPlasmaScaleIn || config?.executionClass==='CAPITAL')) return {config, stop:null};
-  if(settings?.freezingCoffinEnabled!==true) return {config, stop:null};
+function applyFreezingCoffin(config, settings, entryPriceCents, atMs, concept='', {shadowAdmission=false}={}){
+  // Q17-R2: Freezing Coffin is a fixed-cent SHADOW stop, not a capital
+  // entry's Aurora. The caller must explicitly be the shadow-admission path.
+  // Both SIM and future LIVE capital entries retain their own frozen Aurora.
+  if(!shadowAdmission || String(config?.executionClass||'')==='CAPITAL')return {config,stop:null};
+  // Starlight's virtual recovery is independently Aurora-protected.
+  if(String(concept)==='Crash Recovery Hunter')return {config,stop:null};
+  if(settings?.freezingCoffinEnabled!==true)return {config,stop:null};
   const snap=freezingCoffinSnapshot({entryPriceCents,maxDropCents:settings.freezingCoffinMaxDropCents,calculatedAtMs:atMs});
-  if(!snap.ok) return {config, stop:null, rejected:snap};
-  return {config:{...config,freezingCoffin:snap}, stop:snap};
+  if(!snap.ok)return {config,stop:null,rejected:snap};
+  return {config:{...config,freezingCoffin:snap},stop:snap};
 }
 const openLike = (s) => ['open', 'entry_pending', 'exit_pending', 'pending_recovery'].includes(s);
 const slotsLeft = (entries, settings) => Math.max(
@@ -2221,7 +2222,7 @@ export class StrategyEngine {
       }
     }
     if(!aurora.ok){trace('SHADOW_SAINT','BLOCKED',aurora.reason);return null;}
-    const coffin=applyFreezingCoffin({...structuredClone(frozenEntryConfig),aurora},s,entry,now,concept);
+    const coffin=applyFreezingCoffin({...structuredClone(frozenEntryConfig),aurora},s,entry,now,concept,{shadowAdmission:true});
     if(coffin.rejected){trace('SHADOW_SAINT','BLOCKED',coffin.rejected.reason);return null;}
     const confirmation=finalConfirmation();if(!confirmation.ok){trace('SHADOW_SAINT','BLOCKED',confirmation.reason);return null;}
     if(concept==='Crash Recovery Hunter'){

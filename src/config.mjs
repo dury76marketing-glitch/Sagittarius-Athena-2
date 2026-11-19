@@ -11,7 +11,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-Q-17-R1-SHADOW-DASHBOARD-CORRECTION-2026-11-19';
+export const RELEASE = 'SAGITTARIUS-Q-17-R2-OWN-CARD-AURORA-COFFIN-INTEGRITY-2026-11-19';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
