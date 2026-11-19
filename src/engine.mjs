@@ -47,6 +47,7 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
+import { q17LightningPlasmaArrowParityMigration } from './q17LightningPlasmaParity.mjs';
 import { StrategyEngine, starlightRecoverySignalState, starlightRecoveryQuoteOrder, stampLiveEpoch, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, justiceArrowSignalState, independentCi1SignalState, isModelEnabled, recoverySignalState, plasmaSignalState, isProfitableExecutableParent, followUpConfirmationState, lightningPlasmaScaleInDecision, attackMultiplySeats, lightningPlasmaLossMayArmStarlight } from './strategy.mjs';
 import { ci1EpisodeConsumptionKey, ci1EpisodeEntryConsumes } from './strategy.mjs';
 import { ProfitGuard, evaluateShadowWithOriginalGuard } from './profitGuard.mjs';
@@ -3690,6 +3691,19 @@ export class SagittariusEngine {
       this.settings = { ...this.settings, ...card, ...keep, card20261006Applied: true };
       await this.db.saveSettings(this.settings);
       await this.db.audit('info', 'card_20261006_applied', { release: RELEASE }).catch(() => {});
+    }
+    // Q17-R4 owner-directed one-time SIM replacement of the old Plasma entry
+    // card with Arrow's independent capital settings. Persist before watches,
+    // market subscriptions, and the first entry evaluation can execute.
+    const plasmaParity=q17LightningPlasmaArrowParityMigration(this.settings);
+    if(plasmaParity.changed){
+      this.settings=plasmaParity.settings;
+      await this.db.saveSettings(this.settings);
+      await this.db.audit('info','q17_lightning_plasma_arrow_parity_migrated',{
+        release:RELEASE,changedKeys:plasmaParity.changedKeys,
+        doctrine:'INDEPENDENT_ATHENA_SHADOW_LOSS_TO_LP_CAPITAL',
+        legacyScaleInDisabled:true
+      }).catch(()=>{});
     }
     // Owner 2026-11-07: a successful deploy of a running LIVE system must keep
     // trading. Do not require a fresh Enable Live click. The existing health-gated
@@ -9403,7 +9417,7 @@ export class SagittariusEngine {
     if (!initialExposureEnabled.length) entryPathWarnings.push('No currently enabled configuration can create an initial real Hunter exposure');
     if (referenceGate.allowed && !executionGate.allowed) entryPathWarnings.push(`Real Hunter execution blocked by ${executionGate.reason}; reference feeders remain active`);
     const entryPathConfiguration = {
-      version:'APS2-ENTRY-PATH',capitalAttack:'Starlight Extinction (REAL TRADE ON) + Lightning Plasma',virtualRecoveryAttack:'Starlight Extinction (REAL TRADE OFF)', authorityChain:'ATHENA_EXCLAMATION_SHADOW_STOP->STARLIGHT_EXTINCTION_SHADOW_OR_REAL->OPEN_REAL_STARLIGHT_RISE->LIGHTNING_PLASMA->VERIFIED_LOSS->GREAT_HORN->VERIFIED_LOSS->CRYSTAL_WALL + OPEN_REAL_STARLIGHT->SAGITTARIUS_ARROW_SAME_TICKER->VERIFIED_LOSS->SCARLET_NEEDLE->VERIFIED_LOSS->PEGASUS_RYU_SEI_KEN', noBoltNoAttack:true, noBoltNoAttackExceptions:['SAGITTARIUS_JUSTICE_ARROW_V2_CRASH_RECOVERY_AUTHORITY','CRYSTAL_WALL_V3_CRASH_RECOVERY_AUTHORITY','CI1_WALL_CLONE_CRASH_RECOVERY_AUTHORITY'], cosmoGreenRequired:true, initialExposureEnabled, scarletNeedleContinuationEnabled:false, geminiEnabled:this.settings.geminiEnabled===true, anotherDimensionAttackEnabled:this.settings.geminiEnabled===true, justiceArrowIndependentEnabled:this.settings.justiceArrowEnabled===true, justiceArrowContinuationEnabled:false, crystalWallIndependentEnabled:this.settings.recoveryHunterEnabled===true, crystalWallContinuationEnabled:false, lightningPlasmaContinuationEnabled:this.settings.lightningPlasmaEnabled===true, lightningPlasmaLegacyFollowOnEnabled:false, lightningPlasmaProfitContinuation:{version:LP_CONTINUATION_VERSION,authority:'VERIFIED_OPEN_CAPITAL_STARLIGHT_ONLY',reference:'ORIGINAL_CAPITAL_STARLIGHT_ENTRY',lossPolicy:'PLASMA_LOSS_TO_GREAT_HORN_ONLY'}, recoveryFollowOnEnabled:false, warnings:entryPathWarnings,
+      version:'APS2-ENTRY-PATH',capitalAttack:'Starlight Extinction (when enabled) + independent Lightning Plasma + independent Sagittarius Arrow',virtualRecoveryAttack:'Starlight Extinction (capital OFF)', authorityChain:'ATHENA_EXCLAMATION_VERIFIED_SHADOW_LOSS->(STARLIGHT_EXTINCTION_INDEPENDENT + LIGHTNING_PLASMA_CAPITAL_INDEPENDENT + SAGITTARIUS_ARROW_CAPITAL_INDEPENDENT); LIGHTNING_PLASMA_VERIFIED_CAPITAL_LOSS->GREAT_HORN->CRYSTAL_WALL; SAGITTARIUS_ARROW_VERIFIED_CAPITAL_LOSS->SCARLET_NEEDLE->PEGASUS_RYU_SEI_KEN', noBoltNoAttack:true, noBoltNoAttackExceptions:['SAGITTARIUS_JUSTICE_ARROW_V2_CRASH_RECOVERY_AUTHORITY','CRYSTAL_WALL_V3_CRASH_RECOVERY_AUTHORITY','CI1_WALL_CLONE_CRASH_RECOVERY_AUTHORITY'], cosmoGreenRequired:true, initialExposureEnabled, scarletNeedleContinuationEnabled:false, geminiEnabled:this.settings.geminiEnabled===true, anotherDimensionAttackEnabled:this.settings.geminiEnabled===true, justiceArrowIndependentEnabled:this.settings.justiceArrowEnabled===true, justiceArrowContinuationEnabled:false, crystalWallIndependentEnabled:this.settings.recoveryHunterEnabled===true, crystalWallContinuationEnabled:false, lightningPlasmaContinuationEnabled:false, lightningPlasmaLegacyFollowOnEnabled:false, lightningPlasmaProfitContinuation:{version:'Q17-R4-RETIRED',authority:'INDEPENDENT_VERIFIED_ATHENA_SHADOW_LOSS_ONLY',reference:'DURABLE_ATHENA_SHADOW_STOP',lossPolicy:'PLASMA_CAPITAL_LOSS_TO_GREAT_HORN_ONLY'}, recoveryFollowOnEnabled:false, warnings:entryPathWarnings,
       entryModeIsolation:'EMI1', referenceSignalEvaluationActive:referenceGate.allowed,
       realHunterExecutionAuthorized:executionGate.allowed, executionGateReason:executionGate.reason,
     };

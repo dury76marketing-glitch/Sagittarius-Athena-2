@@ -35,10 +35,12 @@ import {readFileSync} from 'node:fs';
 // stale release labels. This validation reads exactly the shipped dashboard
 // and the backend's real editable-settings allowlists.
 import vm from 'node:vm';
+import {BUILD_INFO} from '../src/authority.mjs';
 assert.equal(Q17_RELEASE, RELEASE, 'Q-17 product and backend release must match');
+assert.equal(BUILD_INFO.id,RELEASE,'runtime fingerprint release label must match Q-17 R4');
 const dashboardSource=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
 const dashboardHtml=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
-assert(dashboardHtml.includes('Q-17 R3 &mdash; SIMULATION ONLY'), 'dashboard release banner must match R2');
+assert(dashboardHtml.includes('Q-17 R4 &mdash; SIMULATION ONLY'), 'dashboard release banner must match R4');
 const attackStart=dashboardSource.indexOf('const ATTACKS=[');
 const attackEnd=dashboardSource.indexOf('\nconst COSMOS=',attackStart);
 assert(attackStart>=0&&attackEnd>attackStart,'attack-card source definitions required');

@@ -2297,6 +2297,12 @@ export class StrategyEngine {
   }
 
   async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, ci1SourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, ci1FireCommand = null, liveWatch = null, legacyCompatibility = false, stackSeat = false, stackIndex = 1, stackParentId = null, observationRelease = false, starlightRecovery = false, starlightRecoverySnapshot = null, lightningPlasmaScaleIn = false, parentStarlightId = null, shadowAdmissionBatch = null, multiplySeatDiagnostic = null, starlightModelClone = false, cloneRefusal = null, cloneAttemptGeneration = 0, independentRecovery = false } = {}) {
+    // Q17-R4: stop admitting the superseded Lightning Plasma shadow/FIRE,
+    // Starlight-profit scale-in and model-clone capital pathways. LP now has
+    // one independent verified Athena-shadow-loss CAPITAL authority, matching
+    // Arrow's independent watch/geometry/financial-admission machinery.
+    // Existing shadow rows remain historical; no ledger entries are deleted.
+    if(concept==='Lightning Plasma' && independentRecovery!==true)return null;
     // Snapshot the ORIGINAL committed operator card before deriving clone-only
     // effective LP/Arrow settings. Comparing the derived card to the live raw
     // card would reject every clone at the final setting-authority gate.

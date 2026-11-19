@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
-    "check": "node scripts/check.mjs && node scripts/checkQ17Safety.mjs"
+    "check": "node scripts/check.mjs && node scripts/checkQ17Safety.mjs && node scripts/checkQ17PlasmaArrowParity.mjs"
   },
   "dependencies": {
     "pg": "^8.23.1",

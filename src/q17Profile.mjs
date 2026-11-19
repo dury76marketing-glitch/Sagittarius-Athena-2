@@ -2,7 +2,7 @@
 // cannot be enabled for LIVE by environment variables or dashboard actions.
 // Market-data GETs are allowed; broker/account reads and ALL writes fail closed.
 export const Q17_SIM_ONLY = true;
-export const Q17_RELEASE = 'SAGITTARIUS-Q-17-R3-PRE-LIVE-COC-REVIEW-2026-11-19';
+export const Q17_RELEASE = 'SAGITTARIUS-Q-17-R4-LP-ARROW-CAPITAL-PARITY-2026-11-19';
 export const Q17_DATABASE_ACK = 'Q17_SEPARATE_DISPOSABLE_SIM_DATABASE';
 export function q17SimSettings(settings={}) {
   return {...settings,mode:'SIMULATION',liveArmed:false,liveOwnerAuthorized:false};

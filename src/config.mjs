@@ -11,7 +11,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-Q-17-R3-PRE-LIVE-COC-REVIEW-2026-11-19';
+export const RELEASE = 'SAGITTARIUS-Q-17-R4-LP-ARROW-CAPITAL-PARITY-2026-11-19';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -271,10 +271,11 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'card20261006SessionApplied',
   'card20261007LiveApplied',
   'card20261008Applied',
+  'q17LightningPlasmaArrowParityApplied',
 ]);
 
 export const EDITABLE_NUMERIC_SETTINGS = Object.freeze(CANONICAL_NUMERIC_SETTINGS.filter((k) => !['resetTimestampMs','liveDashboardStartMs','simulationDashboardStartMs','simFillProbability'].includes(k)));
-export const EDITABLE_BOOLEAN_SETTINGS = Object.freeze(CANONICAL_BOOLEAN_SETTINGS.filter((k) => k !== 'engineActive'));
+export const EDITABLE_BOOLEAN_SETTINGS = Object.freeze(CANONICAL_BOOLEAN_SETTINGS.filter((k) => k !== 'engineActive' && k !== 'q17LightningPlasmaArrowParityApplied'));
 
 // R10 has one authoritative home for every setting. Legacy shared stake keys are
 // accepted only while loading an older persisted record so they can be migrated
