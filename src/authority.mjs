@@ -37,7 +37,7 @@ collect('src');collect('public');
 files.push('package.json','package-lock.json','railway.json');
 const hash=createHash('sha256');
 for(const file of files.sort()){hash.update(file);hash.update('\0');hash.update(readFileSync(join(root,file)));hash.update('\0');}
-export const BUILD_INFO=Object.freeze({id:'SAGITTARIUS-Q-17-R4-LP-ARROW-CAPITAL-PARITY-2026-11-19',sourceSha256:hash.digest('hex'),railwayCommit:process.env.RAILWAY_GIT_COMMIT_SHA||null,
+export const BUILD_INFO=Object.freeze({id:'SAGITTARIUS-Q-17-R5-PLASMA-ARROW-LINK-SQL-GUARD-2026-11-19',sourceSha256:hash.digest('hex'),railwayCommit:process.env.RAILWAY_GIT_COMMIT_SHA||null,
   deploymentFingerprint:(process.env.SAGITTARIUS_DEPLOYMENT_ID||process.env.RAILWAY_SERVICE_ID||process.env.RAILWAY_REPLICA_ID||process.env.RAILWAY_DEPLOYMENT_ID)
     ?createHash('sha256').update([process.env.RAILWAY_PROJECT_ID||'',
       process.env.SAGITTARIUS_DEPLOYMENT_ID||'',process.env.RAILWAY_SERVICE_ID||'',

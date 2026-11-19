@@ -333,7 +333,7 @@ create or replace function sag_lp_v5_parent_eligible(p sag_entries,a sag_lp_cont
   and a.state='OPEN' and a.revision>0 and a.proof=sag_lp_v5_parent_proof(p),false);$$;
 create or replace function sag_lp_v5_child_admission() returns trigger language plpgsql as $$
 declare p sag_entries;a sag_lp_continuation_v5;s jsonb;stamp jsonb;q jsonb;aurora jsonb;
- obs sag_lp_v5_observations;seats int;at_ms bigint;
+ obs sag_lp_v5_observations;seats int;at_ms bigint;w record;rec jsonb;
 begin
  if NEW.concept_name<>'Lightning Plasma' or NEW.execution_class='SHADOW_SAINT'
   or NEW.entry_config->>'executionClass'='SHADOW_SAINT' then return NEW;end if;
@@ -344,6 +344,102 @@ begin
    and NEW.entry_config#>>'{modelCloneCapital,version}'='SC-MODEL-CLONE-V1'
    and current_setting('sagittarius.model_clone_entry',true)='admitted'
  then return NEW;end if;
+ -- Q17-R5: the R4 independent Athena-hard-stop CAPITAL route is NOT the
+ -- retired Starlight-profit LP-V5 scale-in route. Its own atomic JavaScript
+ -- admission holds settings, shadow-parent, watch and event-cap locks and sets
+ -- this transaction-local capability only after all checks have passed.
+ -- Revalidate durable facts here; a JSON stamp alone is never authority.
+ if NEW.entry_config#>>'{independentRecovery,version}'='INDEPENDENT-ATHENA-LOSS-V2' then
+   rec:=NEW.entry_config->'independentRecovery';
+   if current_setting('sagittarius.independent_recovery_entry',true) is distinct from 'admitted'
+     or NEW.execution_class is distinct from 'CAPITAL'
+     or NEW.entry_config->>'executionClass' is distinct from 'CAPITAL'
+     or NEW.mode not in ('SIMULATION','LIVE')
+     or (NEW.mode='SIMULATION' and (NEW.status<>'open' or NEW.entry_client_order_id is not null))
+     or (NEW.mode='LIVE' and (NEW.status<>'entry_pending' or NEW.entry_client_order_id is null))
+     or NEW.entry_order_id is not null or NEW.remaining_count<>NEW.count or NEW.count<=0
+     or NEW.entry_price_cents<=0 or NEW.entry_price_cents>=100
+     or NEW.entry_config#>>'{freezingCoffin,enabled}'='true'
+   then raise exception 'lp_independent_atomic_admission_required';end if;
+   select value into s from sag_settings where key='runtime' for update;
+   if s->>'engineActive' is distinct from 'true'
+     or s->>'lightningPlasmaEnabled' is distinct from 'true'
+     or s->>'mode' is distinct from NEW.mode
+     or (NEW.mode='LIVE' and (s->>'liveArmed' is distinct from 'true'
+       or s->>'liveOwnerAuthorized' is distinct from 'true'))
+     or s->>'systemName' is distinct from NEW.system_name
+     or s->>'ownerId' is distinct from NEW.owner_id
+     or (s->>'resetTimestampMs')::bigint is distinct from (rec->>'resetEpoch')::bigint
+     or rec->>'concept' is distinct from 'Lightning Plasma'
+     or rec->>'parentEntryId' is distinct from NEW.source_trade_id
+     or rec->>'authorizationId' is distinct from NEW.entry_config#>>'{independentAuthority,authorizationId}'
+     or rec->>'parentProofHash' is distinct from NEW.entry_config#>>'{independentAuthority,parentProofHash}'
+     or rec->>'watchAuthorizationId' is distinct from NEW.entry_config#>>'{independentAuthority,watchAuthorizationId}'
+     or (rec->>'watchRevision')::bigint is distinct from
+       (NEW.entry_config#>>'{independentAuthority,watchRevision}')::bigint
+     or NEW.entry_config#>>'{independentAuthority,authorityMode}' is distinct from 'INDEPENDENT_ATHENA_SHADOW_STOP'
+     or NEW.entry_config#>>'{independentAuthority,verifiedStop}' is distinct from 'true'
+     or NEW.entry_config#>>'{independentAuthority,mode}' is distinct from NEW.mode
+     or NEW.entry_config#>>'{independentAuthority,systemName}' is distinct from NEW.system_name
+     or NEW.entry_config#>>'{independentAuthority,ownerId}' is distinct from NEW.owner_id
+     or NEW.entry_config#>>'{independentAuthority,ticker}' is distinct from NEW.ticker
+     or NEW.entry_config#>>'{independentAuthority,eventTicker}' is distinct from NEW.event_ticker
+     or (NEW.entry_config#>>'{independentAuthority,resetEpoch}')::bigint is distinct from (rec->>'resetEpoch')::bigint
+     or NEW.entry_price_cents<=0 or NEW.entry_price_cents>=100
+     or NEW.entry_price_cents > (NEW.entry_config#>>'{independentAuthority,authorizedMaxEntryCents}')::numeric
+     or NEW.entry_config->>'auroraDamageControlPercent' is distinct from s->>'lightningPlasmaAuroraDamageControlPercent'
+     or (NEW.mode='SIMULATION' and NEW.entry_config#>>'{aurora,frozen}' is distinct from 'true')
+   then raise exception 'lp_independent_operator_scope_or_price_invalid';end if;
+   select * into w from sag_independent_recovery_v1 where
+     system_name=NEW.system_name and owner_id=NEW.owner_id and mode=NEW.mode
+     and reset_epoch=(rec->>'resetEpoch')::bigint
+     and authorization_id=rec->>'watchAuthorizationId'
+     and concept='Lightning Plasma' and parent_entry_id=NEW.source_trade_id for update;
+   select * into p from sag_entries where id=NEW.source_trade_id for share;
+   if w.authorization_id is null or p.id is null
+     or w.status is distinct from 'WATCHING'
+     or w.revision is distinct from (rec->>'watchRevision')::bigint
+     or w.watch->>'qualified' is distinct from 'true'
+     or (w.watch->>'lastQuoteAtMs')::bigint is distinct from (rec->>'signalQuoteAtMs')::bigint
+     or w.watch->>'lastQuoteEpoch' is distinct from rec->>'signalQuoteEpoch'
+     or (w.watch->>'lastQuoteRevision')::bigint is distinct from (rec->>'signalQuoteRevision')::bigint
+     or (rec->>'signalQuoteAtMs')::bigint not between
+       (extract(epoch from clock_timestamp())*1000)::bigint-5000
+       and (extract(epoch from clock_timestamp())*1000)::bigint
+     or (w.watch->>'releaseAtMs')::bigint>NEW.opened_at_ms
+     or (w.watch->>'link') is distinct from (s->>'lightningPlasmaLinkEnabled')
+     or (coalesce((w.watch->>'link')::boolean,false)=false and
+       NEW.entry_price_cents not between (s->>'lightningPlasmaMinEntryCents')::numeric
+       and (s->>'lightningPlasmaMaxEntryCents')::numeric)
+     or (coalesce((w.watch->>'link')::boolean,false)=false and
+       (w.watch->>'crashDepthCents')::numeric<coalesce((s->>'lightningPlasmaMinCrashCents')::numeric,0))
+     or (coalesce((w.watch->>'link')::boolean,false)=false and
+       (w.watch->>'reboundCents')::numeric<coalesce((s->>'lightningPlasmaMinReboundCents')::numeric,0))
+     or (coalesce((w.watch->>'link')::boolean,false)=false and
+       (w.watch->>'upwardTicks')::int<coalesce((s->>'lightningPlasmaMinUpwardTicks')::int,0))
+     or w.watch->>'independentRecovery' is distinct from 'true'
+     or w.watch->>'authorization' is distinct from 'VALID_SHADOW_HARD_STOP'
+     or w.watch->>'parentConcept' is distinct from 'Athena Exclamation'
+     or w.watch->>'ticker' is distinct from NEW.ticker
+     or w.watch->>'eventTicker' is distinct from NEW.event_ticker
+     or p.concept_name is distinct from 'Athena Exclamation'
+     or p.execution_class is distinct from 'SHADOW_SAINT'
+     or p.archived is distinct from false or p.status is distinct from 'closed'
+     or p.close_reason is distinct from 'hard_stop_loss'
+     or p.pnl_cents is null or p.pnl_cents>=0 or p.remaining_count<>0
+     or p.ticker is distinct from NEW.ticker or p.event_ticker is distinct from NEW.event_ticker
+     or p.system_name is distinct from NEW.system_name or p.owner_id is distinct from NEW.owner_id
+     or p.mode is distinct from NEW.mode
+     or p.shadow_epoch is distinct from (rec->>'resetEpoch')::bigint
+     or not exists(select 1 from sag_shadow_stops_v3 v
+       where v.parent_entry_id=p.id and v.system_name=NEW.system_name
+       and v.owner_id=NEW.owner_id and v.mode=NEW.mode
+       and v.reset_epoch=(rec->>'resetEpoch')::bigint
+       and v.proof_hash=rec->>'parentProofHash'
+       and v.proof->>'authorization'='VALID_SHADOW_HARD_STOP')
+   then raise exception 'lp_independent_durable_parent_or_watch_invalid';end if;
+   return NEW;
+ end if;
  stamp:=NEW.entry_config->'lightningPlasmaScaleIn';
  if stamp->>'version' is distinct from '${LP_CONTINUATION_VERSION}'
   then raise exception 'lp_v5_capital_starlight_build_required';end if;
@@ -407,7 +503,9 @@ begin
   then raise exception 'lp_v5_multiply_full';end if;
  return NEW;
 end $$;
--- V4 remains available to reconcile EXISTING records, never authorizes new buys.
+-- V4 table persists for existing records; only the V5 insert guard remains.
+-- V4 has no new admission rights. PostgreSQL fires ALL BEFORE INSERT
+-- triggers, so retaining V4 here would reject the independent Athena route.
 drop trigger if exists sag_lp_v4_entry_guard on sag_entries;
 drop trigger if exists sag_lp_v5_entry_guard on sag_entries;
 create trigger sag_lp_v5_entry_guard before insert on sag_entries

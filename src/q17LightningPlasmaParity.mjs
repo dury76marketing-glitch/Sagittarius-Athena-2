@@ -6,6 +6,18 @@
  * Never copy Arrow enablement, Arrow source/parent identifiers, or LIVE rights.
  */
 export const LP_ARROW_PARITY_VERSION = 'Q17-LP-ARROW-INDEPENDENT-CAPITAL-R4';
+export const LP_ARROW_LINK_PARITY_VERSION = 'Q17-LP-ARROW-LINK-R5';
+// One-time upgrade for existing R4 databases; never overwrite subsequent operator edits.
+export function q17LightningPlasmaLinkParityMigration(settings={}) {
+  if(settings.q17LightningPlasmaLinkParityApplied===true)
+    return {changed:false,settings:{...settings},changedKeys:[]};
+  if(settings.mode!=='SIMULATION')throw new Error('q17_plasma_link_requires_simulation');
+  if(typeof settings.sagittariusArrowLinkEnabled!=='boolean')
+    throw new Error('q17_arrow_link_missing');
+  return {changed:true,settings:{...settings,lightningPlasmaLinkEnabled:settings.sagittariusArrowLinkEnabled,
+    q17LightningPlasmaLinkParityApplied:true},
+    changedKeys:['lightningPlasmaLinkEnabled','q17LightningPlasmaLinkParityApplied']};
+}
 export const LP_ARROW_PARITY_MAPPINGS = Object.freeze([
   ['lightningPlasmaFieldStakeCents','sagittariusArrowStakeCents'],
   ['lightningPlasmaMinEntryCents','sagittariusArrowMinEntryCents'],

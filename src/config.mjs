@@ -11,7 +11,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-Q-17-R4-LP-ARROW-CAPITAL-PARITY-2026-11-19';
+export const RELEASE = 'SAGITTARIUS-Q-17-R5-PLASMA-ARROW-LINK-SQL-GUARD-2026-11-19';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -251,6 +251,7 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'justiceArrowEnabled',
   'athenaExclamationEnabled',
   'lightningPlasmaEnabled',
+  'lightningPlasmaLinkEnabled',
   'galacticExplosionEnabled',
   'andromedaThunderWaveEnabled',
   'freezingCoffinEnabled',
@@ -272,10 +273,11 @@ export const CANONICAL_BOOLEAN_SETTINGS = Object.freeze([
   'card20261007LiveApplied',
   'card20261008Applied',
   'q17LightningPlasmaArrowParityApplied',
+  'q17LightningPlasmaLinkParityApplied',
 ]);
 
 export const EDITABLE_NUMERIC_SETTINGS = Object.freeze(CANONICAL_NUMERIC_SETTINGS.filter((k) => !['resetTimestampMs','liveDashboardStartMs','simulationDashboardStartMs','simFillProbability'].includes(k)));
-export const EDITABLE_BOOLEAN_SETTINGS = Object.freeze(CANONICAL_BOOLEAN_SETTINGS.filter((k) => k !== 'engineActive' && k !== 'q17LightningPlasmaArrowParityApplied'));
+export const EDITABLE_BOOLEAN_SETTINGS = Object.freeze(CANONICAL_BOOLEAN_SETTINGS.filter((k) => k !== 'engineActive' && k !== 'q17LightningPlasmaArrowParityApplied' && k !== 'q17LightningPlasmaLinkParityApplied'));
 
 // R10 has one authoritative home for every setting. Legacy shared stake keys are
 // accepted only while loading an older persisted record so they can be migrated
@@ -317,6 +319,7 @@ export function originalSettings() {
     justiceArrowEnabled: false,
     athenaExclamationEnabled: false,
     lightningPlasmaEnabled: true,
+    lightningPlasmaLinkEnabled: false,
     galacticExplosionEnabled: false,
     andromedaThunderWaveEnabled: false,
     andromedaThunderWaveLevel: 'HIGH',
@@ -614,6 +617,7 @@ export const LEDGER_FACTORY_OVERRIDES_20261104 = Object.freeze({
   lightningPlasmaAuroraDamageControlPercent: 45,
   sagittariusArrowEnabled: true,
   sagittariusArrowLinkEnabled: false,
+  lightningPlasmaLinkEnabled: false,
   sagittariusArrowAthenaX1Enabled: true,
   scarletNeedleCapitalEnabled: true,
   scarletNeedleCapitalLinkEnabled: false,

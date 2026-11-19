@@ -47,7 +47,7 @@ import { KalshiClient } from './kalshi.mjs';
 import { MarketHub } from './market.mjs';
 import { LearningEngine, classifyDeterministic } from './learning.mjs';
 import { Athena, ATHENA_BRAIN, ATHENA_B2, AthenaCommander } from './athena.mjs';
-import { q17LightningPlasmaArrowParityMigration } from './q17LightningPlasmaParity.mjs';
+import { q17LightningPlasmaArrowParityMigration,q17LightningPlasmaLinkParityMigration } from './q17LightningPlasmaParity.mjs';
 import { StrategyEngine, starlightRecoverySignalState, starlightRecoveryQuoteOrder, stampLiveEpoch, activeCosmoSources, lightningPlasmaFieldSelection, anotherDimensionQualification, crystalWallSignalState, justiceArrowSignalState, independentCi1SignalState, isModelEnabled, recoverySignalState, plasmaSignalState, isProfitableExecutableParent, followUpConfirmationState, lightningPlasmaScaleInDecision, attackMultiplySeats, lightningPlasmaLossMayArmStarlight } from './strategy.mjs';
 import { ci1EpisodeConsumptionKey, ci1EpisodeEntryConsumes } from './strategy.mjs';
 import { ProfitGuard, evaluateShadowWithOriginalGuard } from './profitGuard.mjs';
@@ -1346,7 +1346,8 @@ export class SagittariusEngine {
       armedAtMs:closedAt,releaseAtMs:closedAt+obsMin*60_000,expiresAtMs:Number.MAX_SAFE_INTEGER,
       stopPriceCents:stopPrice,peakSinceArmCents:stopPrice,troughSinceArmCents:stopPrice,
       crashConfirmedAtMs:0,upwardTicks:0,lastBidCents:stopPrice,lastQuoteAtMs:0,
-      status:'ARMED',attempts:0,revision:0,updatedAtMs:now,independentRecovery:true};
+      status:'ARMED',attempts:0,revision:0,updatedAtMs:now,independentRecovery:true,
+      link:concept==='Lightning Plasma'?s.lightningPlasmaLinkEnabled===true:s.sagittariusArrowLinkEnabled===true};
     this.independentRecoveryWatches.set(id,watch);
     if(typeof this.db?.insertIndependentWatch==='function'){
       void this.db.insertIndependentWatch(watch).then(saved=>{
@@ -1421,6 +1422,36 @@ export class SagittariusEngine {
       const quote=this.market?.getQuote?.(watch.ticker);
       if(!quote)continue;
       const geom=this.independentGeometrySettings(watch.concept,s);
+      // Frozen Link is a watch-scoped strategy choice, never permission to
+      // skip fresh quotes, durable proof, book, Aurora, cash or capacity.
+      const currentLink=watch.concept==='Lightning Plasma'
+        ?s.lightningPlasmaLinkEnabled===true:s.sagittariusArrowLinkEnabled===true;
+      // Pre-R5 durable watches did not record a LINK field. They may be
+      // upgraded to the explicitly OFF policy only: this preserves their old
+      // geometry with no broadened entry authority. Never auto-upgrade an old
+      // watch into LINK ON. Use the same durable CAS used for observations.
+      if(typeof watch.link!=='boolean' && currentLink===false){
+        if(typeof this.db?.updateIndependentWatch==='function'){
+          const legacy={...watch,link:false,lastAttemptReason:'q17_r5_legacy_link_off_restored'};
+          let committed=null;
+          try{committed=await this.db.updateIndependentWatch(legacy,Number(watch.revision));}catch{}
+          if(committed&&Number(committed.revision)===Number(watch.revision)+1){
+            this.independentRecoveryWatches.set(id,{...legacy,revision:Number(committed.revision),status:committed.status});
+          }else this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_link_legacy_persistence_pending'});
+        }
+        continue;
+      }
+      if(typeof watch.link!=='boolean'||watch.link!==currentLink){
+        this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_link_settings_changed'});
+        continue;
+      }
+      if(watch.link===true){
+        geom.crashRecoveryHunterMinCrashCents=0;
+        geom.crashRecoveryHunterMinReboundCents=0;
+        geom.crashRecoveryHunterMinUpwardTicks=0;
+        geom.crashRecoveryMinEntryCents=1;
+        geom.crashRecoveryMaxEntryCents=99;
+      }
       const signal=starlightRecoverySignalState(watch,quote,geom,Date.now(),{advance:true,liveEpoch:this.market?.quoteEpoch||''});
       const next={...watch,...signal,attempts:Number(watch.attempts||0)};
       if(!signal.qualified){
@@ -3704,6 +3735,15 @@ export class SagittariusEngine {
         doctrine:'INDEPENDENT_ATHENA_SHADOW_LOSS_TO_LP_CAPITAL',
         legacyScaleInDisabled:true
       }).catch(()=>{});
+    }
+    // R5: once-only independent LINK migration for databases upgraded from R4.
+    // No reset, no overwrite of future Lightning Plasma LINK changes.
+    const plasmaLinkParity=q17LightningPlasmaLinkParityMigration(this.settings);
+    if(plasmaLinkParity.changed){
+      this.settings=plasmaLinkParity.settings;
+      await this.db.saveSettings(this.settings);
+      await this.db.audit('info','q17_lightning_plasma_link_parity_migrated',{release:RELEASE,
+        changedKeys:plasmaLinkParity.changedKeys}).catch(()=>{});
     }
     // Owner 2026-11-07: a successful deploy of a running LIVE system must keep
     // trading. Do not require a fresh Enable Live click. The existing health-gated

@@ -139,8 +139,8 @@ export function hunterEntryEnvelope(settings, conceptName) {
   if(conceptName==='Crash Recovery Hunter')return{minEntryCents:Number(s.crashRecoveryMinEntryCents),maxEntryCents:Number(s.crashRecoveryMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
   if(conceptName==='Scarlet Needle')return{minEntryCents:Number(s.scarletNeedleMinEntryCents),maxEntryCents:Number(s.scarletNeedleMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
   if(conceptName==='Sagittarius Justice Arrow')return{minEntryCents:Number(s.justiceArrowMinEntryCents),maxEntryCents:Number(s.justiceArrowMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
-  if(conceptName==='Lightning Plasma')return{minEntryCents:Number(s.lightningPlasmaMinEntryCents),maxEntryCents:Number(s.lightningPlasmaMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
-  if(conceptName==='Sagittarius Arrow Recovery')return{minEntryCents:Number(s.sagittariusArrowMinEntryCents),maxEntryCents:Number(s.sagittariusArrowMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
+  if(conceptName==='Lightning Plasma')return{minEntryCents:s.lightningPlasmaLinkEnabled===true?1:Number(s.lightningPlasmaMinEntryCents),maxEntryCents:s.lightningPlasmaLinkEnabled===true?99:Number(s.lightningPlasmaMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
+  if(conceptName==='Sagittarius Arrow Recovery')return{minEntryCents:s.sagittariusArrowLinkEnabled===true?1:Number(s.sagittariusArrowMinEntryCents),maxEntryCents:s.sagittariusArrowLinkEnabled===true?99:Number(s.sagittariusArrowMaxEntryCents),maxSpreadCents:sharedMaxSpreadCents};
   return null;
 }
 
@@ -2536,9 +2536,7 @@ export class StrategyEngine {
         const stake=concept==='Lightning Plasma'
           ? Number(s.lightningPlasmaFieldStakeCents||0)
           : Number(s.sagittariusArrowStakeCents||0);
-        const maxEntry=concept==='Lightning Plasma'
-          ? Number(s.lightningPlasmaMaxEntryCents||100)
-          : Number(s.sagittariusArrowMaxEntryCents||100);
+        const maxEntry=Number(hunterEntryEnvelope(s,concept)?.maxEntryCents);
         const envelope=hunterEntryBoundaryQualifiedAtQuote(concept,q,s);
         if(!envelope.ok){trace('INDEPENDENT_RECOVERY','BLOCKED',envelope.reason);return null;}
         fireValidation={ok:true,reason:'independent_athena_stop',stakeCents:stake,authorizedMaxEntryCents:maxEntry};
@@ -2562,6 +2560,8 @@ export class StrategyEngine {
           || independentWatch.ownerId!==s.ownerId
           || independentWatch.mode!==s.mode
           || Number(independentWatch.resetEpoch)!==Number(s.resetTimestampMs||0)
+          || independentWatch.link!==(concept==='Lightning Plasma'
+            ?s.lightningPlasmaLinkEnabled===true:s.sagittariusArrowLinkEnabled===true)
           || independentWatch.status!=='WATCHING'||independentWatch.qualified!==true
           || !Number.isSafeInteger(Number(independentWatch.lastQuoteAtMs))
           || Number(independentWatch.lastQuoteAtMs)<=0

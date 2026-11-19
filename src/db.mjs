@@ -4649,9 +4649,10 @@ export class Database {
         ||Date.now()-Number(stamp.signalQuoteAtMs)>5000
         ||Number(entry.openedAtMs)<Number(stamp.signalQuoteAtMs)
         ||Number(watch.watch?.releaseAtMs||0)>Number(entry.openedAtMs)
-        ||Number(watch.watch?.crashDepthCents||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinCrashCents||0:settings.sagittariusArrowMinCrashCents||0)
-        ||Number(watch.watch?.reboundCents||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinReboundCents||0:settings.sagittariusArrowMinReboundCents||0)
-        ||Number(watch.watch?.upwardTicks||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinUpwardTicks||0:settings.sagittariusArrowMinUpwardTicks||0)
+        ||watch.watch?.link!==(c==='Lightning Plasma'?settings.lightningPlasmaLinkEnabled===true:settings.sagittariusArrowLinkEnabled===true)
+        ||(watch.watch?.link!==true && Number(watch.watch?.crashDepthCents||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinCrashCents||0:settings.sagittariusArrowMinCrashCents||0))
+        ||(watch.watch?.link!==true && Number(watch.watch?.reboundCents||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinReboundCents||0:settings.sagittariusArrowMinReboundCents||0))
+        ||(watch.watch?.link!==true && Number(watch.watch?.upwardTicks||0)<Number(c==='Lightning Plasma'?settings.lightningPlasmaMinUpwardTicks||0:settings.sagittariusArrowMinUpwardTicks||0))
         ||watch.watch?.independentRecovery!==true
         ||watch.watch?.authorization!=='VALID_SHADOW_HARD_STOP'
         ||watch.watch?.parentConcept!=='Athena Exclamation'
@@ -4690,8 +4691,8 @@ export class Database {
       const maxEntry=Number(c==='Lightning Plasma'?settings.lightningPlasmaMaxEntryCents:settings.sagittariusArrowMaxEntryCents);
       const minEntry=Number(c==='Lightning Plasma'?settings.lightningPlasmaMinEntryCents:settings.sagittariusArrowMinEntryCents);
       if(!Number.isFinite(maxEntry)||!Number.isFinite(minEntry)||maxEntry<minEntry
-        ||Number(entry.entryPriceCents)>Math.min(Number(frozen.authorizedMaxEntryCents),maxEntry)+1e-9
-        ||Number(entry.entryPriceCents)<minEntry-1e-9)
+        ||Number(entry.entryPriceCents)>Math.min(Number(frozen.authorizedMaxEntryCents),watch.watch?.link===true?99:maxEntry)+1e-9
+        ||Number(entry.entryPriceCents)<(watch.watch?.link===true?1:minEntry)-1e-9)
         throw new Error('independent_own_card_price_changed');
       if((entry.mode==='LIVE' && (entry.entryConfig?.auroraPending?.exactFillRequired!==true
            ||entry.entryConfig?.auroraPending?.preflight?.ok!==true))
