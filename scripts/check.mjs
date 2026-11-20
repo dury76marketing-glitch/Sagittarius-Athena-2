@@ -52,6 +52,24 @@ for(const [key,value] of Object.entries(resetPatch))
   if(roundTrip[key]!==value)throw new Error(`railway_factory_reset_not_persistent:${key}`);
 console.log(`Factory Reset selected-ledger profile and ${factoryChecks} operator contract checks: PASS.`);
 
+// Railway factory-settings certification (diagnostic 2026-11-20T15:13:12Z).
+// Assert all 215 user-editable values, not only the changed keys. A partial
+// GitHub upload retaining an older profile must fail at build time instead of
+// returning HTTP 200 from Reset with the wrong operator-selected card.
+const {LEDGER_FACTORY_OVERRIDES_20261120_151312}=await import('../src/config.mjs');
+for(const [key,value] of Object.entries(LEDGER_FACTORY_OVERRIDES_20261120_151312)){
+  if(expectedFactory[key]!==value||resetPatch[key]!==value)
+    throw new Error(`railway_151312_factory_default_mismatch:${key}`);
+}
+if(Object.keys(resetPatch).length!==215)
+  throw new Error('railway_151312_factory_field_count_mismatch');
+const {createHash}=await import('node:crypto');
+const factorySignature=createHash('sha256').update(JSON.stringify(
+  Object.entries(resetPatch).sort(([a],[b])=>a.localeCompare(b)))).digest('hex');
+if(factorySignature!=='93c7cb6ebaca3362ea3e90494028c3dc082dcbd25a7dca28dc3f22bebf680f80')
+  throw new Error('railway_151312_full_factory_settings_signature_mismatch');
+console.log('Factory Reset 2026-11-20T15:13:12 diagnostic profile, all 215 editable fields: PASS.');
+
 // Railway release gate: syntax checking does not detect missing named ESM exports.
 // Link the production engine/import graph without executing src/index.mjs,
 // which starts the HTTP server and trading lifecycle. Any missing local export,

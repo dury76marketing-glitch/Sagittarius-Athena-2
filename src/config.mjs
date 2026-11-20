@@ -816,6 +816,26 @@ export const LEDGER_FACTORY_OVERRIDES_20261120_144232 = Object.freeze({
   lightningPlasmaMultiply: 2,
 });
 
+// Owner-selected factory defaults from the 2026-11-20T15:13:12Z
+// diagnostic settingsAtExport. These are operator-editable card defaults ONLY.
+// Preserve deployed operator settings, operating mode, LIVE arm, identity,
+// timestamps and database migration proof until a deliberate Factory Reset.
+export const LEDGER_FACTORY_OVERRIDES_20261120_151312 = Object.freeze({
+  athenaExclamationMultiply: 2,
+  crystalWallRecoveryMinReboundCents: 2,
+  crystalWallRecoveryMinUpwardTicks: 4,
+  crystalWallRecoveryParentEntryRiseCents: 1,
+  greatHornMinReboundCents: 2,
+  greatHornMinUpwardTicks: 4,
+  greatHornParentEntryRiseCents: 1,
+  pegasusRyuSeiKenCapitalMinReboundCents: 2,
+  pegasusRyuSeiKenCapitalMinUpwardTicks: 4,
+  pegasusRyuSeiKenCapitalParentEntryRiseCents: 1,
+  scarletNeedleCapitalMinReboundCents: 2,
+  scarletNeedleCapitalMinUpwardTicks: 4,
+  scarletNeedleCapitalParentEntryRiseCents: 1,
+});
+
 export function freshInstallSettings() {
   return {
     ...originalSettings(),
@@ -992,6 +1012,7 @@ export function freshInstallSettings() {
     ...LEDGER_FACTORY_OVERRIDES_20261111_1659,
     ...LEDGER_FACTORY_OVERRIDES_20261116_141852,
     ...LEDGER_FACTORY_OVERRIDES_20261120_144232,
+    ...LEDGER_FACTORY_OVERRIDES_20261120_151312,
     resetTimestampMs:null,
     factoryTradingProfile20261005Applied:true,
     athenaArrowCloneApplied:true,
