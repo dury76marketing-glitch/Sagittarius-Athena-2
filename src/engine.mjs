@@ -567,6 +567,7 @@ export class SagittariusEngine {
       lastWsMessageMs: 0,
       lastDiscoveryMs: 0,
       lastProtectionMs: 0,
+      lastQuoteProtectionMs: 0,
       lastError: null,
     };
     this.speed = {
@@ -6315,8 +6316,16 @@ export class SagittariusEngine {
     void this.db.audit('error', event, { message: this.lastError }).catch(() => {});
   }
 
+  // Proof of an authoritative, database-backed full protection sweep ONLY.
+  // Quote-triggered ticker protection has a different completion scope and
+  // must never reset this timer or suppress the next mandatory full sweep.
   markProtection() {
     this.health.lastProtectionMs = Date.now();
+    this.recomputeHealth();
+  }
+
+  markQuoteProtection() {
+    this.health.lastQuoteProtectionMs=Date.now();
     this.recomputeHealth();
   }
 
@@ -6449,7 +6458,9 @@ export class SagittariusEngine {
           }
           await this.profitGuard.protectTicker(ticker);
           this.market?.noteProtectionEvaluation?.(ticker);
-          this.markProtection();
+          // R10: a quote-specific check is not proof that authoritative
+          // DB-backed exposure has been refreshed for ALL live positions.
+          this.markQuoteProtection();
           await this.learning.trackStopGuardRecovery?.(this.market.quotes,this.settings,this.market,{ticker}).catch(async(error)=>{
             await this.db.audit('warning','stop_guard_recovery_tracking',{ticker,message:String(error?.message||error)}).catch(()=>{});
           });
@@ -7583,6 +7594,32 @@ export class SagittariusEngine {
     return this.lightningPlasmaScaleInStats;
   }
 
+  // R10: Reference-signal and observation bookkeeping is non-protection
+  // work. Schedule it as ONE bounded, sequential background task instead of
+  // awaiting it inside the 1.5s/5s protection loop. An unresponsive read must
+  // never prevent the next genuinely completed, DB-backed protection sweep.
+  // No worker heartbeat, timestamp or protection-success proof is fabricated.
+  scheduleProtectionMaintenance(now=Date.now()) {
+    if(!this.running || this.protectionMaintenancePromise)return false;
+    const task=Promise.resolve().then(async()=>{
+      if(now-this.lastReferenceSweepMs>=REFERENCE_SIGNAL_SWEEP_MS)
+        await this.runReferenceSignalSweep('reference_30s');
+      if(!this.strategy?.observationWaits||this.strategy?.observationRestoreState==='failed')
+        await Promise.resolve(this.strategy?.restoreObservationWaits?.()).catch(()=>{});
+      await Promise.resolve(this.strategy?.releaseObservationWaits?.(now)).catch(()=>{});
+    }).catch(error=>{
+      // This bookkeeping task has no independent LIVE entry authority. Retain
+      // a diagnostic without marking protected exposure as inspected.
+      this.protectionMaintenanceLastError=String(error?.message||error).slice(0,180);
+      void Promise.resolve(this.db?.audit?.('warning','reference_observation_maintenance_failed',
+        {message:this.protectionMaintenanceLastError})).catch(()=>{});
+    }).finally(()=>{
+      if(this.protectionMaintenancePromise===task)this.protectionMaintenancePromise=null;
+    });
+    this.protectionMaintenancePromise=task;
+    return true;
+  }
+
   async protectionLoop() {
     while (this.running) {
       try {
@@ -7608,9 +7645,9 @@ export class SagittariusEngine {
           this.lastLightningSweepAtMs=nowIdle;
           void this.sweepLightningPlasmaScaleIn().then(n=>{this.lightningSweepIdle=!(Number(n)>0);}).catch(e=>this.recordError('lightning_worker_failure',e));
         }
-        if (now - this.lastReferenceSweepMs >= REFERENCE_SIGNAL_SWEEP_MS) await this.runReferenceSignalSweep('reference_30s');
-        if(!this.strategy?.observationWaits||this.strategy?.observationRestoreState==='failed') await this.strategy?.restoreObservationWaits?.().catch(()=>{});
-        await this.strategy?.releaseObservationWaits?.(now).catch(()=>{});
+        // R10: never await lower-priority DB/research work on this watchdog.
+        // The maintenance task preserves its original sequence and single-flight.
+        this.scheduleProtectionMaintenance(now);
       } catch {}
       await sleep((this.protectedTickers?.size||0)>0?PROTECTION_BACKUP_MS:5_000);
     }
