@@ -1,3 +1,4 @@
+import {createQ17LiveCashWitness} from './q17LiveCapitalAdmissibility.mjs';
 import {liveEntryDispatchBookConfirmation} from './liveEntryDispatchBook.mjs';
 import {MODEL_CLONE_CAPITAL_VERSION,modelCloneCapitalId} from './modelCloneCapital.mjs';
 import {maximumSettlementNetAdmission,verifiedLiveBuyFillEconomics} from './executionEconomics.mjs';
@@ -2441,7 +2442,7 @@ export class StrategyEngine {
     // but createHunter itself must independently fail closed before any market
     // refresh, capital work, or broker mutation if LIVE is not currently armed.
     const starlightRealEarly=concept==='Crash Recovery Hunter' && starlightRecovery===true && s.starlightExtinctionRealTradeEnabled===true;
-    if ((!isShadowSaintConcept(concept) || lightningPlasmaScaleIn===true || starlightRealEarly || starlightModelClone===true || independentRecovery===true) && s.mode === 'LIVE' && !this.getLiveReady()) {
+    if ((!isShadowSaintConcept(concept) || lightningPlasmaScaleIn===true || starlightRealEarly || starlightModelClone===true || independentRecovery===true) && s.mode === 'LIVE' && !this.getLiveReady(independentRecovery===true?concept:null)) {
       trace('MODE_AUTHORIZATION','BLOCKED','live_not_ready');
       await this.audit('hunter_entry_mode_authorization_blocked',{concept,ticker:exactTicker,eventTicker:q?.eventTicker || exactTicker,mode:s.mode,scaleIn:lightningPlasmaScaleIn===true});
       return null;
@@ -3090,7 +3091,7 @@ export class StrategyEngine {
       trace('FINAL_ENTRY_POLICY','PASS',finalEntryPolicy.reason,finalEntryPolicy);
       const finalConfirmation=()=>{
         const currentSettings=this.getSettings();
-        if(!sameShadowScope(currentSettings,s) || currentSettings.engineActive===false || (!isModelEnabled(currentSettings,concept) && !((starlightModelClone===true || independentRecovery===true) && ((concept==='Lightning Plasma' && currentSettings.lightningPlasmaEnabled===true) || (concept==='Sagittarius Arrow Recovery' && currentSettings.sagittariusArrowEnabled===true)))) || ((!isShadowSaintConcept(concept)||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true||(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true))&&s.mode==='LIVE'&&!this.getLiveReady()))return {ok:false,reason:'execution_authority_changed'};
+        if(!sameShadowScope(currentSettings,s) || currentSettings.engineActive===false || (!isModelEnabled(currentSettings,concept) && !((starlightModelClone===true || independentRecovery===true) && ((concept==='Lightning Plasma' && currentSettings.lightningPlasmaEnabled===true) || (concept==='Sagittarius Arrow Recovery' && currentSettings.sagittariusArrowEnabled===true)))) || ((!isShadowSaintConcept(concept)||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true||(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true))&&s.mode==='LIVE'&&!this.getLiveReady(independentRecovery===true?concept:null)))return {ok:false,reason:'execution_authority_changed'};
         if(cardIdentity(currentSettings)!==submittedCardIdentity)return {ok:false,reason:'execution_settings_changed'};
         const currentFamily=executionMarketFamilyExclusion(exactTicker,currentSettings,{concept});
         if(currentFamily.blocked)return {ok:false,reason:currentFamily.reason};
@@ -3599,7 +3600,7 @@ export class StrategyEngine {
       // any broker BUY can occur. A crash/network ambiguity after submission is
       // therefore recoverable by entryClientOrderId instead of becoming an
       // unowned broker position.
-      if(!this.getLiveReady()){trace('EXECUTION','BLOCKED','live_not_ready');return null;}
+      if(!this.getLiveReady(independentRecovery===true?concept:null)){trace('EXECUTION','BLOCKED','live_not_ready');return null;}
 
       // LIVE shard preflight is execution infrastructure, not trading doctrine.
       // Resolve Kalshi's authoritative market shard, prove that shard has the
@@ -3625,6 +3626,17 @@ export class StrategyEngine {
       const pendingConfirmation=finalConfirmation();recordFinalConfirmation(pendingConfirmation);if(!pendingConfirmation.ok)return null;frozenEntryConfig.finalEntryConfirmation=structuredClone(pendingConfirmation);
       const pendingConfig={...frozenEntryConfig,auroraPending:{version:AURORA_EXECUTION.version,preflight:auroraPreflight,exactFillRequired:true},finalEntryConfirmation:structuredClone(pendingConfirmation)};
       let e=makeEntry({status:'entry_pending',entryPriceCents:plannedEntry,count:plannedCount,entryFeeCents:0,entryClientOrderId,entryConfig:pendingConfig});
+      // Independent Athena-loss LP/Arrow starts join the same native pending
+      // cash admission fence as GH/CW/SN/PR. Normal SIM and other attack
+      // qualification policies remain untouched.
+      if(independentRecovery===true){
+        const cashWitness=createQ17LiveCashWitness(e,shardPreflight);
+        if(!cashWitness.ok){
+          trace('EXECUTION','BLOCKED',cashWitness.reason,{hunterId:e.id});
+          return null;
+        }
+        e.entryConfig.q17LiveCashWitness=cashWitness.witness;
+      }
       if(!(await persistExecutableEntry(e)))return null;
       trace('PERSISTENCE','PASS','live_entry_intent_persisted',{hunterId:e.id,status:e.status,entryClientOrderId});
       // The durable entry_pending row is now the shared ledger truth. Release

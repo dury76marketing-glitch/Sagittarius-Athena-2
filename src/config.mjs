@@ -11,7 +11,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-Q-17-R8-LIVE-ADAPTER-RESEARCH-SIM-LOCKED-2026-11-20';
+export const RELEASE = 'SAGITTARIUS-Q-17-R9-INTEGRATED-LIVE-PARITY-CANDIDATE-2026-11-20';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -22,8 +22,8 @@ export const env = Object.freeze({
   kalshiFallbackBaseUrl: (process.env.KALSHI_FALLBACK_BASE_URL || 'https://external-api.kalshi.com/trade-api/v2').replace(/\/$/, ''),
   kalshiWsUrl: process.env.KALSHI_WS_URL || 'wss://external-api-ws.kalshi.com/trade-api/ws/v2',
   kalshiFallbackWsUrl: process.env.KALSHI_FALLBACK_WS_URL || 'wss://api.elections.kalshi.com/trade-api/ws/v2',
-  defaultEngineMode: 'SIMULATION', // Q-17 compile-time SIM-only invariant
-  allowLiveTrading: false, // Q-17 never honors LIVE deployment variables
+  defaultEngineMode: 'SIMULATION', // Never auto-enable LIVE on a new installation.
+  allowLiveTrading: bool('ALLOW_LIVE_TRADING', false), // Explicit deployment-level authorization required.
   systemName: process.env.SYSTEM_NAME || 'SAGITTARIUS',
   ownerId: process.env.SYSTEM_OWNER_ID || 'sagittarius-main',
 });
@@ -1001,7 +1001,7 @@ export function startupSettingsPreservation(settings, { preserveCard = false } =
 }
 
 export function normalizeStartupExecutionMode(settings = {}, allowLiveTrading = env.allowLiveTrading) {
-  const current = q17SimSettings(settings && typeof settings === 'object' ? { ...settings } : {});
+  const current = settings && typeof settings === 'object' ? { ...settings } : {};
   // A persisted LIVE selection is impossible to execute when deployment policy
   // explicitly disables LIVE trading. Recover deterministically to SIMULATION
   // while preserving engineActive and every strategy setting. If LIVE is
@@ -1086,9 +1086,9 @@ export function sharedAccountBook({ systemId = "SAGITTARIUS", positions = [], ow
 export function preserveExecutionArm(prior = {}, sanitized = {}) {
   const next = { ...(sanitized && typeof sanitized === 'object' ? sanitized : {}) };
   const mode = String(prior?.mode || '').toUpperCase();
-  next.mode = 'SIMULATION';
-  next.liveArmed = false;
-  next.liveOwnerAuthorized = false;
+  next.mode = String(prior?.mode||'SIMULATION').toUpperCase()==='LIVE'?'LIVE':'SIMULATION';
+  next.liveArmed = next.mode==='LIVE'&&prior?.liveArmed===true;
+  next.liveOwnerAuthorized = next.mode==='LIVE'&&prior?.liveOwnerAuthorized===true;
   return next;
 }
 
@@ -1193,7 +1193,7 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   out.momentumHunterEnabled=false;
   if (Object.hasOwn(src, 'systemName') && String(src.systemName).trim()) out.systemName = String(src.systemName).trim();
   if (Object.hasOwn(src, 'ownerId') && String(src.ownerId).trim()) out.ownerId = String(src.ownerId).trim();
-  out.mode = 'SIMULATION'; // Q-17 cannot persist a LIVE mode
+  out.mode = String(src.mode||'').toUpperCase()==='LIVE'?'LIVE':'SIMULATION'; // Preserve source-owned mode.
   if (Object.hasOwn(src, 'andromedaThunderWaveLevel')) {
     const raw=String(src.andromedaThunderWaveLevel||'').trim().toUpperCase();
     out.andromedaThunderWaveLevel = raw==='MID'||raw==='MEDIUM'?'MID':raw==='LOW'?'LOW':(raw==='OPEN'||raw==='ALL'||raw==='NONE'||raw==='CLEAR')?'OPEN':'HIGH';
@@ -1261,8 +1261,11 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   // rejects a proven executable IOC through an unrelated random coin flip.
 
   out.simFillProbability = 1;
-  out.liveArmed = false;
-  out.liveOwnerAuthorized = false;
+  // DB-side authorization verifiers must be able to read the true committed
+  // LIVE arm. Startup callers explicitly disarm in loadSettings(); the source
+  // sanitizer is used by transactional verifiers too, so it must not erase proof.
+  out.liveArmed = out.mode==='LIVE'&&src.liveArmed===true;
+  out.liveOwnerAuthorized = out.mode==='LIVE'&&src.liveOwnerAuthorized===true;
   return out;
 }
 

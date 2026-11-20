@@ -1,4 +1,5 @@
 import {isLegacyFundedQuarantine} from './liveSettlementReconciliation.mjs';
+import {q17LivePendingReserveDecision} from './q17LiveCapitalAdmissibility.mjs';
 import {createLiveFundingStore,LIVE_FUNDING_JOURNAL_SQL} from './liveFundingJournal.mjs';
 import {maximumSettlementNetAdmission,frozenRecoveryEconomicTargetMatches} from './executionEconomics.mjs';
 import {OPS_SCHEMA_SQL} from './operationalSafety.mjs';
@@ -1936,7 +1937,7 @@ export class Database {
     const raw=r.rows[0]?.value||{},clean=sanitizeRuntimeSettings(raw,defaults);
     // Startup callers remain disarmed by default. Only readback of an already
     // authorized runtime commit may retain its persisted LIVE admission flag.
-    if(preserveRuntimeArm)clean.liveArmed=clean.mode==='LIVE'&&raw.liveArmed===true;
+    if(!preserveRuntimeArm)clean.liveArmed=false;
     clean.liveOwnerAuthorized=raw.liveOwnerAuthorized===true;
     return clean;
   }
@@ -2215,18 +2216,10 @@ export class Database {
           limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,GH_CONCEPT,parent.id,entry.ownerId,entry.mode]);
         if(overlaps.rowCount)throw new Error('gh_sim_cross_attack_exact_ticker_conflict');
       }
-      // A recovered LIVE pending intent is a real broker obligation, even if
-      // the POST response was lost. Block any additional GH capital intent
-      // until ALL earlier owner-wide capital entries have been reconciled.
-      // This is deliberately stricter than a per-ticker or per-seat admission:
-      // a single current broker balance must never be spent twice by GH.
-      if(live){
-        const outstanding=await client.query(`select id from sag_entries
-          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
-          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
-          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
-        if(outstanding.rowCount)throw new Error('gh_live_outstanding_owner_order_requires_reconciliation');
-      }
+      // LIVE pending cash is reserved per exchange shard, not by an
+      // account-wide one-pending-order veto. The row-level transaction and
+      // original parent/seat/capacity/ticker checks remain authoritative.
+      if(live)await this.verifyQ17LivePendingCashAtCommit(entry,client);
       // A different owner's completed SIM profits must not finance this
       // owner's GH purchases. Legacy/open exposure in this owner's system
       // remains reserved even when its entry predates the current reset.
@@ -2515,18 +2508,10 @@ export class Database {
           limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,SA_CONCEPT,parent.id,entry.ownerId,entry.mode]);
         if(overlaps.rowCount)throw new Error('sa_sim_cross_attack_exact_ticker_conflict');
       }
-      // A recovered LIVE pending intent is a real broker obligation, even if
-      // the POST response was lost. Block any additional GH capital intent
-      // until ALL earlier owner-wide capital entries have been reconciled.
-      // This is deliberately stricter than a per-ticker or per-seat admission:
-      // a single current broker balance must never be spent twice by GH.
-      if(live){
-        const outstanding=await client.query(`select id from sag_entries
-          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
-          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
-          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
-        if(outstanding.rowCount)throw new Error('sa_live_outstanding_owner_order_requires_reconciliation');
-      }
+      // LIVE pending cash is reserved per exchange shard, not by an
+      // account-wide one-pending-order veto. The row-level transaction and
+      // original parent/seat/capacity/ticker checks remain authoritative.
+      if(live)await this.verifyQ17LivePendingCashAtCommit(entry,client);
       // A different owner's completed SIM profits must not finance this
       // owner's GH purchases. Legacy/open exposure in this owner's system
       // remains reserved even when its entry predates the current reset.
@@ -2858,18 +2843,10 @@ export class Database {
           limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,SN_CONCEPT,parent.id,entry.ownerId,entry.mode]);
         if(overlaps.rowCount)throw new Error('sn_sim_cross_attack_exact_ticker_conflict');
       }
-      // A recovered LIVE pending intent is a real broker obligation, even if
-      // the POST response was lost. Block any additional GH capital intent
-      // until ALL earlier owner-wide capital entries have been reconciled.
-      // This is deliberately stricter than a per-ticker or per-seat admission:
-      // a single current broker balance must never be spent twice by GH.
-      if(live){
-        const outstanding=await client.query(`select id from sag_entries
-          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
-          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
-          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
-        if(outstanding.rowCount)throw new Error('sn_live_outstanding_owner_order_requires_reconciliation');
-      }
+      // LIVE pending cash is reserved per exchange shard, not by an
+      // account-wide one-pending-order veto. The row-level transaction and
+      // original parent/seat/capacity/ticker checks remain authoritative.
+      if(live)await this.verifyQ17LivePendingCashAtCommit(entry,client);
       // A different owner's completed SIM profits must not finance this
       // owner's GH purchases. Legacy/open exposure in this owner's system
       // remains reserved even when its entry predates the current reset.
@@ -3129,18 +3106,10 @@ export class Database {
           limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,PR_CONCEPT,parent.id,entry.ownerId,entry.mode]);
         if(overlaps.rowCount)throw new Error('pr_sim_cross_attack_exact_ticker_conflict');
       }
-      // A recovered LIVE pending intent is a real broker obligation, even if
-      // the POST response was lost. Block any additional GH capital intent
-      // until ALL earlier owner-wide capital entries have been reconciled.
-      // This is deliberately stricter than a per-ticker or per-seat admission:
-      // a single current broker balance must never be spent twice by GH.
-      if(live){
-        const outstanding=await client.query(`select id from sag_entries
-          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
-          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
-          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
-        if(outstanding.rowCount)throw new Error('pr_live_outstanding_owner_order_requires_reconciliation');
-      }
+      // LIVE pending cash is reserved per exchange shard, not by an
+      // account-wide one-pending-order veto. The row-level transaction and
+      // original parent/seat/capacity/ticker checks remain authoritative.
+      if(live)await this.verifyQ17LivePendingCashAtCommit(entry,client);
       // A different owner's completed SIM profits must not finance this
       // owner's GH purchases. Legacy/open exposure in this owner's system
       // remains reserved even when its entry predates the current reset.
@@ -3698,7 +3667,7 @@ export class Database {
     const raw=r.rows[0]?.value||{},clean=sanitizeRuntimeSettings(raw,defaults);
     // Startup callers remain disarmed by default. Only readback of an already
     // authorized runtime commit may retain its persisted LIVE admission flag.
-    if(preserveRuntimeArm)clean.liveArmed=clean.mode==='LIVE'&&raw.liveArmed===true;
+    if(!preserveRuntimeArm)clean.liveArmed=false;
     clean.liveOwnerAuthorized=raw.liveOwnerAuthorized===true;
     return clean;
   }
@@ -3977,18 +3946,10 @@ export class Database {
           limit 1`,[entry.systemName,entry.ticker,PORTFOLIO_CONCEPT_NAMES,CW_CONCEPT,parent.id,entry.ownerId,entry.mode]);
         if(overlaps.rowCount)throw new Error('cw_sim_cross_attack_exact_ticker_conflict');
       }
-      // A recovered LIVE pending intent is a real broker obligation, even if
-      // the POST response was lost. Block any additional GH capital intent
-      // until ALL earlier owner-wide capital entries have been reconciled.
-      // This is deliberately stricter than a per-ticker or per-seat admission:
-      // a single current broker balance must never be spent twice by GH.
-      if(live){
-        const outstanding=await client.query(`select id from sag_entries
-          where owner_id=$1 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
-          and concept_name=any($2::text[]) and status='entry_pending' limit 1`,
-          [entry.ownerId,PORTFOLIO_CONCEPT_NAMES]);
-        if(outstanding.rowCount)throw new Error('cw_live_outstanding_owner_order_requires_reconciliation');
-      }
+      // LIVE pending cash is reserved per exchange shard, not by an
+      // account-wide one-pending-order veto. The row-level transaction and
+      // original parent/seat/capacity/ticker checks remain authoritative.
+      if(live)await this.verifyQ17LivePendingCashAtCommit(entry,client);
       // A different owner's completed SIM profits must not finance this
       // owner's GH purchases. Legacy/open exposure in this owner's system
       // remains reserved even when its entry predates the current reset.
@@ -4777,6 +4738,11 @@ export class Database {
         consumedBefore:Number(used.rows?.[0]?.used||0),claimedAtMs:Date.now(),
         ordinaryCi1CooldownUnchanged:true,starlightParentChildExempt:true}};
       if(!isCurrent())throw new Error('independent_signal_changed_before_commit');
+      // The independent LP/Arrow starters reserve collateral through the same
+      // committed pending ledger as their descendants. The runtime settings
+      // FOR UPDATE above already serializes these short admission transactions;
+      // no additional global owner/mutation lock or wait queue is introduced.
+      if(entry.mode==='LIVE')await this.verifyQ17LivePendingCashAtCommit(entry,client);
       await client.query("select set_config('sagittarius.independent_recovery_entry','admitted',true)");
       AUTHORIZED_INDEPENDENT_RECOVERY_INSERTS.add(client);
       let saved;
@@ -4923,6 +4889,29 @@ export class Database {
         JSON.stringify(entryConfig||{}),Date.now(),JSON.stringify(entry.entryConfig||{})]);
     return r.rows[0]?{rejected:true,entry:rowEntry(r.rows[0])}
       :{rejected:false,entry:await this.entryById(entry.id)};
+  }
+
+  // Q17-R9: the runtime settings row is FOR UPDATE during every recovery
+  // admission. Under that transaction lock, compare the fresh broker shard
+  // witness with *only* collateral reserved by pending orders on that shard.
+  // A different market's pending intent is no longer an unconditional veto.
+  // The order client ID, per-attack parent/seat guards, and retry claim are
+  // enforced independently and are not weakened by this accounting check.
+  async verifyQ17LivePendingCashAtCommit(entry,client){
+    if(entry?.mode!=='LIVE'||entry?.status!=='entry_pending'
+      ||!client||typeof client.query!=='function')
+      throw new Error('q17_live_cash_admission_scope_invalid');
+    const pending=await client.query(`select id,count,entry_price_cents,entry_config
+      from sag_entries where owner_id=$1 and system_name=$2 and mode='LIVE'
+        and archived=false and ${CAPITAL_SQL} and status='entry_pending'
+        and concept_name=any($3::text[]) order by id limit 501`,
+      [entry.ownerId,entry.systemName,PORTFOLIO_CONCEPT_NAMES]);
+    if(pending.rows.length>500)throw new Error('q17_live_pending_cash_ledger_overflow');
+    const other=(pending.rows||[]).map(x=>({id:x.id,count:Number(x.count),
+      entryPriceCents:Number(x.entry_price_cents),entryConfig:x.entry_config||{}}));
+    const decision=q17LivePendingReserveDecision(entry,other);
+    if(!decision.ok)throw new Error(decision.reason);
+    return decision;
   }
 
   async insertEntry(e,queryClient=this.pool){

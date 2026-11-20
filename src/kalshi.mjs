@@ -535,7 +535,7 @@ export class KalshiClient {
       return dispatch();
     },deadline,{critical});}
     catch(error){result={ok:false,status:0,...(!started?{notSubmitted:true}:{}),data:{error:String(error?.message||'broker_request_failed')},transportCode:transportCodeOf(error)};}
-    finally{if(mutation&&result?.notSubmitted!==true){this.invalidateBalanceReadAuthority();this.onAccountMutation?.();}}
+    finally{if(mutation&&result?.notSubmitted!==true){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'finished'});}}
     if(!result.ok&&!mutation){
       const failure=this.requestFailure(apiPath,result,{critical,phase:!started?'queue':null});
       this.lastRequestFailure=failure;
@@ -624,7 +624,7 @@ export class KalshiClient {
         if(remaining<=0)return{ok:false,status:0,
           ...((mutation||balanceRead)?{notSubmitted:priorAttemptsSubmitted===0}:{}),
           data:{error:'broker_request_deadline_exceeded'},...preceding()};
-        if(mutation){this.invalidateBalanceReadAuthority();this.onAccountMutation?.();}
+        if(mutation){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'before_send'});}
         priorAttemptsSubmitted++;
         const r = await this.fetchOnce(method, host, apiPath, body, Math.min(timeoutMs,remaining), authenticated);
         last = r;
@@ -1469,7 +1469,45 @@ export class KalshiClient {
     return {authoritative:true,found:false,reason:'live_exchange_transfer_not_visible'};
   }
 
-  async ensureExchangeBalance({ ticker, exchangeIndex = null, requiredCents = 0 } = {}) {
+  // R9: coalesce only *simultaneous same-shard* funding preflights.
+  // Sharing one authenticated READY balance snapshot is not order permission:
+  // each candidate still takes the durable per-owner pending-cash admission
+  // and the independent pre-send executable cash/book checks.
+  // A failed/ambiguous transfer is NEVER turned into a ready balance.
+  async ensureExchangeBalance(options={}) {
+    const idx=finiteExchangeIndex(options?.exchangeIndex);
+    if(idx==null)return this._ensureExchangeBalanceCore(options);
+    const flights=this.q17ExchangeBalanceFlights??=new Map();
+    const active=flights.get(idx);
+    if(active){
+      const result=await active;
+      const required=Number(options?.requiredCents);
+      // A larger first candidate can fail for insufficient total cash while
+      // a smaller concurrent candidate is still fundable on this exact shard.
+      // Only no-transfer, authenticated balance outcomes qualify; any pending
+      // or ambiguous transfer remains a denial for all shared callers.
+      const verifiedNoTransfer=result?.ok===true
+        ||['live_account_insufficient_balance','live_exchange_donor_breakdown_unavailable']
+          .includes(String(result?.reason||''));
+      if(verifiedNoTransfer&&brokerDecimal(required)&&required>0
+        &&brokerDecimal(result.availableCents)
+        &&Number(result.availableCents)+1e-9>=required)
+        return {...result,ok:true,requiredCents:required,
+          reason:'live_exchange_verified_shared_preflight',sameShardSharedPreflight:true};
+      // No unverified shared balance or pending transfer can authorize entry.
+      // Ask the next entry phase to retry rather than sending a second transfer.
+      return {ok:false,reason:result?.ok===true?'live_exchange_shared_cash_insufficient':
+        String(result?.reason||'live_exchange_shared_preflight_incomplete'),
+        exchangeIndex:idx,availableCents:result?.availableCents??null,
+        requiredCents:required,retryable:true};
+    }
+    const task=Promise.resolve().then(()=>this._ensureExchangeBalanceCore(options));
+    flights.set(idx,task);
+    try{return await task;}
+    finally{if(flights.get(idx)===task)flights.delete(idx);}
+  }
+
+  async _ensureExchangeBalanceCore({ ticker, exchangeIndex = null, requiredCents = 0 } = {}) {
     if(!brokerDecimal(requiredCents)||!(Number(requiredCents)>0))
       return {ok:false,reason:'live_exchange_collateral_requirement_invalid',exchangeIndex:null,availableCents:null,requiredCents:null};
     const deadline=performance.now()+OPS_LIMITS.requestBudgetMs;
@@ -1580,7 +1618,8 @@ export class KalshiClient {
   }
 
   async placeOrder(args,{beforeDispatch=null,confirmDispatch=null}={}) {
-    throw new Error('q17_broker_order_submission_forbidden');
+    // Deployment policy, order provenance, durable claim and final dispatch
+    // controls are enforced by the enclosing runtime before transport.
     let payload;
     try{payload=this.buildOrder(args);}catch(error){
       return {ok:false,notSubmitted:true,ambiguous:false,httpStatus:0,fillCount:0,

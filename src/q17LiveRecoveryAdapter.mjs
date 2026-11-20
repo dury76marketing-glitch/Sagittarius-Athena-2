@@ -1,15 +1,15 @@
 /**
- * Q-17 integrated recovery LIVE adapter — research candidate, not LIVE certified.
+ * Q-17 integrated recovery LIVE adapter — R9 pre-certification candidate.
  * This module contains NO strategy admission rule. The existing PostgreSQL
  * parent/watch/seat/authority proof is required for every recovery BUY.
  *
- * The Q-17 SIM-only release gate remains compiled shut: dispatch entrypoints
- * refuse before touching a broker. An isolated injected simulator exercises
- * this same dispatch decision and durable no-retry mechanism without real API I/O.
+ * The deployed policy and manual operating authority must fail closed until
+ * authorized. Isolated injected runtime probes exercise durable no-retry
+ * decisions without an actual PostgreSQL or Kalshi connection.
  *
- * Once an owner-authorized successor is separately certified, the runtime
- * functions remain required to use the original client ID, atomic durable
- * dispatch claim, and broker-authoritative ProfitGuard.reconcilePending.
+ * On any future owner-authorized LIVE deployment, execution must preserve
+ * original client IDs, atomic durable dispatch claims, and broker-authoritative
+ * ProfitGuard.reconcilePending. Synthetic tests are not LIVE certification.
  */
 import {Q17_SIM_ONLY} from './q17Profile.mjs';
 import {liveRecoveryCollateralRequirement} from './executionEconomics.mjs';

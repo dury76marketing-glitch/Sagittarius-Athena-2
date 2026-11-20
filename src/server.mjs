@@ -970,7 +970,7 @@ const marksTimer=setInterval(pushMarks,500);
         database:engine.db?.resourceSnapshot?.()||null,brokerRequests:engine.kalshi?.resourceSnapshot?.()||null});
     }
     if(u.pathname==='/api/settings'&&req.method==='PATCH')return json(res,200,await engine.patchSettings(await body(req)));
-    if(u.pathname==='/api/mode'&&req.method==='POST')return json(res,403,{error:'q17_sim_only_mode_immutable',mode:'SIMULATION'});
+    if(u.pathname==='/api/mode'&&req.method==='POST'){const b=await body(req);return json(res,200,await engine.setMode(b.mode,b.confirmation));}
     if(u.pathname==='/api/engine'&&req.method==='POST'){const b=await body(req);if(typeof b?.active!=='boolean')return json(res,400,{error:'invalid_engine_active_request'});return json(res,200,await engine.setEngine(b.active));}
     if(u.pathname==='/api/run-scan'&&req.method==='POST'){engine.requestScan();return json(res,202,{ok:true,requested:true});}
     if(u.pathname==='/api/reset-defaults'&&req.method==='POST')return json(res,200,await engine.resetOperatorSettingsToFactory());
@@ -979,7 +979,7 @@ const marksTimer=setInterval(pushMarks,500);
     if(u.pathname==='/api/emergency-exit'&&req.method==='POST')return json(res,200,await engine.emergencyExit(await body(req)));
     if(u.pathname==='/api/manual-cashout'&&req.method==='POST')return json(res,200,await engine.manualCashout(await body(req)));
     if(u.pathname==='/api/credentials'&&req.method==='POST')return json(res,403,{error:'q17_credentials_mutation_disabled'});
-    if(u.pathname==='/api/test-connection'&&req.method==='POST')return json(res,403,{error:'q17_broker_account_connection_disabled'});
+    if(u.pathname==='/api/test-connection'&&req.method==='POST')return json(res,200,await engine.testConnection({authenticate:true}));
     if(u.pathname==='/api/diagnostics'&&req.method==='GET')return json(res,200,await collectDiagnosticData(engine));
     if(u.pathname==='/api/diagnostics/full-trading/download'&&req.method==='GET'){
       try{

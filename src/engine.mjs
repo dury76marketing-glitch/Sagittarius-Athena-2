@@ -1,12 +1,12 @@
 import { auroraStopWindowView } from './profitGuard.mjs';
 import {hasKnownZeroLiveEntryFee,liveRecoveryCollateralRequirement} from './executionEconomics.mjs';
+import {createQ17LiveCashWitness,q17LiveOwnedPositionDisposition} from './q17LiveCapitalAdmissibility.mjs';
 import {OperationalMonitor,QueueBudget,BoundedCoalescingQueue,scopeKey,validateBalance,validateRestingOrders,ownOrderIssues} from './operationalSafety.mjs';
 import {deliverOperationalAlert,alertWebhookConfigured} from './operationalWatchdog.mjs';
 import {randomUUID} from 'node:crypto';
 import {MemoryTelemetry,MEMORY_REPAIR_VERSION} from './runtimeMemory.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_VERSION} from './athenaStarlightTrigger.mjs';
 import {BUILD_INFO} from './authority.mjs';
-import {q17SimSettings} from './q17Profile.mjs';
 import {createGreatHornCapitalEntry} from './greatHornSimCapital.mjs';
 import {greatHornSeatPlan} from './greatHornRecovery.mjs';
 import {dispatchGreatHornLiveIntent} from './q17LiveRecoveryAdapter.mjs';
@@ -3653,7 +3653,7 @@ export class SagittariusEngine {
     const persistedArmedAtBoot=loadedSettings.mode==='LIVE'&&loadedSettings.liveArmed===true;
     if(typeof this.db.loadSettingsRevision==='function')this.settingsPersistence.lastRevision=await this.db.loadSettingsRevision();
     const startupMode = normalizeStartupExecutionMode(loadedSettings, env.allowLiveTrading);
-    this.settings = q17SimSettings(startupMode.settings);
+    this.settings = startupMode.settings;
     // The database loader already supplies fresh-install defaults for missing
     // fields. Seal legacy card migrations BEFORE any can overwrite saved values.
     const preserved = startupSettingsPreservation(this.settings);
@@ -4085,7 +4085,7 @@ export class SagittariusEngine {
       getCurrentCrashWatch: (concept,id,episode)=>this.currentCrashWatch(concept,id,episode),getCurrentStarlightWatch:(id)=>this.starlightRecoveryWatches?.get(String(id))||null,registerObservationWatch:(concept,watch)=>this.registerObservationWatch(concept,watch),
       athena: this.legacyAthena,
       getSettings: () => this.settings,
-      getLiveReady: () => this.isLiveReady(),
+      getLiveReady: (capitalConcept=null) => (capitalConcept==='Lightning Plasma'||capitalConcept==='Sagittarius Arrow Recovery')?this.isLiveReadyForQ17Recovery():this.isLiveReady(),
       refreshGameClock: (q, options) => this.refreshGameClockForQuote(q, options),
       onHunterOpened: (entry) => {
         // R33: use only durable open/exit-pending positions or a broker-proven
@@ -4155,9 +4155,14 @@ export class SagittariusEngine {
     // R61 Scarlet Needle has no delayed/restart arm state. Crystal-Wall-win continuation
     // is authorized only by a newly persisted profitable close event.
     this.market.start();
-    // Q-17: public market REST health only; no broker account reads or reconciliation.
-    await this.testConnection().catch((e) => { this.recordError('q17_public_market_connection',e); });
-    this.health.reconciliationOk=true;
+    // SIM retains the exact public-market startup path. An already-selected
+    // LIVE installation must restore authenticated broker truth BEFORE any
+    // health-gated automatic rearm can run; never invent reconciliation green.
+    await this.testConnection().catch((e) => { this.recordError('startup_market_or_broker_connection',e); });
+    if(this.settings.mode==='LIVE'){
+      this.health.reconciliationOk=false;
+      await this.reconcileBroker().catch((e)=>this.recordError('startup_live_reconciliation',e));
+    }else this.health.reconciliationOk=true;
     this.startStarlightRecoveryMaintenance();
     // R33: complete a startup read of authoritative owned exposure before the
     // market scanner can begin admitting entries. A failed sweep remains a
@@ -4187,7 +4192,17 @@ export class SagittariusEngine {
       const original=this[method].bind(this);
       this[method]=(...args)=>this.operational.run(name,()=>original(...args));
     }
-    this.kalshi.onAccountMutation=()=>this.operational.invalidateAccount('broker_account_mutation');
+    this.kalshi.onAccountMutation=(mutation={})=>{
+      const id=String(mutation?.clientOrderId||'');
+      const localTag=this.cloneIdentity?.tag;
+      const ownBuy=mutation?.method==='POST'&&mutation?.apiPath==='/portfolio/events/orders'
+        &&mutation?.side==='bid'&&typeof localTag==='string'
+        &&id.startsWith(`sagc-${localTag}-`);
+      this.operational.invalidateAccount(ownBuy?'q17_owned_buy_in_flight':'broker_account_mutation');
+      // Re-establish the fresh account proof promptly instead of leaving a
+      // committed own BUY as a long-lived GLOBAL entry choke.
+      if(mutation?.phase==='finished')this.queueReconcile?.();
+    };
     this.operational.requireWorker('persistence');
     this.operational.budget=this.workBudget;
     this.operational.initialized=true;
@@ -4318,7 +4333,7 @@ export class SagittariusEngine {
     const simulationToken=live?null:this.simulationMutationGate?.capture?.();
     if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
       return {ok:false,reason:'gh_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReady())||s.engineActive!==true||s.greatHornEnabled!==true
+    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.greatHornEnabled!==true
       ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
       return {ok:false,reason:'gh_sim_operator_or_signal_disabled'};
     const parent=await this.db.entryById(watch.parentEntryId);
@@ -4367,7 +4382,7 @@ export class SagittariusEngine {
     plan.availableAtLimitCount=depth.count;
     const current=()=>{const c=this.settings;
       return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReady())&&c?.engineActive===true
+        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
         &&c?.greatHornEnabled===true&&String(c.systemName)===String(s.systemName)
         &&String(c.ownerId)===String(s.ownerId)
         &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
@@ -4399,6 +4414,9 @@ export class SagittariusEngine {
         exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
       if(!balance?.ok)return {ok:false,reason:balance?.reason||'gh_live_exchange_preflight_denied'};
       planned.entry.entryConfig.brokerRouting={version:'GH1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
+      const witness=createQ17LiveCashWitness(planned.entry,balance);
+      if(!witness.ok)return {ok:false,reason:witness.reason};
+      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
     }
     // Enter the SIM reset gate immediately before the PostgreSQL financial
     // transaction. An in-progress reset rejects admission; an admitted
@@ -4418,7 +4436,7 @@ export class SagittariusEngine {
         :await this.db.insertGreatHornSimulationEntry(planned.entry,{quote,isCurrent:current});
       if(live){
         const receipt=await dispatchGreatHornLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReady(),readSettings:()=>this.settings,
+          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
           readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
           audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
         return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
@@ -4695,7 +4713,7 @@ export class SagittariusEngine {
     const simulationToken=live?null:this.simulationMutationGate?.capture?.();
     if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
       return {ok:false,reason:'sa_sim_reset_gate_unavailable'};
-    if(live&&!this.isLiveReady()){
+    if(live&&!this.isLiveReadyForQ17Recovery()){
       this.sagittariusArrowLastDenial={atMs:Date.now(),reason:'sa_live_not_ready',liveArmed:s.liveArmed===true};
       return {ok:false,reason:'sa_live_not_ready'};
     }
@@ -4751,7 +4769,7 @@ export class SagittariusEngine {
     plan.availableAtLimitCount=depth.count;
     const current=()=>{const c=this.settings;
       return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReady())&&c?.engineActive===true
+        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
         &&c?.sagittariusArrowEnabled===true&&String(c.systemName)===String(s.systemName)
         &&String(c.ownerId)===String(s.ownerId)
         &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
@@ -4783,6 +4801,9 @@ export class SagittariusEngine {
         exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
       if(!balance?.ok)return {ok:false,reason:balance?.reason||'sa_live_exchange_preflight_denied'};
       planned.entry.entryConfig.brokerRouting={version:'SA1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
+      const witness=createQ17LiveCashWitness(planned.entry,balance);
+      if(!witness.ok)return {ok:false,reason:witness.reason};
+      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
     }
     // Enter the SIM reset gate immediately before the PostgreSQL financial
     // transaction. An in-progress reset rejects admission; an admitted
@@ -4802,7 +4823,7 @@ export class SagittariusEngine {
         :await this.db.insertSagittariusArrowSimulationEntry(planned.entry,{quote,isCurrent:current});
       if(live){
         const receipt=await dispatchSagittariusArrowLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReady(),readSettings:()=>this.settings,
+          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
           readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
           audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
         return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
@@ -5064,7 +5085,7 @@ export class SagittariusEngine {
     const simulationToken=live?null:this.simulationMutationGate?.capture?.();
     if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
       return {ok:false,reason:'sn_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReady())||s.engineActive!==true||s.scarletNeedleCapitalEnabled!==true
+    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.scarletNeedleCapitalEnabled!==true
       ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
       return {ok:false,reason:'sn_sim_operator_or_signal_disabled'};
     const parent=await this.db.entryById(watch.parentEntryId);
@@ -5113,7 +5134,7 @@ export class SagittariusEngine {
     plan.availableAtLimitCount=depth.count;
     const current=()=>{const c=this.settings;
       return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReady())&&c?.engineActive===true
+        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
         &&c?.scarletNeedleCapitalEnabled===true&&String(c.systemName)===String(s.systemName)
         &&String(c.ownerId)===String(s.ownerId)
         &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
@@ -5145,6 +5166,9 @@ export class SagittariusEngine {
         exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
       if(!balance?.ok)return {ok:false,reason:balance?.reason||'sn_live_exchange_preflight_denied'};
       planned.entry.entryConfig.brokerRouting={version:'SN2-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
+      const witness=createQ17LiveCashWitness(planned.entry,balance);
+      if(!witness.ok)return {ok:false,reason:witness.reason};
+      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
     }
     // Enter the SIM reset gate immediately before the PostgreSQL financial
     // transaction. An in-progress reset rejects admission; an admitted
@@ -5164,7 +5188,7 @@ export class SagittariusEngine {
         :await this.db.insertScarletNeedleCapitalSimulationEntry(planned.entry,{quote,isCurrent:current});
       if(live){
         const receipt=await dispatchScarletNeedleCapitalLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReady(),readSettings:()=>this.settings,
+          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
           readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
           audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
         return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
@@ -5424,7 +5448,7 @@ export class SagittariusEngine {
     const simulationToken=live?null:this.simulationMutationGate?.capture?.();
     if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
       return {ok:false,reason:'pr_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReady())||s.engineActive!==true||s.pegasusRyuSeiKenCapitalEnabled!==true
+    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.pegasusRyuSeiKenCapitalEnabled!==true
       ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
       return {ok:false,reason:'pr_sim_operator_or_signal_disabled'};
     const parent=await this.db.entryById(watch.parentEntryId);
@@ -5473,7 +5497,7 @@ export class SagittariusEngine {
     plan.availableAtLimitCount=depth.count;
     const current=()=>{const c=this.settings;
       return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReady())&&c?.engineActive===true
+        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
         &&c?.pegasusRyuSeiKenCapitalEnabled===true&&String(c.systemName)===String(s.systemName)
         &&String(c.ownerId)===String(s.ownerId)
         &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
@@ -5505,6 +5529,9 @@ export class SagittariusEngine {
         exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
       if(!balance?.ok)return {ok:false,reason:balance?.reason||'pr_live_exchange_preflight_denied'};
       planned.entry.entryConfig.brokerRouting={version:'PR3-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
+      const witness=createQ17LiveCashWitness(planned.entry,balance);
+      if(!witness.ok)return {ok:false,reason:witness.reason};
+      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
     }
     // Enter the SIM reset gate immediately before the PostgreSQL financial
     // transaction. An in-progress reset rejects admission; an admitted
@@ -5524,7 +5551,7 @@ export class SagittariusEngine {
         :await this.db.insertPegasusRyuSeiKenCapitalSimulationEntry(planned.entry,{quote,isCurrent:current});
       if(live){
         const receipt=await dispatchPegasusRyuSeiKenCapitalLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReady(),readSettings:()=>this.settings,
+          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
           readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
           audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
         return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
@@ -5785,7 +5812,7 @@ export class SagittariusEngine {
     const simulationToken=live?null:this.simulationMutationGate?.capture?.();
     if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
       return {ok:false,reason:'cw_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReady())||s.engineActive!==true||s.crystalWallRecoveryEnabled!==true
+    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.crystalWallRecoveryEnabled!==true
       ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
       return {ok:false,reason:'cw_sim_operator_or_signal_disabled'};
     const parent=await this.db.entryById(watch.parentEntryId);
@@ -5834,7 +5861,7 @@ export class SagittariusEngine {
     plan.availableAtLimitCount=depth.count;
     const current=()=>{const c=this.settings;
       return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReady())&&c?.engineActive===true
+        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
         &&c?.crystalWallRecoveryEnabled===true&&String(c.systemName)===String(s.systemName)
         &&String(c.ownerId)===String(s.ownerId)
         &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
@@ -5866,6 +5893,9 @@ export class SagittariusEngine {
         exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
       if(!balance?.ok)return {ok:false,reason:balance?.reason||'cw_live_exchange_preflight_denied'};
       planned.entry.entryConfig.brokerRouting={version:'CW1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
+      const witness=createQ17LiveCashWitness(planned.entry,balance);
+      if(!witness.ok)return {ok:false,reason:witness.reason};
+      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
     }
     // Enter the SIM reset gate immediately before the PostgreSQL financial
     // transaction. An in-progress reset rejects admission; an admitted
@@ -5885,7 +5915,7 @@ export class SagittariusEngine {
         :await this.db.insertCrystalWallSimulationEntry(planned.entry,{quote,isCurrent:current});
       if(live){
         const receipt=await dispatchCrystalWallLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReady(),readSettings:()=>this.settings,
+          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
           readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
           audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
         return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
@@ -6026,7 +6056,7 @@ export class SagittariusEngine {
   operationalTick(){
     if(!this.running||this.shuttingDown)return;
     try{
-      this.operational.requireWorker('reconciliation',false); // Q-17 no private broker worker
+      this.operational.requireWorker('reconciliation',this.settings?.mode==='LIVE' && env.allowLiveTrading===true);
       // Account evidence must not depend on a five-minute discovery scan.
       const pacing=this.kalshi?.localBalancePacingSnapshot?.()||{};
       const lastFail=this.kalshi?.lastRequestFailure||null;
@@ -6047,7 +6077,9 @@ export class SagittariusEngine {
       // This is scheduling ONLY: no shared portfolio coordinator, cached
       // balance proof, change to the 30-second account TTL, or BUY permission.
       const accountPollNow=Date.now(),accountPeriodMs=12_000;
-      if(false){ // Q-17: private broker polling is compiled out
+      if(this.settings?.mode==='LIVE' && env.allowLiveTrading===true){
+        // The authenticated account worker is independent of SIM scanner time.
+        // Clone-tag staggered polling prevents a synchronized three-clone burst.
         if(!Number.isSafeInteger(this.accountPollPhaseMs)){
           const tag=String(this.cloneIdentity?.tag||'');
           this.accountPollPhaseMs=/^[0-9a-f]{8,}$/i.test(tag)
@@ -7585,22 +7617,25 @@ export class SagittariusEngine {
   }
 
   queueReconcile() {
-    if (!this.running || this.reconcileTimer) return;
+    if (!this.running || this.reconcileTimer || this.settings?.mode!=='LIVE' || !env.allowLiveTrading) return;
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = null;
-      // Q-17 SIM-only has no private broker account to reconcile.
+      if(this.running&&this.settings?.mode==='LIVE')void this.reconcileBroker().catch(e=>this.recordError('private_reconciliation',e));
     }, 150);
+    this.reconcileTimer.unref?.();
   }
 
-  async testConnection() {
-    // Q-17 probes the anonymous read-only market endpoint.
-    // A valid broker key is NEVER required to run the simulation.
-    const marketResponse=await this.kalshi.request('GET','/markets?status=open&limit=1',null,{authenticated:false,timeoutMs:2500,maxAttempts:1});
-    this.health.restOk=marketResponse?.ok===true;
-    if(this.health.restOk)this.health.lastRestOkMs=Date.now();
-    this.recomputeHealth();
-    if(!this.health.restOk)throw new Error('q17_public_market_unavailable');
-    return {ok:true,marketDataOnly:true};
+  async testConnection({authenticate=this.settings?.mode==='LIVE'}={}) {
+    // SIM path is intentionally unchanged and cannot read private accounts.
+    if(!authenticate){
+      const marketResponse=await this.kalshi.request('GET','/markets?status=open&limit=1',null,{authenticated:false,timeoutMs:2500,maxAttempts:1});
+      this.health.restOk=marketResponse?.ok===true;
+      if(this.health.restOk)this.health.lastRestOkMs=Date.now();
+      this.recomputeHealth();
+      if(!this.health.restOk)throw new Error('q17_public_market_unavailable');
+      return {ok:true,marketDataOnly:true};
+    }
+    if(!env.allowLiveTrading)throw new Error('live_transport_disabled_by_deployment');
     if (!this.credentials) {
       this.health.restOk = false;
       this.recomputeHealth();
@@ -7685,7 +7720,7 @@ export class SagittariusEngine {
 
   // Diagnostic-only explanation of the existing readiness veto; this adds no
   // permission and does not remove any existing health or broker checks.
-  liveArmHealthDenials() {
+  liveArmHealthDenials(settings=this.settings) {
     const checks=[['restOk','rest'],['websocketFresh','websocket'],
       ['reconciliationOk','broker_reconciliation'],['protectionOk','protection'],
       ['protectionFresh','protection_freshness'],['goldenEyeOk','golden_eye'],
@@ -7693,7 +7728,7 @@ export class SagittariusEngine {
       ['shadowWorkerFresh','shadow_worker_freshness'],['shadowWorkerOk','shadow_worker'],
       ['dbOk','database']];
     const reasons=checks.filter(([key])=>this.health?.[key]===false).map(([,name])=>name);
-    const operational=this.operational?.entryReasons?.(this.settings,this.operationalQueues?.()||[])||[];
+    const operational=this.operational?.entryReasons?.(settings,this.operationalQueues?.()||[])||[];
     for(const reason of operational)if(typeof reason==='string'&&reason.length<100)reasons.push(reason);
     return [...new Set(reasons)].slice(0,12);
   }
@@ -7708,6 +7743,25 @@ export class SagittariusEngine {
       && !this.health.degraded
       && !this.shuttingDown
       && !(this.operational?.entryReasons(this.settings,this.operationalQueues()).length);
+  }
+
+  isLiveReadyForQ17Recovery() {
+    if(this.isLiveReady())return true;
+    const s=this.settings;
+    if(s?.mode!=='LIVE'||s.liveArmed!==true||s.engineActive!==true
+      ||!env.allowLiveTrading||this.shuttingDown===true
+      ||this.db?.dbInterrupted===true
+      ||!this.operational?.hasRecentQ17OwnedBuyProof?.(s))return false;
+    this.recomputeHealth();
+    const h=this.health||{};
+    if([h.restOk,h.websocketFresh,h.protectionOk,h.protectionFresh,h.goldenEyeOk,
+        h.scannerFresh,h.shadowSchemaReady,h.shadowWorkerFresh,h.shadowWorkerOk,h.dbOk]
+      .some(v=>v!==true))return false;
+    // All independent fatal/worker/queue reasons remain in force. Only the
+    // last healthy broker proof invalidated by THIS clone's exactly owned BUY
+    // can be bridged for its original 30-second account-evidence lifetime.
+    const reasons=this.operational.entryReasons(s,this.operationalQueues());
+    return reasons.every(r=>r==='q17_owned_buy_in_flight');
   }
 
   deploymentAllowsLiveTrading() {
@@ -7932,7 +7986,6 @@ export class SagittariusEngine {
   }
 
   async setMode(mode, confirmation = '') {
-    throw new Error('q17_sim_only_mode_immutable');
     const m = typeof mode === 'string' ? mode.trim().toUpperCase() : '';
     // Unknown or missing mode must not silently become SIMULATION. That used
     // to be an unrequested safety-state mutation disguised as a valid command.
@@ -7960,14 +8013,18 @@ export class SagittariusEngine {
         // A successful LIVE arm must never masquerade as a running trading engine.
         // The operator must separately start the engine; no implicit start here.
         if(this.settings.engineActive!==true)throw new Error('Engine is stopped: start the engine before arming LIVE');
-        const tested=await this.testConnection();
-        const reconciled=await this.reconcileBroker({balanceProof:{value:tested.balance,
+        const tested=await this.testConnection({authenticate:true});
+        const prospectiveLiveScope={...this.settings,mode:'LIVE',liveArmed:false};
+        const reconciled=await this.reconcileBroker({authorityMode:'LIVE',balanceProof:{value:tested.balance,
           atMs:tested.balanceObservedAtMs,generation:this.operational?.accountGeneration||0,
         brokerGeneration:tested.balanceGeneration}});
         if(reconciled!==true)throw new Error('broker_reconciliation_not_clean');
         await this.runProtectionSweep('live_arm_check');
         this.recomputeHealth();
-        if (this.health.degraded) throw new Error('live_arm_health_blocked:'+ (this.liveArmHealthDenials().join(',')||'unclassified_health_veto'));
+        // A mode-switch is not committed yet: evaluate readiness against its
+        // prepared LIVE scope rather than the stale SIM account-scope key.
+        const denials=this.liveArmHealthDenials(prospectiveLiveScope);
+        if(denials.length)throw new Error('live_arm_health_blocked:'+denials.join(','));
         if(this.db?.shadowArchitectureRequired===true && (this.db.shadowSchemaReady!==true || this.shadowSaintStats?.degraded || !this.shadowSaintStats?.lastSuccessAtMs))
           throw new Error('Shadow architecture has not completed a healthy monitoring cycle');
         if(safetyRevision!==(this.runtimeSettingsSafetyRevision||0))throw new Error('live_arm_superseded_by_safety_control');
@@ -8160,7 +8217,7 @@ export class SagittariusEngine {
     confirmInt('lightningPlasmaStarlightScaleInCents',50);
 
     const topologyKeys=['pegasusEnabled','dragonEnabled','phoenixEnabled','momentumHunterEnabled','waveSurferEnabled','recoveryHunterEnabled','crashRecoveryHunterEnabled','scarletNeedleEnabled','geminiEnabled','justiceArrowEnabled','athenaExclamationEnabled','lightningPlasmaEnabled','galacticExplosionEnabled'];
-    const executionArm={mode:this.settings?.mode,liveArmed:this.settings?.liveArmed===true};
+    const executionArm={mode:this.settings?.mode,liveArmed:this.settings?.liveArmed===true,liveOwnerAuthorized:this.settings?.liveOwnerAuthorized===true};
     next=preserveExecutionArm(executionArm, sanitizeRuntimeSettings(next));
     const topologyChanged=topologyKeys.some((k)=>Object.hasOwn(patch||{},k)&&this.settings?.[k]!==next[k]);
     const changedKeys=Object.keys(patch||{});
@@ -8272,17 +8329,27 @@ export class SagittariusEngine {
     try{return await run;}finally{if(this.simulationResetPromise===run)this.simulationResetPromise=null;}
   }
 
-  async _reconcileBroker({balanceProof=null}={}) {
-    this.health.reconciliationOk=true;
+  async _reconcileBroker({balanceProof=null,authorityMode=null}={}) {
+    // Q17-R9: a successful account proof must come from the authenticated
+    // broker and owned durable positions; never return synthetic SIM green.
+    // SIM -> LIVE arming requires the forthcoming LIVE account scope while
+    // mode remains SIM and no capital order can yet be dispatched.
+    const originalScope=structuredClone(this.settings);
+    const requestedMode=authorityMode==='LIVE'?'LIVE':originalScope.mode;
+    if(requestedMode!=='LIVE' || !env.allowLiveTrading){
+      this.health.reconciliationOk=requestedMode==='SIMULATION';
+      this.recomputeHealth();
+      return requestedMode==='SIMULATION';
+    }
+    this.health.reconciliationOk=false;
     this.recomputeHealth();
-    return true; // Q-17 SIM: no private account, balance or order reconciliation
     if (!this.credentials) {
       this.operational?.invalidateAccount('credentials_unavailable');
-      this.health.reconciliationOk = this.settings.mode !== 'LIVE';
+      this.health.reconciliationOk = false;
       this.recomputeHealth();
       return this.health.reconciliationOk;
     }
-    const reconciliationSettings=structuredClone(this.settings);
+    const reconciliationSettings={...originalScope,mode:requestedMode};
     let accountStartedAtMs=Date.now();
     let accountGeneration=this.operational?.accountGeneration||0;
     const reusedProof=balanceProof&&balanceProof.value&&balanceProof.generation===accountGeneration
@@ -8420,8 +8487,13 @@ export class SagittariusEngine {
         const requiredByTicker=new Map();
         const entriesByTicker=new Map();
         for(const e of ownedRows||[]){
-          if(e.status==='entry_pending'||e.status==='pending_recovery'||e.status==='exit_pending'){ok=false;continue;}
-          const required=Math.max(0,Number(e.remainingCount??e.count??0));
+          const disposition=q17LiveOwnedPositionDisposition(e);
+          if(!disposition.ok){ok=false;continue;}
+          // A durable pending BUY has no authoritative inventory yet. Its
+          // collateral remains reserved by the entry-scoped admission fence;
+          // do not interpret it as a missing funded contract on this ticker.
+          if(!disposition.requiresInventory)continue;
+          const required=Math.max(0,Number(disposition.inventoryCount??e.remainingCount??e.count??0));
           requiredByTicker.set(e.ticker,(requiredByTicker.get(e.ticker)||0)+required);
           if(!entriesByTicker.has(e.ticker))entriesByTicker.set(e.ticker,[]);
           entriesByTicker.get(e.ticker).push(e);
@@ -8501,16 +8573,22 @@ export class SagittariusEngine {
       // Resting own orders and unidentified orders on an owned ticker require
       // reconciliation, not additional entries. Known other-system inventory
       // keeps the original shared-account ownership semantics.
-      if(orderIssues.knownResting||orderIssues.unknownOnOwned||orderIssues.ownershipConflicts)summary.ok=false;
-      if(scopeKey(this.settings)!==scopeKey(reconciliationSettings))summary.ok=false;
+      if(orderIssues.unknownOnOwned||orderIssues.ownershipConflicts)summary.ok=false;
+      // Exact known owned resting orders are still reserved in their ledger
+      // rows. A known order does not contaminate unrelated market admission.
+      // Unidentified/conflicting resting orders remain hard failures.
+      if(scopeKey(this.settings)!==scopeKey(originalScope))summary.ok=false;
       if((this.operational?.accountGeneration||0)!==accountGeneration)summary.ok=false;
-      if((this.kalshi.mutationLane?.active||0)>0||(this.kalshi.mutationLane?.queue?.length||0)>0)summary.ok=false;
+      // An in-flight exact broker mutation is not itself a failed account
+      // reconciliation: its client ID and collateral remain durable. However,
+      // any account-generation change *during* this snapshot still invalidates
+      // the proof above, and final BUY admission rechecks the broker shard.
       this.balance=accountBalance;
       // A fully validated authenticated reconciliation also proves REST
       // transport readiness. No redundant extra balance GET is necessary.
       this.health.restOk=true;
       this.health.lastRestOkMs=Date.now();
-      const accountFailReason=!summary.ok?(financialOrphans.length?'funded_orphans_unclosed':summary.shortages?.length?'ownership_shortage':orderIssues.knownResting||orderIssues.unknownOnOwned||orderIssues.ownershipConflicts?'order_ownership':(this.operational?.accountGeneration||0)!==accountGeneration?'account_generation_changed':(this.kalshi.mutationLane?.active||0)>0||(this.kalshi.mutationLane?.queue?.length||0)>0?'mutation_in_flight':'reconciliation_not_clean'):null;
+      const accountFailReason=!summary.ok?(financialOrphans.length?'funded_orphans_unclosed':summary.shortages?.length?'ownership_shortage':orderIssues.unknownOnOwned||orderIssues.ownershipConflicts?'order_ownership':(this.operational?.accountGeneration||0)!==accountGeneration?'account_generation_changed':'reconciliation_not_clean'):null;
       this.operational?.setAccount({settings:reconciliationSettings,startedAtMs:accountStartedAtMs,
         ok:summary.ok,reason:accountFailReason,balance:accountBalance,orders,ownIssues:orderIssues});
       this.health.reconciliationOk=summary.ok === true;
@@ -8525,9 +8603,16 @@ export class SagittariusEngine {
   }
 
   reconcileBroker(options={}) {
-    if (this.reconcilePromise) return this.reconcilePromise;
+    const requestedMode=options?.authorityMode==='LIVE'?'LIVE':this.settings?.mode;
+    if (this.reconcilePromise) {
+      // A SIM-scope reconciliation must never satisfy a prospective LIVE
+      // authorization. Wait once for its owner, then run the LIVE scope.
+      if (this.reconcilePromiseScope===requestedMode)return this.reconcilePromise;
+      return this.reconcilePromise.then(()=>this.reconcileBroker(options),()=>this.reconcileBroker(options));
+    }
+    this.reconcilePromiseScope=requestedMode;
     const p = this._reconcileBroker(options).finally(() => {
-      if (this.reconcilePromise === p) this.reconcilePromise = null;
+      if (this.reconcilePromise === p) {this.reconcilePromise = null;this.reconcilePromiseScope=null;}
     });
     this.reconcilePromise = p;
     return p;

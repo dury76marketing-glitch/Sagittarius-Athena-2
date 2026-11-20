@@ -231,7 +231,26 @@ export class OperationalMonitor {
       balanceCents:Number(balance?.balance),restingOrders:orders?.length??0,ownIssues:ownIssues||{},
       monotonicAt:this.clock(),ageAtCommit:Math.max(0,now-startedAtMs)};
   }
-  invalidateAccount(reason){this.accountGeneration++;this.account={...this.account,ok:false,reason:String(reason||'account_invalidated').slice(0,100)};}
+  invalidateAccount(reason){
+    const exactOwnedBuy=reason==='q17_owned_buy_in_flight';
+    const prior=this.account;
+    const ownerProofGood=exactOwnedBuy&&(prior?.ok===true||prior?.priorOwnerProofOk===true);
+    this.accountGeneration++;
+    this.account={...prior,ok:false,reason:String(reason||'account_invalidated').slice(0,100),
+      priorOwnerProofOk:ownerProofGood,
+      priorOwnerProofObservedAtMs:ownerProofGood?(prior?.ok===true?Number(prior.observedAtMs||0):Number(prior.priorOwnerProofObservedAtMs||0)):0};
+  }
+  // Narrow, bounded exception ONLY for the five Q17 recovery BUY paths.
+  // The last authenticated owner proof must have been healthy before this
+  // clone's own exact client-ID BUY invalidated the account generation.
+  // The BUY still needs an independent current-shard cash verification and
+  // atomic pending-collateral reservation at database commit and send time.
+  hasRecentQ17OwnedBuyProof(settings){
+    const a=this.account,at=Number(a?.priorOwnerProofObservedAtMs||0),age=this.wall()-at;
+    return a?.reason==='q17_owned_buy_in_flight' && a.priorOwnerProofOk===true
+      && a.scope===scopeKey(settings) && at>0 && age>=0&&age<=OPS_LIMITS.accountAgeMs
+      && !this.fatal && !this.sentinel?.unsafe?.();
+  }
   accountStatus(settings){
     const a=this.account;const age=a?Math.max(this.wall()-Number(a.observedAtMs||0),Number(a.ageAtCommit||0)+this.clock()-Number(a.monotonicAt||0)):Infinity;
     const ok=!!a&&a.ok===true&&a.scope===scopeKey(settings)&&age>=0&&age<=OPS_LIMITS.accountAgeMs;
