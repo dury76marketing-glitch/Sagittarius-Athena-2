@@ -2268,6 +2268,35 @@ export class Database {
     finally{client.release();}
   }
 
+  /** Q17 research LIVE adapter: claim once BEFORE any network send.
+   * The existing chain-specific verify*LiveIntent must succeed separately.
+   * A claimed intent is never automatically retried after ambiguous transport.
+   * Atomic PostgreSQL compare-and-set covers both racing workers and restarts.
+   */
+  async claimQ17RecoveryLiveDispatch(entry,{adapterVersion,safetyRevision}={}){
+    if(entry?.mode!=='LIVE'||entry?.status!=='entry_pending'||entry?.entryOrderId
+      ||entry?.executionClass!=='CAPITAL'||!entry?.id||!entry?.entryClientOrderId
+      ||!entry?.ticker||!entry?.ownerId||!entry?.systemName
+      ||typeof adapterVersion!=='string'||adapterVersion!=='Q17-LIVE-RECOVERY-RESEARCH-V1'
+      ||!Number.isSafeInteger(safetyRevision)||safetyRevision<0
+      ||entry.entryConfig?.q17LiveDispatch)
+      return {ok:false,reason:'q17_live_dispatch_claim_identity_invalid'};
+    const atMs=Date.now();
+    const proof={version:adapterVersion,state:'TRANSMISSION_MAY_HAVE_STARTED',
+      clientOrderId:entry.entryClientOrderId,atMs,safetyRevision};
+    const r=await this.pool.query(`update sag_entries
+      set entry_config=jsonb_set(entry_config,'{q17LiveDispatch}',$2::jsonb,true),updated_at_ms=$3
+      where id=$1 and archived=false and mode='LIVE' and status='entry_pending'
+        and execution_class='CAPITAL' and entry_order_id is null
+        and entry_client_order_id=$4 and ticker=$5 and owner_id=$6 and system_name=$7
+        and entry_config=$8::jsonb and not (entry_config ? 'q17LiveDispatch')
+      returning id`,[entry.id,proof,atMs,entry.entryClientOrderId,entry.ticker,
+      entry.ownerId,entry.systemName,entry.entryConfig]);
+    if(r.rowCount!==1)return {ok:false,reason:'q17_live_dispatch_already_claimed_or_changed'};
+    return {ok:true,entry:{...entry,updatedAtMs:atMs,
+      entryConfig:{...entry.entryConfig,q17LiveDispatch:proof}}};
+  }
+
   async insertGreatHornSimulationEntry(entry,options={}){
     if(entry?.mode!=='SIMULATION')throw new Error('gh_sim_only');
     return this.insertGreatHornCapitalEntry(entry,options);

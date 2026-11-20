@@ -218,7 +218,7 @@ export function parseMarket(m = {}) {
     volume: fp(m.volume_fp ?? m.volume),
     volume24h: fp(m.volume_24h_fp ?? m.volume_24h),
     result: m.result || '',
-    closeTimeMs: millis(m.close_time ?? m.expiration_time),
+    closeTimeMs: millis(m.close_time ?? m.latest_expiration_time ?? m.expiration_time),
     occurrenceTimeMs: millis(m.occurrence_datetime),
     expectedExpirationMs: millis(m.expected_expiration_time),
     canCloseEarly: Boolean(m.can_close_early ?? true),
