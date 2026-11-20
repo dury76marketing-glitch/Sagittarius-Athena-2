@@ -1153,11 +1153,17 @@ export class LearningEngine {
     });
   }
 
-  async trackRecovery(quotes, settings) {
+  async trackRecovery(quotes, settings, {maximum=32}={}) {
     const now = Date.now();
     const windowMs = (settings.recoveryTrackingHours || 24) * 3600000;
     const open = await this.db.recoveryObservations(this.systemName, { complete:false, limit:5000 });
-    for (const o of open) {
+    // R13: bounded per-cadence write load; rotate across the same fetched
+    // population instead of issuing 5,000 serial UPDATEs before scanning.
+    const size=Math.min(open.length,Math.max(1,Math.min(64,Math.floor(Number(maximum)||32))));
+    const offset=open.length?(Number(this.recoveryResearchCursor||0)%open.length):0;
+    const selected=Array.from({length:size},(_,i)=>open[(offset+i)%open.length]);
+    this.recoveryResearchCursor=open.length?(offset+size)%open.length:0;
+    for (const o of selected) {
       const q = quotes.get(o.ticker);
       if (!q) continue;
       const price = q.yesBid > 0 && q.yesAsk > 0 ? Math.round((q.yesBid + q.yesAsk) / 2) : (q.yesBid || q.yesAsk || q.lastPrice || 0);
@@ -1209,12 +1215,19 @@ export class LearningEngine {
     return {...episode,coverageKind:actualCoverage,state:{...episode.state,coverageKind:actualCoverage,decisionEvidenceEligible:String(entry.mode||'SIMULATION')===STOP_GUARD_RECOVERY_LEARNING.decisionEvidenceMode&&actualCoverage==='causal_from_trigger'}};
   }
 
-  async trackStopGuardRecovery(quotes,settings,market,{ticker=null}={}){
+  async trackStopGuardRecovery(quotes,settings,market,{ticker=null,maximum=null}={}){
     if(typeof this.db?.stopGuardRecoveryEpisodes!=='function'||typeof this.db?.updateStopGuardRecoveryEpisode!=='function'||!market)return {tracked:0,completed:0,recovered:0};
     const rows=await this.db.stopGuardRecoveryEpisodes(this.systemName,{complete:false,ticker,limit:ticker?20:STOP_GUARD_RECOVERY_LEARNING.maximumEpisodes});
+    // Explicit per-quote calls retain their original scope. Full-scan
+    // research uses bounded round-robin work without discarding any episode.
+    const cap=maximum==null?rows.length:Math.max(1,Math.min(64,Math.floor(Number(maximum)||24)));
+    const size=Math.min(rows.length,cap);
+    const offset=!ticker&&rows.length?(Number(this.stopGuardResearchCursor||0)%rows.length):0;
+    const selected=Array.from({length:size},(_,i)=>rows[(offset+i)%rows.length]);
+    if(!ticker)this.stopGuardResearchCursor=rows.length?(offset+size)%rows.length:0;
     const now=Date.now();const windowMs=Math.max(1,n(settings?.recoveryTrackingHours,24))*3600000;
     let tracked=0,completed=0,recovered=0;
-    for(const row of rows){
+    for(const row of selected){
       const lockKey=String(row?.id||'');
       if(!lockKey||this.stopGuardRecoveryTrackingLocks.has(lockKey))continue;
       this.stopGuardRecoveryTrackingLocks.add(lockKey);

@@ -56,7 +56,7 @@ export async function admitShadowStarlight(store,entry,scope,client,settings){
   if(!isShadowSaintEntry(entry)||entry.conceptName!=='Crash Recovery Hunter'||!snapshot
     || !stamp || stamp.version!==STARLIGHT_SHADOW_VERSION || !verifyAthenaFireCommandHash(stamp))
     throw new Error('aps2_starlight_virtual_authority_required');
-  if(settings.crashRecoveryHunterEnabled!==true || !executionSettingsHashMatches(config.executionSettingsHash,settings))
+  if(settings.crashRecoveryHunterEnabled!==true || !executionSettingsHashMatches(config.executionSettingsHash,settings,'Crash Recovery Hunter'))
     throw new Error('aps2_starlight_settings_changed');
   const prior=await client.query('select * from sag_entries where id=$1',[entry.id]);
   if(prior.rows[0]){
@@ -78,7 +78,7 @@ export async function admitShadowStarlight(store,entry,scope,client,settings){
     || !same(watch.parentEntryId,entry.sourceTradeId)||!same(watch.ticker,entry.ticker)
     || !same(watch.eventTicker,entry.eventTicker)||!same(watch.parentConcept,entry.sourceFeeder)
     || watch.virtualGroupVersion!==STARLIGHT_SHADOW_VERSION
-    || !executionSettingsHashMatches(watch.groupSettingsHash,settings))
+    || !executionSettingsHashMatches(watch.groupSettingsHash,settings,'Crash Recovery Hunter'))
     throw new Error('aps2_starlight_durable_claim_changed');
   const verified=await store.authorization(entry.sourceTradeId,scope,client);
   if(!verified || !isShadowSaintEntry(verified.parent) || !starlightParentLossMayArmRecovery(verified.parent)

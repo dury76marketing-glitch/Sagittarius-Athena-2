@@ -1787,7 +1787,7 @@ export class SagittariusEngine {
     return {virtualGroupVersion:settings?.starlightExtinctionRealTradeEnabled===true
         ?STARLIGHT_CAPITAL_VERSION:STARLIGHT_SHADOW_VERSION,
       maximumSeats:watch.maximumSeats??attackMultiplySeats(settings,'Crash Recovery Hunter'),
-      groupSettingsHash:watch.groupSettingsHash??executionSettingsHash(settings)};
+      groupSettingsHash:watch.groupSettingsHash??executionSettingsHash(settings,'Crash Recovery Hunter')};
   }
 
   async resumeStarlightShadowGroups({maximum=16,seatBudget=16}={}){
@@ -1817,7 +1817,7 @@ export class SagittariusEngine {
           ||!this.starlightScopeMatches(watch))continue;
         this.starlightRecoveryWatches.set(id,watch);
         const settings=this.settings;
-        if(!executionSettingsHashMatches(watch.groupSettingsHash,settings)){
+        if(!executionSettingsHashMatches(watch.groupSettingsHash,settings,'Crash Recovery Hunter')){
           // R12 cross-boundary safety: a settings update is NOT permission to
           // steal an EXECUTING LIVE capital watch's revision. A real BUY may
           // be in flight despite an empty funded-seat projection. Hold for
@@ -8811,6 +8811,68 @@ export class SagittariusEngine {
     return (typeof this.db.openHunterEntries==='function'?await this.db.openHunterEntries(this.settings.systemName):await this.db.openEntries(this.settings.systemName)).filter(x=>PORTFOLIO_CONCEPTS.has(x.conceptName)).length;
   }
 
+  // R13 research isolation. Historical P/L research has NO BUY/SELL authority.
+  // It may not delay discovery, entry evaluation, protection or broker
+  // reconciliation. One coalesced, bounded worker per clone; no timer storm.
+  // Required crash/parent observations remain in the critical scan path.
+  scheduleOptionalScanResearch(source='full_scan') {
+    if(this.running!==true||this.shuttingDown===true||this.resourceResearchDeferred===true)return false;
+    const stats=this.optionalResearchStats||(this.optionalResearchStats={scheduled:0,coalesced:0,completed:0,failed:0,lastError:null,lastCompletedAtMs:0});
+    if(this.optionalResearchScheduled===true||this.optionalResearchRunning===true
+      ||Date.now()-Number(this.optionalResearchLastScheduledAtMs||0)<15_000){stats.coalesced++;return false;}
+    this.optionalResearchScheduled=true;
+    this.optionalResearchLastScheduledAtMs=Date.now();stats.scheduled++;
+    setImmediate(()=>{
+      this.optionalResearchScheduled=false;
+      if(this.running!==true||this.shuttingDown===true||this.resourceResearchDeferred===true)return;
+      this.optionalResearchRunning=true;
+      const task=Promise.resolve().then(()=>this.runOptionalResearchCycle(source))
+        .catch(error=>{stats.failed++;stats.lastError=String(error?.message||error).slice(0,300);
+          try{this.recordError?.('optional_scan_research',error);}catch{}})
+        .finally(()=>{this.optionalResearchRunning=false;stats.completed++;stats.lastCompletedAtMs=Date.now();
+          if(this.optionalResearchPromise===task)this.optionalResearchPromise=null;});
+      this.optionalResearchPromise=task;
+    });
+    return true;
+  }
+
+  async runOptionalResearchCycle(source='full_scan') {
+    // Use one immutable operator snapshot for a research pass. If mode/reset
+    // scope changes, skip remaining work rather than crossing accounting runs.
+    const settings={...this.settings},quotes=this.market?.quotes;
+    const stillSameScope=()=>this.running===true&&this.shuttingDown!==true
+      &&this.resourceResearchDeferred!==true
+      &&String(this.settings?.systemName)===String(settings.systemName)
+      &&String(this.settings?.ownerId)===String(settings.ownerId)
+      &&String(this.settings?.mode)===String(settings.mode)
+      &&Number(this.settings?.resetTimestampMs||0)===Number(settings.resetTimestampMs||0);
+    const step=async(name,fn)=>{
+      if(!stillSameScope())return;
+      try{await fn();}catch(error){
+        const stats=this.optionalResearchStats||(this.optionalResearchStats={failed:0});
+        stats.failed=Number(stats.failed||0)+1;
+        stats.lastError=`${name}:${String(error?.message||error)}`.slice(0,300);
+        // Diagnostics are best effort. A failed audit write must never turn
+        // into a failed trading scan or initiate an additional broker read.
+        const auditWrite=this.db?.audit?.('warning','optional_scan_research_failed',{
+          source,stage:name,message:String(error?.message||error),mode:settings.mode,
+          resetTimestampMs:settings.resetTimestampMs});
+        await auditWrite?.catch?.(()=>{});
+      }
+    };
+    // Each pass is capped; the next cadence advances a round-robin cursor.
+    await step('recovery_history',()=>this.learning.trackRecovery(quotes,settings,{maximum:32}));
+    await step('stop_guard_history',()=>this.learning.trackStopGuardRecovery?.(quotes,settings,this.market,{maximum:24}));
+    await step('post_exit_research',()=>this.runPostExitResearchIfDue(source));
+    await step('market_drop_history',async()=>{
+      const trackers=await this.db.trackers(settings.systemName,2000);
+      if(stillSameScope())await this.learning.learnMarketDrops(trackers,quotes);
+    });
+    await step('recovery_profiles',()=>this.learning.aggregatePatterns());
+    await step('stop_guard_profiles',()=>this.learning.aggregateStopGuardProfiles?.());
+    await step('duration_learning',()=>this.learning.learnDurations(quotes));
+  }
+
   async fullScan() {
     const start = Date.now();
     this.speed = { ...this.speed, mode: 'fullScan', lastLoopMs: start, checksCompleted: 0, closedThisLoop: 0, fetchFailures: 0 };
@@ -8854,12 +8916,8 @@ export class SagittariusEngine {
       const after = await this.openMemoryHunterCount();
       this.speed.closedThisLoop = Math.max(0, before - after);
       await this.refreshRecoveryPriorityTickers();
-      // Independent SE2-R9 recovery maintenance runs on dedicated bounded
-      // lanes. Do not block the scanner or double-process these watch jobs.
-      await this.learning.trackRecovery(this.market.quotes, this.settings);
-      await this.learning.trackStopGuardRecovery?.(this.market.quotes,this.settings,this.market).catch(async(error)=>{
-        await this.db.audit('warning','stop_guard_recovery_tracking',{source:'full_scan',message:String(error?.message||error)}).catch(()=>{});
-      });
+      // R13: optional historical learning runs AFTER entry/reconciliation on a
+      // bounded coalescing lane. It cannot abort or delay this entry scan.
       for (const q of map.values()) {
         const seen=this.quoteWorkStamp?.get?.(q.ticker);
         if(seen && Date.now()-seen.atMs<60_000)continue;
@@ -8869,14 +8927,7 @@ export class SagittariusEngine {
 
       const newEntries = await this.evaluateEntryChain(markets, trackerMap, map);
 
-      await this.runPostExitResearchIfDue('full_scan');
-      const trackers = await this.db.trackers(this.settings.systemName, 2000);
-      await this.learning.learnMarketDrops(trackers, this.market.quotes);
-      await this.learning.aggregatePatterns();
-      await this.learning.aggregateStopGuardProfiles?.().catch(async(error)=>{
-        await this.db.audit('warning','stop_guard_recovery_profile_aggregation',{message:String(error?.message||error)}).catch(()=>{});
-      });
-      await this.learning.learnDurations(this.market.quotes);
+      // Historical research is deliberately not on the broker/entry path.
       // Reconciliation already requests and verifies positions, orders and
       // balance. A failed reconciliation must not be followed by another
       // connection/balance read: that second request is redundant and can
@@ -8884,6 +8935,7 @@ export class SagittariusEngine {
       // a later bounded reconciliation succeeds.
       await this.reconcileBroker().catch(()=>false);
       await this.snapshot();
+      this.scheduleOptionalScanResearch?.('full_scan');
       this.lastFullScanMs = Date.now();
       this.speed.lastLoopMs = this.lastFullScanMs;
       this.cycleFailureCount = 0;
@@ -8978,10 +9030,7 @@ export class SagittariusEngine {
       mode: 'entryOnly',
       loopIndex: index,
     };
-    await this.runPostExitResearchIfDue('fast_phase');
-    await this.learning.trackStopGuardRecovery?.(this.market.quotes,this.settings,this.market).catch(async(error)=>{
-      await this.db.audit('warning','stop_guard_recovery_tracking',{source:'fast_phase',message:String(error?.message||error)}).catch(()=>{});
-    });
+    this.scheduleOptionalScanResearch?.('fast_phase');
   }
 
   async cycleLoop() {
@@ -10119,7 +10168,10 @@ export class SagittariusEngine {
       trackedMarkets: trackers, trackerSummary, patterns, recoveryTracking, sports,
       crashLearning, crashEpisodes, profitLearning, stopGuardRecoveryLearning, athena, atomicThunderBolt, infinityBreak, legacyAtomicThunder:{ version:ATOMIC_THUNDER.version, policyRevision:ATOMIC_THUNDER.policyRevision, legacyCompatibilityOnly:true, ...atomicThunder }, goldenEye:this.goldenEye?.summary?.() || {version:GOLDEN_EYE.version,ready:false,enabled:false},
       liveMarkets: scanned,
-      scanner: { tracked: trackerSummary.tracked, activeMarkets: scanned.length, lastScanMs: this.lastFullScanMs, ...this.speed },
+      scanner: { tracked: trackerSummary.tracked, activeMarkets: scanned.length, lastScanMs: this.lastFullScanMs, ...this.speed,
+        optionalResearch:{version:'R13-RESEARCH-ISOLATED',running:this.optionalResearchRunning===true,
+          queued:this.optionalResearchScheduled===true,pressureDeferred:this.resourceResearchDeferred===true,
+          ...(this.optionalResearchStats||{})}},
       snapshots, audit,
     };
     const elapsed=Math.max(0,Date.now()-collectionStartedAt);const st=this.operatorPlaneStats;
@@ -10550,6 +10602,10 @@ export class SagittariusEngine {
     await this.feederSignalIntel?.flush?.(2000).catch(()=>false);
     await this.learning?.flushCrashPersistence?.(2000).catch(()=>false);
     await this.atomicThunderBolt?.flushCounterfactualCompletions?.(2000).catch(()=>false);
+    // R13: any in-progress OPTIONAL research may finish for a short bounded
+    // interval. This never delays shutdown indefinitely or clears BUY intents.
+    if(this.optionalResearchPromise)
+      await Promise.race([this.optionalResearchPromise.catch(()=>{}),sleep(1200)]).catch(()=>{});
     const deadline=Date.now()+5000;
     while(this.operationalQueues().some(q=>!q.isIdle())&&Date.now()<deadline)await sleep(25);
     // An unresolved transaction is not declared canceled. Its durable order

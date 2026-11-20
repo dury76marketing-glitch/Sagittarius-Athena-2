@@ -16,12 +16,73 @@ const LEGACY_EXECUTION_KEYS=Object.freeze([...new Set([...CANONICAL_NUMERIC_SETT
   'andromedaThunderWaveLevel'])].sort());
 const EXECUTION_V2_EXCLUDED_REPORTING_KEYS=new Set(['liveDashboardStartMs','simulationDashboardStartMs']);
 const EXECUTION_V2_KEYS=Object.freeze(LEGACY_EXECUTION_KEYS.filter(k=>!EXECUTION_V2_EXCLUDED_REPORTING_KEYS.has(k)));
+// R13: immutable attack-scoped execution contract. A settings PATCH on a
+// DIFFERENT attack cannot revoke an already claimed Starlight/LP/recovery
+// group. Own-card, parent-chain and global risk controls remain inside the
+// frozen identity. Never reinterpret a historical V2/legacy claim using V3.
+// Retired independent strategies intentionally keep the full historical card.
+const R13_CARD_PREFIXES=Object.freeze([
+  ['scarletNeedleCapital','sn2'],['scarletNeedle','legacy_scarlet'],
+  ['pegasusRyuSeiKenCapital','pr3'],['crystalWallRecovery','cw1'],
+  ['crystalWall','legacy_ci1'],['crashRecoveryHunter','starlight'],
+  ['crashRecovery','starlight'],['starlightExtinction','starlight'],
+  ['greatHorn','gh1'],['sagittariusArrow','sa1'],
+  ['lightningPlasma','lp5'],['athenaExclamation','athena'],
+  ['momentumHunter','legacy_momentum'],['momentum','legacy_momentum'],
+  ['waveSurfer','legacy_wave'],['waveStake','legacy_wave'],
+  ['waveMin','legacy_wave'],['waveMax','legacy_wave'],
+  ['recoveryHunter','legacy_ci1'],['recoveryStake','legacy_ci1'],
+  ['recoveryMin','legacy_ci1'],['recoveryMax','legacy_ci1'],
+  ['justiceArrow','legacy_justice'],['pegasus','feeder'],
+  ['dragon','feeder'],['phoenix','feeder'],['gemini','feeder'],
+]);
+const R13_ATTACK_CHAINS=Object.freeze({
+  'Athena Exclamation':['athena','feeder'],
+  'Crash Recovery Hunter':['athena','starlight','feeder'],
+  'Lightning Plasma':['athena','starlight','lp5','feeder'],
+  'Great Horn Recovery':['athena','starlight','lp5','gh1','feeder'],
+  'Crystal Wall Recovery':['athena','starlight','lp5','gh1','cw1','feeder'],
+  'Sagittarius Arrow Recovery':['athena','starlight','sa1','feeder'],
+  'Scarlet Needle Recovery':['athena','starlight','sa1','sn2','feeder'],
+  'Pegasus Ryu Sei Ken Recovery':['athena','starlight','sa1','sn2','pr3','feeder'],
+});
+const R13_ATTACK_SCOPE_IDS=Object.freeze({
+  'Athena Exclamation':'athena','Crash Recovery Hunter':'starlight',
+  'Lightning Plasma':'lp5','Great Horn Recovery':'gh1','Crystal Wall Recovery':'cw1',
+  'Sagittarius Arrow Recovery':'sa1','Scarlet Needle Recovery':'sn2',
+  'Pegasus Ryu Sei Ken Recovery':'pr3',
+});
+function r13KeyOwner(key){
+  for(const [prefix,owner] of R13_CARD_PREFIXES)if(key.startsWith(prefix))return owner;
+  return null; // Include unknown/new keys by default; fail conservatively.
+}
+const R13_ATTACK_KEYS=Object.freeze(Object.fromEntries(Object.entries(R13_ATTACK_CHAINS).map(([concept,owners])=>{
+  const allowed=new Set(owners);
+  const keys=EXECUTION_V2_KEYS.filter(k=>{
+    // This historical window regulates legacy CI1/Justice watches, not the
+    // eight active capital/shadow attack authorizations in this map. Keep the
+    // window bound for unmapped legacy concepts through the full V2 contract.
+    if(k==='recoveryTrackingHours')return false;
+    const owner=r13KeyOwner(k);return owner===null||allowed.has(owner);
+  });
+  return [concept,Object.freeze(keys)];
+})));
 function hashCard(settings,keys){return authorityHash(Object.fromEntries(keys.map(k=>[k,settings?.[k]??null])));}
 export function legacyExecutionSettingsHash(settings){return hashCard(settings,LEGACY_EXECUTION_KEYS);}
-export function executionSettingsHash(settings){return `R14-EXECUTION-CARD-V2:${hashCard(settings,EXECUTION_V2_KEYS)}`;}
-export function executionSettingsHashMatches(storedHash,settings){
-  return typeof storedHash==='string'&&storedHash.length>0
-    &&(storedHash===executionSettingsHash(settings)||storedHash===legacyExecutionSettingsHash(settings));
+export function executionSettingsHash(settings,concept=null){
+  const scoped=R13_ATTACK_KEYS[concept];
+  if(scoped)return `R13-ATTACK-CARD-V1:${R13_ATTACK_SCOPE_IDS[concept]}:${hashCard(settings,scoped)}`;
+  return `R14-EXECUTION-CARD-V2:${hashCard(settings,EXECUTION_V2_KEYS)}`;
+}
+export function executionSettingsHashMatches(storedHash,settings,concept=null){
+  if(typeof storedHash!=='string'||!storedHash)return false;
+  if(storedHash.startsWith('R13-ATTACK-CARD-V1:')){
+    // A missing concept or wrong attack is never a wildcard match.
+    return R13_ATTACK_KEYS[concept]!=null&&storedHash===executionSettingsHash(settings,concept);
+  }
+  // Frozen pre-R13 claims must retain the original full-card restriction,
+  // including every unrelated card. Only newly claimed V3 groups are scoped.
+  return storedHash===executionSettingsHash(settings)||storedHash===legacyExecutionSettingsHash(settings);
 }
 
 

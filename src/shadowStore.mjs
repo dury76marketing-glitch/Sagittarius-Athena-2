@@ -305,7 +305,7 @@ export class ShadowStore {
       if(entry.conceptName==='Crash Recovery Hunter')return admitShadowStarlight(this,entry,scope,client,settings);
       const prior=await client.query('select id from sag_entries where id=$1',[entry.id]);
       if(prior.rowCount>0)return {ok:false,reason:'shadow_source_already_consumed',existingId:entry.id};
-      if(!executionSettingsHashMatches(entry.entryConfig.executionSettingsHash,settings))throw new Error('shadow_runtime_fence_changed');
+      if(!executionSettingsHashMatches(entry.entryConfig.executionSettingsHash,settings,entry.conceptName))throw new Error('shadow_runtime_fence_changed');
       const ge=settings.galacticExplosionEnabled===true;
       const maximum=Math.max(1,Math.floor(Number(settings.maxEntriesPerTrade)||1),Math.floor(Number(multiply)||1));
       const event=entry.eventTicker||entry.ticker;

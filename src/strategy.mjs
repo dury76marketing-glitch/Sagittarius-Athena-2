@@ -45,7 +45,7 @@ import {
   stableDropEntry,
   estimateTimeLeftMs,
 } from './doctrine.mjs';
-import { RELEASE, EDITABLE_NUMERIC_SETTINGS, EDITABLE_BOOLEAN_SETTINGS } from './config.mjs';
+import { RELEASE } from './config.mjs';
 import { authoritativeClockSnapshot, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { AthenaExclamationEngine, ATHENA_EXCLAMATION, athenaExclamationPrimeReview, isGoldSaintConcept } from './athenaExclamation.mjs';
 import { BUILD_INFO, authorityHash, sealAthenaFireCommand, verifyAthenaFireCommandHash } from './authority.mjs';
@@ -2282,7 +2282,7 @@ export class StrategyEngine {
     const invalid=validateShadowEntry(e);if(invalid)throw new Error(invalid);
     if(shadowAdmissionBatch){
       const batch=pendingAthenaShadowBatches.get(shadowAdmissionBatch);
-      if(!batch||concept!=='Athena Exclamation'||batch.settingsHash!==executionSettingsHash(s)
+      if(!batch||concept!=='Athena Exclamation'||batch.settingsHash!==executionSettingsHash(s,concept)
         ||Number(stackIndex)!==batch.entries.length+1||Number(stackIndex)>batch.multiply)
         throw new Error('shadow_athena_batch_preparation_invalid');
       batch.entries.push(e);batch.confirmations.push(finalConfirmation);
@@ -2417,7 +2417,7 @@ export class StrategyEngine {
       // this price is not required to match the stop or operator entry band.
       // The parent stop is an authorization/limit, NEVER a replacement market quote.
     }
-    const cardIdentity=(card)=>JSON.stringify(['mode','systemName','ownerId','resetTimestampMs','andromedaThunderWaveLevel',...EDITABLE_NUMERIC_SETTINGS,...EDITABLE_BOOLEAN_SETTINGS].map(k=>[k,card[k]]));
+    const cardIdentity=(card)=>executionSettingsHash(card,concept);
     const submittedCardIdentity=cardIdentity(operatorCard);
     const simulationMutationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
     const exactTicker = String(q?.ticker || '');
@@ -3344,12 +3344,12 @@ export class StrategyEngine {
       // Starlight SQL entry fence compares this value to the locked watch.
       if(starlightRecovery===true){
         const frozenGroupHash=starlightRecoverySnapshot?.groupSettingsHash;
-        if(!executionSettingsHashMatches(frozenGroupHash,s)){
+        if(!executionSettingsHashMatches(frozenGroupHash,s,concept)){
           trace('EXECUTION','BLOCKED','sc1_group_operator_card_changed');
           return null;
         }
         frozenEntryConfig.executionSettingsHash=frozenGroupHash;
-      }else frozenEntryConfig.executionSettingsHash=executionSettingsHash(s);
+      }else frozenEntryConfig.executionSettingsHash=executionSettingsHash(s,concept);
       frozenEntryConfig.entryExecutionWitness=structuredClone({...plan.executionEvidence,averagePriceCents:plan.averagePriceCents});
       if(legacyCompatibility===true && isShadowSaintConcept(concept)){
         // Preserve a genuinely validated historical pathway without pretending
@@ -4188,7 +4188,7 @@ export class StrategyEngine {
     const qualification={version:'CI1-WALL-CLONE-V1-Q1',policyRevision:CI1_WALL_CLONE.policyRevision,ci1WallClone:lineage,observedAtMs:decidedAt};
     const ci1Spawn={sourceTradeId:crashEpisodeId,ci1SourceSnapshot:lineage,entryQualificationSnapshot:qualification,ci1FireCommand:command,liveWatch:watch,legacyCompatibility:false};
     if(concept==='Athena Exclamation'&&attackMultiplySeats(s,concept)>1){
-      const token={},batch={settingsHash:executionSettingsHash(s),multiply:attackMultiplySeats(s,concept),entries:[],confirmations:[]};
+      const token={},batch={settingsHash:executionSettingsHash(s,concept),multiply:attackMultiplySeats(s,concept),entries:[],confirmations:[]};
       const simulationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
       let release=null;
       pendingAthenaShadowBatches.set(token,batch);
@@ -4200,7 +4200,7 @@ export class StrategyEngine {
         }
         if(s.mode==='SIMULATION'&&this.enterSimulationMutation){release=this.enterSimulationMutation(simulationToken);if(!release)return null;}
         const scope=await this.db.captureShadowScope(s);
-        const isCurrent=()=>sameShadowScope(this.getSettings(),s)&&executionSettingsHash(this.getSettings())===batch.settingsHash
+        const isCurrent=()=>sameShadowScope(this.getSettings(),s)&&executionSettingsHash(this.getSettings(),concept)===batch.settingsHash
           &&batch.confirmations.every(confirm=>confirm().ok===true);
         const result=await this.db.insertAthenaShadowBatch(batch.entries,scope,{multiply:batch.multiply,isCurrent});
         if(!result.ok){await this.audit('shadow_athena_group_deferred',{concept,ticker,reason:result.reason},'warning');return null;}

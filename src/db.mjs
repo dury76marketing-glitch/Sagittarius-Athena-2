@@ -4232,7 +4232,7 @@ export class Database {
         throw new Error('lp_scalein_parent_revision_changed');
       if(Number(settings.resetTimestampMs||0)!==Number(stamp.resetTimestampMs||0)
         || Number(parent.openedAtMs||0)<Number(stamp.resetTimestampMs||0)
-        || !executionSettingsHashMatches(entry.entryConfig?.executionSettingsHash,settings))
+        || !executionSettingsHashMatches(entry.entryConfig?.executionSettingsHash,settings,entry.conceptName))
         throw new Error('lp_scalein_settings_or_reset_changed');
       const thr=Number(settings.lightningPlasmaStarlightScaleInCents);
       if(Number(stamp.thresholdCents)!==thr)throw new Error('lp_scalein_trigger_revision_changed');
@@ -4491,7 +4491,7 @@ export class Database {
       || settings?.lightningPlasmaEnabled!==true
       || Number(settings?.resetTimestampMs||0)!==Number(stamp.resetTimestampMs||0)
       || Number(settings?.lightningPlasmaStarlightScaleInCents)!==Number(stamp.thresholdCents)
-      || !executionSettingsHashMatches(entry.entryConfig?.executionSettingsHash,settings)
+      || !executionSettingsHashMatches(entry.entryConfig?.executionSettingsHash,settings,entry.conceptName)
       || String(raw.source_trade_id||'')!==String(stamp.parentStarlightId||''))
       return {ok:false,reason:'lp_scalein_intent_or_operator_changed'};
     if(!lightningEntryAuroraProof(entry,settings)||!lightningEntryAuroraProof(rowEntry(raw),settings))return {ok:false,reason:'lp_scalein_own_aurora_changed_before_broker_buy'};

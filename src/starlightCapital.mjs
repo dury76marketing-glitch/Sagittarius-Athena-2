@@ -142,7 +142,7 @@ export function starlightCapitalAdmission({entry,settings,authority,watch}={}){
   if(entry.mode==='SIMULATION'&&(entry.status!=='open'||entry.entryClientOrderId||entry.entryOrderId))return fail('sc1_sim_execution_invalid');
   if(Number(rec.resetEpoch)!==Number(settings.resetTimestampMs||0)
     ||Number(stamp.resetTimestampMs)!==Number(settings.resetTimestampMs||0)
-    ||!executionSettingsHashMatches(c.executionSettingsHash,settings))return fail('sc1_settings_or_reset_changed');
+    ||!executionSettingsHashMatches(c.executionSettingsHash,settings,'Crash Recovery Hunter'))return fail('sc1_settings_or_reset_changed');
   if(!authority||authority.proofHash!==rec.shadowProofHash||!authority.parent
     ||authority.parent.conceptName!=='Athena Exclamation'||authority.parent.status!=='closed'
     ||authority.parent.closeReason!=='hard_stop_loss'||!(Number(authority.parent.pnlCents)<0)
@@ -154,7 +154,7 @@ export function starlightCapitalAdmission({entry,settings,authority,watch}={}){
     ||!matches(w.authorizationId,rec.authorizationId)
     ||w.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
     ||!matches(w.ticker,entry.ticker)||!matches(w.parentEntryId,entry.sourceTradeId)
-    ||!executionSettingsHashMatches(w.groupSettingsHash,settings))return fail('sc1_watch_claim_invalid');
+    ||!executionSettingsHashMatches(w.groupSettingsHash,settings,'Crash Recovery Hunter'))return fail('sc1_watch_claim_invalid');
   const target=Number(w.maximumSeats),seat=Number(stamp.seat);
   if(!Number.isSafeInteger(seat)||seat<1||!Number.isSafeInteger(target)||target<1
     ||seat>target||target>Math.min(20,Number(settings.crashRecoveryHunterMultiply)||1)
