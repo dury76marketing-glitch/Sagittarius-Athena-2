@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
-    "check": "node scripts/check.mjs && node scripts/checkQ17PlasmaArrowParity.mjs && node scripts/checkQ17R5LinkSql.mjs && node scripts/checkQ17R6OperatorPressure.mjs && node scripts/checkQ17R7TradeSafePolling.mjs && node scripts/checkR9Contracts.mjs && node scripts/checkQ17R9IntegratedParity.mjs && node scripts/checkR10ProtectionScheduling.mjs && node scripts/checkR11StarlightNoSend.mjs && node scripts/checkR11StarlightMultiGeneration.mjs"
+    "check": "node scripts/check.mjs && node scripts/checkQ17PlasmaArrowParity.mjs && node scripts/checkQ17R5LinkSql.mjs && node scripts/checkQ17R6OperatorPressure.mjs && node scripts/checkQ17R7TradeSafePolling.mjs && node scripts/checkR9Contracts.mjs && node scripts/checkQ17R9IntegratedParity.mjs && node scripts/checkR10ProtectionScheduling.mjs && node scripts/checkR11StarlightNoSend.mjs && node scripts/checkR11StarlightMultiGeneration.mjs && node scripts/checkR12StarlightSourceNoSend.mjs"
   },
   "dependencies": {
     "pg": "^8.23.1",

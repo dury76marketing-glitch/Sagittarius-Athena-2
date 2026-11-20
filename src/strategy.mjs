@@ -1363,6 +1363,22 @@ export class StrategyEngine {
     return this;
   }
 
+  async recordStarlightSourcePreIntentRefusal({snapshot,quote,reason,stage,attemptId}={}){
+    // R12: invoked ONLY by the active production entry path before any call
+    // capable of creating an entry_pending order or touching Kalshi. This is
+    // NOT a string-based inference after a timed-out or ambiguous send.
+    if(snapshot?.mode!=='LIVE'||snapshot?.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
+      ||typeof this.db?.recordStarlightPreDispatchRefusal!=='function')return null;
+    const result=await this.db.recordStarlightPreDispatchRefusal(snapshot,quote,reason,{
+      version:'SC1-R12-SOURCE-PRE-INTENT',phase:'BEFORE_DURABLE_INTENT',
+      stage,attemptId,intentBoundaryEntered:false});
+    if(result?.kind==='PRE_DISPATCH_REFUSAL'){
+      this.lastStarlightRefusalByAuth ||= new Map();
+      this.lastStarlightRefusalByAuth.set(String(snapshot.authorizationId),result);
+    }
+    return result;
+  }
+
   recordEntryPipeline(attemptId, concept, ticker, stage, status, reason = null, data = {}) {
     // Telemetry payload is intentionally flattened for diagnostics, but reserved
     // pipeline identity fields must be authoritative. Put caller data first so
@@ -2338,12 +2354,26 @@ export class StrategyEngine {
       return null;
     }
 
+    // R12 connected pre-pipeline closure: a claimed Starlight CAPITAL watch
+    // can be refused by market-family or LINK authority guards BEFORE the
+    // ordinary entry pipeline exists. Those guards never dispatch a BUY;
+    // record the same typed source-phase witness instead of stranding the
+    // claimed watch. The DB still rejects stale scope / unsafe child history.
+    const starlightPrePipelineReject=async(stage,reason)=>{
+      if(starlightRecovery!==true||concept!=='Crash Recovery Hunter'
+        ||s.mode!=='LIVE'||starlightRecoverySnapshot?.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION)
+        return null;
+      return this.recordStarlightSourcePreIntentRefusal({snapshot:starlightRecoverySnapshot,
+        quote:q,stage,reason:String(reason),
+        attemptId:`${Date.now()}-${++this.entryPipelineAttemptSequence}`}).catch(()=>null);
+    };
     const family=executionMarketFamilyExclusion(q?.ticker,s,{concept});
     if(family.blocked){
       // LIVE Multiply-only forensic witness; never grants entry authority.
       if(lightningPlasmaScaleIn===true && multiplySeatDiagnostic && typeof multiplySeatDiagnostic==='object')
         Object.assign(multiplySeatDiagnostic,{stage:'MARKET_FAMILY',status:'BLOCKED',reason:String(family.reason||'market_family_excluded')});
       await this.audit('market_family_excluded',{concept,ticker:q?.ticker||null,reason:family.reason,primaryRule:family.primaryRule,andromeda:family.andromeda});
+      await starlightPrePipelineReject('MARKET_FAMILY',family.reason||'market_family_excluded');
       return null;
     }
     if(concept==='Crash Recovery Hunter' && starlightRecovery!==true){
@@ -2358,6 +2388,7 @@ export class StrategyEngine {
       const stop=Number(starlightRecoverySnapshot.stopPriceCents);
       if(!(stop>0)||stop>100){
         await this.audit('starlight_link_blocked',{ticker:q?.ticker||null,reason:'stop_price_invalid'});
+        await starlightPrePipelineReject('LINK_PARENT_STOP','stop_price_invalid');
         return null;
       }
       const minEntry=Math.round(Number(s.crashRecoveryMinEntryCents)),maxEntry=Math.round(Number(s.crashRecoveryMaxEntryCents));
@@ -2374,10 +2405,12 @@ export class StrategyEngine {
           claimedBandMinCents:claimedBand.minEntryCents,claimedBandMaxCents:claimedBand.maxEntryCents,
           effectiveBandMinCents:minEntry,effectiveBandMaxCents:maxEntry,
           claimSettingsCommitRevision:claimedBand.settingsCommitRevision??null});
+        await starlightPrePipelineReject('LINK_CLAIM_BAND',reason);
         return null;
       }
       if(!Number.isFinite(minEntry)||!Number.isFinite(maxEntry)||minEntry<1||maxEntry>99||minEntry>maxEntry){
         await this.audit('starlight_link_blocked',{ticker:q?.ticker||null,reason:'link_band_unusable',stopPriceCents:stop,minEntryCents:minEntry,maxEntryCents:maxEntry});
+        await starlightPrePipelineReject('LINK_CLAIM_BAND','link_band_unusable');
         return null;
       }
       // Stop authenticates the parent loss. Link executes at a FRESH ask;
@@ -2393,6 +2426,10 @@ export class StrategyEngine {
       ? `${exactTicker}|attack:${concept}|seat:${Number(stackIndex||1)}`
       : this.hunterConcurrencyLockKey(concept, exactTicker, s, stackIndex);
     const pipelineAttemptId = `${Date.now()}-${++this.entryPipelineAttemptSequence}`;
+    let starlightIntentBoundaryEntered=false;
+    let starlightPreIntentDenial=null;
+    if(starlightRecovery===true && s.mode==='LIVE' && starlightRecoverySnapshot?.authorizationId)
+      this.lastStarlightRefusalByAuth?.delete(String(starlightRecoverySnapshot.authorizationId));
     const crystalWallIndependentEntry=legacyCompatibility!==true&&concept==='Recovery Hunter'&&crystalWallFireCommand!=null;
     const justiceArrowIndependentEntry=legacyCompatibility!==true&&concept==='Sagittarius Justice Arrow'&&justiceArrowFireCommand!=null;
     const ci1IndependentEntry=legacyCompatibility!==true&&ci1FireCommand!=null&&CI1_WALL_CLONE.saints.includes(String(concept||''))&&concept!=='Recovery Hunter'&&concept!=='Sagittarius Justice Arrow';
@@ -2418,6 +2455,11 @@ export class StrategyEngine {
     let candidateId=String(executionAuthorityCommand?.decisionEvidence?.preBoltClearance?.preBoltId||entryQualificationSnapshot?.preBoltClearance?.preBoltId||executionAuthorityCommand?.authorizationId||executionAuthorityCommand?.boltId||entryQualificationSnapshot?.boltId||'');
     let boltId=String(executionAuthorityCommand?.authorizationId||executionAuthorityCommand?.boltId||entryQualificationSnapshot?.boltId||'');
     const trace = (stage, status, reason = null, data = {}) => {
+      if(starlightRecovery===true && s.mode==='LIVE' && !starlightIntentBoundaryEntered){
+        if(status==='BLOCKED')starlightPreIntentDenial={stage:String(stage),
+          reason:String(reason||stage),attemptId:pipelineAttemptId};
+        else if(status==='PASS')starlightPreIntentDenial=null;
+      }
       // A caller-scoped Multiply witness records the last actual rejection
       // without consulting other concurrent attempts or changing any gate.
       if(lightningPlasmaScaleIn===true && multiplySeatDiagnostic && typeof multiplySeatDiagnostic==='object'){
@@ -2442,8 +2484,14 @@ export class StrategyEngine {
     // but createHunter itself must independently fail closed before any market
     // refresh, capital work, or broker mutation if LIVE is not currently armed.
     const starlightRealEarly=concept==='Crash Recovery Hunter' && starlightRecovery===true && s.starlightExtinctionRealTradeEnabled===true;
+    const starlightClaimedCapitalProof=concept==='Crash Recovery Hunter'&&starlightRecovery===true
+      &&s.mode==='LIVE'&&starlightRecoverySnapshot?.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION;
     if ((!isShadowSaintConcept(concept) || lightningPlasmaScaleIn===true || starlightRealEarly || starlightModelClone===true || independentRecovery===true) && s.mode === 'LIVE' && !this.getLiveReady(independentRecovery===true?concept:null)) {
       trace('MODE_AUTHORIZATION','BLOCKED','live_not_ready');
+      if(starlightClaimedCapitalProof){
+        await this.recordStarlightSourcePreIntentRefusal({snapshot:starlightRecoverySnapshot,
+          quote:q,reason:'live_not_ready',stage:'MODE_AUTHORIZATION',attemptId:pipelineAttemptId}).catch(()=>null);
+      }
       await this.audit('hunter_entry_mode_authorization_blocked',{concept,ticker:exactTicker,eventTicker:q?.eventTicker || exactTicker,mode:s.mode,scaleIn:lightningPlasmaScaleIn===true});
       return null;
     }
@@ -2477,6 +2525,10 @@ export class StrategyEngine {
     trace('MODE_AUTHORIZATION','PASS',s.mode === 'LIVE' ? 'live_ready' : 'simulation');
     if (this.hunterTickerLocks.has(tickerLockKey)) {
       trace('LOCAL_TICKER_LOCK','BLOCKED','local_ticker_lock_busy');
+      if(starlightClaimedCapitalProof){
+        await this.recordStarlightSourcePreIntentRefusal({snapshot:starlightRecoverySnapshot,
+          quote:q,reason:'local_ticker_lock_busy',stage:'LOCAL_TICKER_LOCK',attemptId:pipelineAttemptId}).catch(()=>null);
+      }
       await this.audit('hunter_exact_ticker_lock_busy', { concept, ticker: exactTicker, eventTicker: q?.eventTicker || exactTicker });
       return null;
     }
@@ -2817,10 +2869,8 @@ export class StrategyEngine {
       if (!plan) {
         trace('EXECUTABLE_BOOK','BLOCKED','no_executable_ask',{requested});
         await this.audit('entry_no_executable_ask', { concept, ticker: q.ticker, requested, limitCents: q.yesAsk, mode: s.mode });
-        if(starlightRecovery===true && s.mode==='LIVE' && starlightRecoverySnapshot && typeof this.db.recordStarlightPreDispatchRefusal==='function'){
-          const refused=await this.db.recordStarlightPreDispatchRefusal({...starlightRecoverySnapshot,revision:starlightRecoverySnapshot.revision},q,'no_executable_ask');
-          if(refused?.kind==='PRE_DISPATCH_REFUSAL'){this.lastStarlightRefusalByAuth=this.lastStarlightRefusalByAuth||new Map();this.lastStarlightRefusalByAuth.set(String(starlightRecoverySnapshot.authorizationId),refused);return null;}
-        }
+        // R12 centralized finally records this denial from the untouched
+        // source phase, with exact attempt and no durable intent proof.
         return null;
       }
       if(fullConfiguredSizeRequired&&Number(plan.count||0)!==requested){
@@ -3273,10 +3323,7 @@ export class StrategyEngine {
         && auroraPreflight.reason==='fee_budget_exhausts_aurora_loss_envelope';
       if(!auroraPreflight.ok && !athenaShadowFeeBypass){
         trace('AURORA','BLOCKED',auroraPreflight.reason || 'aurora_preflight_failed',{auroraClass:'AURORA_DENIED',requestedPercent:auroraPercentFor(s,concept)});
-        if(starlightRecovery===true && s.mode==='LIVE' && starlightRecoverySnapshot && typeof this.db.recordStarlightPreDispatchRefusal==='function'){
-          const refused=await this.db.recordStarlightPreDispatchRefusal({...starlightRecoverySnapshot,revision:starlightRecoverySnapshot.revision},q,auroraPreflight.reason||'aurora_preflight_failed');
-          if(refused?.kind==='PRE_DISPATCH_REFUSAL'){this.lastStarlightRefusalByAuth=this.lastStarlightRefusalByAuth||new Map();this.lastStarlightRefusalByAuth.set(String(starlightRecoverySnapshot.authorizationId),refused);return null;}
-        }
+        // R12 centralized finally records the exact pre-intent denial.
         await this.audit('aurora_entry_preflight_blocked',{concept,ticker:q.ticker,eventTicker:expectedEventTicker,reason:auroraPreflight.reason,entryPriceCents:plannedEntry,count:plannedCount,entryFeeCents:auroraPreflight.entryFeeCents??preflightEntryFeeCents,expectedExitFeeCents:auroraPreflight.expectedExitFeeCents??null});
         return null;
       }
@@ -3485,6 +3532,8 @@ export class StrategyEngine {
       // checked and consumed in the SAME PostgreSQL transaction as sag_entries.
       // Never apply it to Starlight's independently authorized parent child.
       const persistExecutableEntry=async(entry)=>{
+        starlightIntentBoundaryEntered=true;
+        starlightPreIntentDenial=null;
         if(independentRecovery===true){
           if(typeof this.db.insertIndependentRecoveryCapitalEntry!=='function'){
             trace('PERSISTENCE','BLOCKED','independent_atomic_capital_admission_unavailable');
@@ -3930,6 +3979,19 @@ export class StrategyEngine {
         await this.audit('hunter_entry_commit_db_unlock_failed', { concept, ticker: exactTicker, message: String(e?.message || e) });
       }
       this.hunterTickerLocks.delete(tickerLockKey);
+      // No broker order can exist from this invocation if it never crossed
+      // persistExecutableEntry(). Record a durable phase witness ONLY for a
+      // source-observed BLOCKED outcome; every uncertain write/sent outcome
+      // stays in durable reconciliation, never in this retry release path.
+      if(starlightClaimedCapitalProof && !starlightIntentBoundaryEntered
+        && starlightPreIntentDenial && starlightRecoverySnapshot){
+        await this.recordStarlightSourcePreIntentRefusal({snapshot:starlightRecoverySnapshot,
+          quote:q,...starlightPreIntentDenial}).catch(async error=>{
+          await this.audit('starlight_pre_intent_proof_write_failed',{
+            authorizationId:starlightRecoverySnapshot.authorizationId,
+            reason:String(error?.message||error).slice(0,180)}).catch(()=>{});
+        });
+      }
     }
   }
 

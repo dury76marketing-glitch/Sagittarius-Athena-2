@@ -471,6 +471,12 @@ export class Database {
       create index if not exists sag_entries_starlight_parent_lookup
         on sag_entries(system_name,owner_id,mode,source_trade_id)
         where concept_name='Crash Recovery Hunter' and source_trade_id is not null;
+      -- R12 all-child proof queries intentionally inspect every scope,
+      -- including wrong-clone evidence. The prior prefix-by-system index
+      -- cannot serve a source_trade_id-only lookup in the hot entry path.
+      create index if not exists sag_entries_starlight_parent_all_scopes
+        on sag_entries(source_trade_id)
+        where concept_name='Crash Recovery Hunter' and source_trade_id is not null;
       create index if not exists sag_entries_ticker on sag_entries(ticker);
       create index if not exists sag_entries_system_closed_at on sag_entries(system_name,status,closed_at_ms desc);
       create index if not exists sag_entries_system_sim_active on sag_entries(system_name,mode) where archived=false;
@@ -5630,10 +5636,23 @@ export class Database {
     return result.rows?.[0]||null;
   }
 
-  async recordStarlightPreDispatchRefusal(watch, quote, reason){
-    // R15-R12: proof lives on the locked watch, not as a capital row.
-    // Snapshot status is not authorization. The database row is.
-    if(!watch||watch.mode!=='LIVE'||!watch.authorizationId||!quote?.ticker)return null;
+  async recordStarlightPreDispatchRefusal(watch, quote, reason, source){
+    // R12: only the production entry path, BEFORE its first durable intent,
+    // may mint this typed no-broker-intent witness. A lastAttemptReason,
+    // missing child, absent order ID, or HTTP status alone is NOT no-send proof.
+    if(!watch||watch.mode!=='LIVE'||watch.status!=='EXECUTING'
+      ||watch.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
+      ||!watch.authorizationId||!watch.parentEntryId||!watch.systemName||!watch.ownerId
+      ||!Number.isSafeInteger(Number(watch.revision))||Number(watch.revision)<1
+      ||watch.consumePending===true
+      ||String(quote?.ticker||'')!==String(watch.ticker)
+      ||String(quote?.eventTicker||quote?.ticker||'')!==String(watch.eventTicker)
+      ||typeof reason!=='string'||!reason||reason.length>180
+      ||source?.version!=='SC1-R12-SOURCE-PRE-INTENT'
+      ||source?.phase!=='BEFORE_DURABLE_INTENT'||source?.intentBoundaryEntered!==false
+      ||typeof source.stage!=='string'||source.stage.length<2||source.stage.length>80
+      ||typeof source.attemptId!=='string'||source.attemptId.length<3||source.attemptId.length>180)
+      return null;
     const client=await this.pool.connect();let started=false;
     try{
       await client.query('BEGIN');started=true;
@@ -5646,28 +5665,52 @@ export class Database {
       const row=scoped.rows?.[0],persisted=row?.watch;
       if(scoped.rows?.length!==1||row.status!=='EXECUTING'||!persisted
         ||Number(row.revision)!==Number(watch.revision)
+        ||persisted.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
+        ||persisted.status!=='EXECUTING'||persisted.consumePending===true
         ||String(persisted.parentEntryId)!==String(watch.parentEntryId)
-        ||String(persisted.authorizationId)!==String(watch.authorizationId)){
+        ||String(persisted.authorizationId)!==String(watch.authorizationId)
+        ||String(persisted.systemName)!==String(watch.systemName)
+        ||String(persisted.ownerId)!==String(watch.ownerId)
+        ||persisted.mode!=='LIVE'||Number(persisted.resetEpoch)!==Number(watch.resetEpoch)
+        ||String(persisted.ticker)!==String(watch.ticker)
+        ||String(persisted.eventTicker)!==String(watch.eventTicker)
+        ||String(persisted.groupSettingsHash)!==String(watch.groupSettingsHash)
+        ||String(persisted.shadowProofHash)!==String(watch.shadowProofHash)
+        ||Number(persisted.maximumSeats)!==Number(watch.maximumSeats)
+        ||starlightNoSendRetryGeneration(persisted)===null){
         await client.query('ROLLBACK');started=false;return null;
       }
-      const blocking=await client.query(`select id,status from sag_entries
-        where concept_name='Crash Recovery Hunter' and source_trade_id=$1
-          and system_name=$2 and owner_id=$3 and mode='LIVE' and archived=false
-          and status in ('open','entry_pending','exit_pending','pending_recovery')`,
-        [String(watch.parentEntryId),String(watch.systemName),String(watch.ownerId)]);
-      if(blocking.rows?.length){await client.query('ROLLBACK');started=false;return null;}
+      // Native watch lock serializes with SC1 capital entry INSERT. Query ALL
+      // children, including other clones, archived, rejected, and ambiguous.
+      // A single unknown child invalidates proof; absence is NOT used alone.
+      const linked=await client.query(`select id,system_name,owner_id,mode,ticker,
+          event_ticker,execution_class,status,close_reason,count,remaining_count,
+          entry_client_order_id,entry_order_id,exit_order_id,exit_client_order_id,entry_fee_cents,
+          exit_fee_cents,exit_filled_count,exit_notional_cents,entry_config,
+          archived,opened_at_ms
+        from sag_entries where concept_name='Crash Recovery Hunter'
+          and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
+        [String(watch.parentEntryId)]);
+      const childProof=starlightNoSendChildrenForRearm(persisted,linked.rows||[]);
+      if(!childProof.ok){await client.query('ROLLBACK');started=false;return null;}
       const proofs=Array.isArray(persisted.preDispatchRefusals)?persisted.preDispatchRefusals:[];
-      const same=proofs.find(p=>p.reason===String(reason).slice(0,180)&&p.ticker===String(quote.ticker)&&Number(p.committedRevision)===Number(row.revision));
-      if(same){await client.query('ROLLBACK');started=false;return {kind:'PRE_DISPATCH_REFUSAL',proof:same,revision:Number(row.revision),watch:persisted,idempotent:true};}
+      const same=proofs.find(p=>p.source?.attemptId===source.attemptId);
+      if(same){await client.query('ROLLBACK');started=false;return null;}
       const generation=proofs.length;
-      if(generation>64){await client.query('ROLLBACK');started=false;return null;}
+      if(generation>=64){await client.query('ROLLBACK');started=false;return null;}
       const now=Date.now();
-      const proof={generation,reason:String(reason).slice(0,180),atMs:now,submitted:false,
+      const proof={generation,reason,atMs:now,submitted:false,
         version:'HC2-R1-DISPATCH',ticker:String(quote.ticker),
+        eventTicker:String(watch.eventTicker),systemName:String(watch.systemName),
+        ownerId:String(watch.ownerId),mode:'LIVE',resetEpoch:Number(watch.resetEpoch),
+        source:{version:source.version,phase:source.phase,stage:source.stage,
+          attemptId:source.attemptId,intentBoundaryEntered:false},
         claimRevision:Number(row.revision),committedRevision:Number(row.revision)+1,
         authorizationId:String(watch.authorizationId),parentEntryId:String(watch.parentEntryId),
-        id:`proof:${watch.authorizationId}:${generation}`};
-      const next={...persisted,preDispatchRefusals:[...proofs,proof],lastPreDispatchRefusal:proof};
+        id:`proof:${watch.authorizationId}:${row.revision}:${generation}`};
+      const next={...persisted,preDispatchRefusals:[...proofs,proof],
+        lastPreDispatchRefusal:proof,lastAttemptReason:reason,
+        lastAttemptStage:source.stage,lastAttemptAtMs:now};
       const updated=await client.query(`update sag_starlight_recovery_v1
         set watch=$7::jsonb,revision=revision+1,updated_at_ms=$8
         where system_name=$1 and owner_id=$2 and mode='LIVE' and reset_epoch=$3
@@ -5832,7 +5875,17 @@ export class Database {
       const latest=proofs.at(-1);
       const watchProof=latest&&latest.submitted===false&&latest.version==='HC2-R1-DISPATCH'
         &&String(latest.authorizationId)===String(w.authorizationId)
-        &&Number(latest.committedRevision)===Number(row.revision);
+        &&String(latest.parentEntryId)===String(w.parentEntryId)
+        &&Number(latest.claimRevision)===Number(row.revision)-1
+        &&Number(latest.committedRevision)===Number(row.revision)
+        &&(!latest.source || (latest.source.version==='SC1-R12-SOURCE-PRE-INTENT'
+          &&latest.source.phase==='BEFORE_DURABLE_INTENT'
+          &&latest.source.intentBoundaryEntered===false
+          &&typeof latest.source.stage==='string'&&latest.source.stage.length>=2
+          &&typeof latest.source.attemptId==='string'&&latest.source.attemptId.length>=3
+          &&String(latest.systemName)===String(w.systemName)
+          &&String(latest.ownerId)===String(w.ownerId)
+          &&latest.mode==='LIVE'&&Number(latest.resetEpoch)===Number(w.resetEpoch)));
       const inspected=starlightNoSendChildrenForRearm(persisted,children);
       const childProof=inspected.ok&&inspected.current.length>0;
       if(!inspected.ok||(!watchProof && !childProof)){

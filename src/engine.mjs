@@ -33,7 +33,7 @@ import {dispatchPegasusRyuSeiKenCapitalLiveIntent} from './q17LiveRecoveryAdapte
 import {runGreatHornSequentialSeats as runPegasusRyuSeiKenCapitalSequentialSeats,greatHornAskDepth as pegasusRyuSeiKenCapitalAskDepth} from './greatHornSeatScheduler.mjs';
 import {prepareGreatHornExecutionBook as preparePegasusRyuSeiKenCapitalExecutionBook} from './greatHornExecutionBook.mjs';
 import {STARLIGHT_SHADOW_VERSION} from './shadowStarlight.mjs';
-import {STARLIGHT_CAPITAL_VERSION,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightCapitalSeatFunded,starlightPreDispatchNoSendReason} from './starlightCapital.mjs';
+import {STARLIGHT_CAPITAL_VERSION,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightCapitalSeatFunded} from './starlightCapital.mjs';
 import {modelCloneCertifiedLocalNoSend,modelCloneCapitalId,MODEL_CLONE_CAPITAL_VERSION,MODEL_CLONE_MAX_RETRY_GENERATION} from './modelCloneCapital.mjs';
 import {verifiedLiveCapitalParentEntryFill} from './liveParentEntryProof.mjs';
 import {LP_CONTINUATION_VERSION,lightningParentEligibility,observePlasmaGeometry,plasmaGeometryEligibility} from './lightningShadowContinuation.mjs';
@@ -1818,6 +1818,15 @@ export class SagittariusEngine {
         this.starlightRecoveryWatches.set(id,watch);
         const settings=this.settings;
         if(!executionSettingsHashMatches(watch.groupSettingsHash,settings)){
+          // R12 cross-boundary safety: a settings update is NOT permission to
+          // steal an EXECUTING LIVE capital watch's revision. A real BUY may
+          // be in flight despite an empty funded-seat projection. Hold for
+          // broker reconciliation; do not BLOCK or auto-rearm by inference.
+          if(watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION&&watch.mode==='LIVE'){
+            this.starlightRecoveryStats.lastEvent={status:'RECONCILING',atMs:Date.now(),
+              authorizationId:id,reason:'sc1_executing_settings_changed_require_broker_reconciliation'};
+            continue;
+          }
           const blocked={...watch,status:'BLOCKED',lastAttemptReason:'aps2_group_operator_card_changed'};
           const saved=await this.db.updateStarlightWatch(blocked,watch.revision);
           if(saved)this.starlightRecoveryWatches.delete(id);
@@ -1826,63 +1835,25 @@ export class SagittariusEngine {
         const seats=watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION
           ?await this.db.starlightCapitalSeats(watch,watch.parentEntryId)
           :await this.db.starlightShadowSeats(watch,watch.parentEntryId);
-        // R46-R3: release a verified pre-dispatch denial BEFORE seat-proof.
-        // A proof throw used to overwrite lastAttemptReason with
-        // aps2_shadow_group_resume_deferred and stick the watch forever.
-        // Empty seats plus a known pre-dispatch denial is not broker uncertainty.
-
-        if(watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && Array.isArray(seats) && seats.length===0
-          && watch.mode==='LIVE' && starlightPreDispatchNoSendReason(watch.lastAttemptReason) && watch.consumePending!==true){
-          // R46-R11: do not transition on empty seats alone. Record a durable
-          // pre-dispatch refusal, then let the transactional rearm prove no
-          // unsafe child or broker intent exists before returning to WATCHING.
-          if(typeof this.db.recordPreDispatchRefusalAndRearm==='function'){
-            const released=await this.db.recordPreDispatchRefusalAndRearm(watch, String(watch.lastAttemptReason||'')).catch(()=>null);
+        // R12: source-origin, committed no-send evidence OR a verified local
+        // rejected child can release a claim. Empty funded seats and a string
+        // lastAttemptReason are NOT broker non-transmission proof. SQL checks
+        // ALL linked children under the watch lock before changing revision.
+        if(watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION
+          && Array.isArray(seats)&&seats.length===0&&watch.mode==='LIVE'){
+          if(watch.consumePending!==true
+            &&typeof this.db.rearmStarlightAfterVerifiedUnsubmittedRejection==='function'){
+            const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection(watch).catch(()=>null);
             if(released?.status==='WATCHING'){
               this.starlightRecoveryWatches.set(id,{...released.watch,status:released.status,revision:Number(released.revision)});
-              continue;
+              continue; // New BUY only after a new quote/authorization pass.
             }
           }
+          // Legacy unproven claims remain quarantined for broker + SQL audit.
           continue;
         }
         const proof=this.starlightGroupSeatProof(seats,watch);
         if(!proof.ok)throw new Error(proof.reason);
-        // RC1: a verified pre-dispatch rejection is not an occupied Multiply
-        // seat. Previously the capital-seat query correctly excluded it, but
-        // this EXECUTING claim was then retried forever without an eligible
-        // child. Only the DB may atomically release a claim after locking the
-        // watch and proving EVERY linked intent was rejected BEFORE submission.
-        // A missing row, ambiguous broker receipt, changed scope, partial
-        // group, or unhealthy LIVE account keeps EXECUTING (fail closed).
-        if(watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && seats.length===0
-          && watch.mode==='LIVE'){
-          if(this.health?.operational?.newEntriesAllowed===true
-            && typeof this.db.rearmStarlightAfterVerifiedUnsubmittedRejection==='function'){
-            const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection(watch);
-            if(released?.status==='WATCHING'){
-              this.starlightRecoveryWatches.set(id,{...released.watch,status:released.status,revision:Number(released.revision)});
-              continue; // NEVER submit an order in the releasing worker tick.
-            }
-          }
-          // R46-R2: the wake filter excludes CAPITAL EXECUTING watches, so the
-          // earlier release never ran. A verified pre-dispatch denial with no
-          // seat is not broker uncertainty. Release it here, where these
-          // watches are actually processed. Anything else stays EXECUTING.
-
-          if(starlightPreDispatchNoSendReason(watch.lastAttemptReason) && watch.consumePending!==true){
-            if(typeof this.db.recordPreDispatchRefusalAndRearm==='function'){
-              const released=await this.db.recordPreDispatchRefusalAndRearm(watch, String(watch.lastAttemptReason||'')).catch(()=>null);
-              if(released?.status==='WATCHING'){
-                this.starlightRecoveryWatches.set(id,{...released.watch,status:released.status,revision:Number(released.revision)});
-                continue;
-              }
-            }
-            continue;
-          }
-          // R15-R9: an empty lookup is not no-send proof. Keep EXECUTING.
-          // Only rearmStarlightAfterVerifiedUnsubmittedRejection may release LIVE.
-          continue;
-        }
         const used=proof.used;
         const target=Number(watch.maximumSeats);
         if(proof.complete){await this.consumeStarlightRecoveryWatch(watch,seats[0].id);continue;}
@@ -2254,6 +2225,10 @@ export class SagittariusEngine {
     const quote=structuredClone(liveQuote);
     const snapshot={
       version:'SE2-R10-STARLIGHT-LINK',link:true,parentEntryId:watch.parentEntryId,
+      // R12 source-phase proof requires the *same* scope as the locked watch;
+      // an entry snapshot without these fields cannot mint no-send authority.
+      status:'EXECUTING',virtualGroupVersion:claimed.virtualGroupVersion,
+      ticker:claimed.ticker,eventTicker:claimed.eventTicker,
       shadowProtocol:watch.shadowProtocol||null,shadowProofHash:watch.shadowProofHash||null,
       parentConcept:watch.parentConcept,authorizationId:id,revision,maximumSeats:claimed.maximumSeats,
       groupSettingsHash:claimed.groupSettingsHash,
@@ -2629,10 +2604,12 @@ export class SagittariusEngine {
       const terminal=Boolean(q?.result)||['finalized','settled','closed','determined'].includes(String(q?.status||q?.liveStatus||'').toLowerCase());
       for(const watch of [...(this.starlightRecoveryWatches?.values?.()||[])]){
         if((onlyId&&String(watch.authorizationId)!==String(onlyId))||String(watch.ticker)!==ticker||!this.starlightScopeMatches(watch))continue;
-        // A claimed virtual Multiply group is owned by durable reconciliation.
-        // Quote callbacks may observe a terminal market, but must not mutate the
-        // EXECUTING watch's CAS revision while its seats are being committed.
-        if(watch.status==='EXECUTING'&&watch.virtualGroupVersion===STARLIGHT_SHADOW_VERSION)continue;
+        // R12 connected-failure closure: an EXECUTING capital or shadow watch
+        // is owned by its order/fill reconciliation lane. A terminal quote
+        // must NOT overwrite the exact parent revision while a real BUY may
+        // be pending, partially filled or awaiting a durable exit obligation.
+        // Market finality is still handled by the position/protection path.
+        if(watch.status==='EXECUTING')continue;
         if(terminal && !['CONSUMED','BLOCKED','EXPIRED'].includes(String(watch.status))){
           const blocked={...watch,status:'BLOCKED',terminalReason:'market_finalized',terminalAtMs:Date.now(),lastAttemptReason:'market_finalized'};
           if(typeof this.db?.updateStarlightWatch==='function' && Number(watch.revision)>0){
@@ -2847,23 +2824,19 @@ export class SagittariusEngine {
         try{
           const child=await this.db.entryByConceptSourceTradeId(this.settings.systemName,'Crash Recovery Hunter',w.parentEntryId,{ownerId:w.ownerId,mode:w.mode,resetEpoch:w.resetEpoch});
           if(!child && this.settings.mode==='LIVE'){
-            // R46: a verified pre-dispatch denial with no child is not broker
-            // uncertainty. Release it. Anything else stays EXECUTING.
-
-            if(starlightPreDispatchNoSendReason(w.lastAttemptReason) && w.consumePending!==true){
-              if(typeof this.db.recordPreDispatchRefusalAndRearm==='function'){
-                const released=await this.db.recordPreDispatchRefusalAndRearm(w, String(w.lastAttemptReason||'')).catch(()=>null);
-                if(released?.status==='WATCHING'){
-                  this.starlightRecoveryWatches.set(String(w.authorizationId),{...released.watch,status:released.status,revision:Number(released.revision)});
-                  this.starlightRecoveryStats.lastEvent={status:'WATCHING',
-                    atMs:Date.now(),authorizationId:w.authorizationId,reason:'sc1_verified_pre_dispatch_rejection_rearmed'};
-                  continue;
-                }
+            // R12: this maintenance path is currently excluded for capital
+            // EXECUTING groups, but must still be safe if scheduling changes.
+            // No durable proof -> NO rearm, irrespective of reason string.
+            if(w.consumePending!==true && typeof this.db.rearmStarlightAfterVerifiedUnsubmittedRejection==='function'){
+              const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection(w).catch(()=>null);
+              if(released?.status==='WATCHING'){
+                this.starlightRecoveryWatches.set(String(w.authorizationId),
+                  {...released.watch,status:'WATCHING',revision:Number(released.revision)});
+                this.starlightRecoveryStats.lastEvent={status:'WATCHING',
+                  atMs:Date.now(),authorizationId:w.authorizationId,reason:'sc1_verified_pre_dispatch_rejection_rearmed'};
+                continue;
               }
-              continue;
             }
-            // Unknown broker truth stays pending until explicit reconciliation.
-            // Never turn an ambiguous LIVE submit into a second BUY.
             this.starlightRecoveryStats.lastEvent={status:'BROKER_RECONCILIATION_REQUIRED',
               atMs:Date.now(),authorizationId:w.authorizationId,reason:'live_claim_without_authoritative_child'};
             continue;
@@ -3036,6 +3009,8 @@ export class SagittariusEngine {
     claimed.revision=Number(claim.revision);
     this.starlightRecoveryWatches.set(id,claimed);
     const snapshot={version:'SE2-R5-DURABLE-STOP-LOSS-RECOVERY',parentEntryId:watch.parentEntryId,
+      status:'EXECUTING',virtualGroupVersion:claimed.virtualGroupVersion,
+      ticker:claimed.ticker,eventTicker:claimed.eventTicker,
       shadowProtocol:watch.shadowProtocol||null,shadowProofHash:watch.shadowProofHash||null,
       parentConcept:watch.parentConcept,authorizationId:id,revision:claimed.revision,maximumSeats:claimed.maximumSeats,
       groupSettingsHash:claimed.groupSettingsHash,
