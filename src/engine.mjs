@@ -33,7 +33,7 @@ import {dispatchPegasusRyuSeiKenCapitalLiveIntent} from './q17LiveRecoveryAdapte
 import {runGreatHornSequentialSeats as runPegasusRyuSeiKenCapitalSequentialSeats,greatHornAskDepth as pegasusRyuSeiKenCapitalAskDepth} from './greatHornSeatScheduler.mjs';
 import {prepareGreatHornExecutionBook as preparePegasusRyuSeiKenCapitalExecutionBook} from './greatHornExecutionBook.mjs';
 import {STARLIGHT_SHADOW_VERSION} from './shadowStarlight.mjs';
-import {STARLIGHT_CAPITAL_VERSION,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightCapitalSeatFunded} from './starlightCapital.mjs';
+import {STARLIGHT_CAPITAL_VERSION,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightCapitalSeatFunded,starlightPreDispatchNoSendReason} from './starlightCapital.mjs';
 import {modelCloneCertifiedLocalNoSend,modelCloneCapitalId,MODEL_CLONE_CAPITAL_VERSION,MODEL_CLONE_MAX_RETRY_GENERATION} from './modelCloneCapital.mjs';
 import {verifiedLiveCapitalParentEntryFill} from './liveParentEntryProof.mjs';
 import {LP_CONTINUATION_VERSION,lightningParentEligibility,observePlasmaGeometry,plasmaGeometryEligibility} from './lightningShadowContinuation.mjs';
@@ -1830,25 +1830,9 @@ export class SagittariusEngine {
         // A proof throw used to overwrite lastAttemptReason with
         // aps2_shadow_group_resume_deferred and stick the watch forever.
         // Empty seats plus a known pre-dispatch denial is not broker uncertainty.
-        const safeDenial = new Set([
-          'athena_starlight_quote_stale_or_pre_stop',
-          'athena_starlight_below_trigger',
-          'athena_starlight_trigger_setting_invalid',
-          'athena_starlight_shadow_stop_not_verified',
-          'no_executable_ask',
-          'market_or_book_invalid',
-          'fee_budget_exhausts_aurora_loss_envelope',
-          // R46-R10: proven pre-dispatch no-send (empty seats only).
-          // aps2_group_child_not_in_verified_seats intentionally excluded.
-          'starlight_fresh_quote_missing',
-          'starlight_unpersisted_price_change',
-          'unpersisted_price_change',
-          'quote_stale_or_future',
-          'live_exchange_balance_unavailable',
-          'sc1_entry_execution_or_own_aurora_invalid'
-        ]);
+
         if(watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && Array.isArray(seats) && seats.length===0
-          && watch.mode==='LIVE' && safeDenial.has(String(watch.lastAttemptReason||'')) && watch.consumePending!==true){
+          && watch.mode==='LIVE' && starlightPreDispatchNoSendReason(watch.lastAttemptReason) && watch.consumePending!==true){
           // R46-R11: do not transition on empty seats alone. Record a durable
           // pre-dispatch refusal, then let the transactional rearm prove no
           // unsafe child or broker intent exists before returning to WATCHING.
@@ -1884,24 +1868,8 @@ export class SagittariusEngine {
           // earlier release never ran. A verified pre-dispatch denial with no
           // seat is not broker uncertainty. Release it here, where these
           // watches are actually processed. Anything else stays EXECUTING.
-          const safeDenial = new Set([
-            'athena_starlight_quote_stale_or_pre_stop',
-            'athena_starlight_below_trigger',
-            'athena_starlight_trigger_setting_invalid',
-            'athena_starlight_shadow_stop_not_verified',
-            'no_executable_ask',
-            'market_or_book_invalid',
-            'fee_budget_exhausts_aurora_loss_envelope',
-            // R46-R10: proven pre-dispatch no-send (empty seats only).
-            // aps2_group_child_not_in_verified_seats intentionally excluded.
-            'starlight_fresh_quote_missing',
-            'starlight_unpersisted_price_change',
-            'unpersisted_price_change',
-            'quote_stale_or_future',
-            'live_exchange_balance_unavailable',
-            'sc1_entry_execution_or_own_aurora_invalid'
-          ]);
-          if(safeDenial.has(String(watch.lastAttemptReason||'')) && watch.consumePending!==true){
+
+          if(starlightPreDispatchNoSendReason(watch.lastAttemptReason) && watch.consumePending!==true){
             if(typeof this.db.recordPreDispatchRefusalAndRearm==='function'){
               const released=await this.db.recordPreDispatchRefusalAndRearm(watch, String(watch.lastAttemptReason||'')).catch(()=>null);
               if(released?.status==='WATCHING'){
@@ -2881,24 +2849,8 @@ export class SagittariusEngine {
           if(!child && this.settings.mode==='LIVE'){
             // R46: a verified pre-dispatch denial with no child is not broker
             // uncertainty. Release it. Anything else stays EXECUTING.
-            const safeDenial = new Set([
-              'athena_starlight_quote_stale_or_pre_stop',
-              'athena_starlight_below_trigger',
-              'athena_starlight_trigger_setting_invalid',
-              'athena_starlight_shadow_stop_not_verified',
-              'no_executable_ask',
-              'market_or_book_invalid',
-              'fee_budget_exhausts_aurora_loss_envelope',
-              // R46-R10: proven pre-dispatch no-send (empty seats only).
-              // aps2_group_child_not_in_verified_seats intentionally excluded.
-              'starlight_fresh_quote_missing',
-              'starlight_unpersisted_price_change',
-              'unpersisted_price_change',
-              'quote_stale_or_future',
-              'live_exchange_balance_unavailable',
-              'sc1_entry_execution_or_own_aurora_invalid'
-            ]);
-            if(safeDenial.has(String(w.lastAttemptReason||'')) && w.consumePending!==true){
+
+            if(starlightPreDispatchNoSendReason(w.lastAttemptReason) && w.consumePending!==true){
               if(typeof this.db.recordPreDispatchRefusalAndRearm==='function'){
                 const released=await this.db.recordPreDispatchRefusalAndRearm(w, String(w.lastAttemptReason||'')).catch(()=>null);
                 if(released?.status==='WATCHING'){

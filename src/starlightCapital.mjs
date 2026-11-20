@@ -37,6 +37,54 @@ export function starlightLocalNoSendProof(c={}){
     &&p.submitted===false &&typeof p.reason==='string'
     &&p.reason.length>0&&p.reason.length<=180);
 }
+// R11: the same source-backed pre-dispatch denial classification is used by
+// the worker and the PostgreSQL release producer. A denial reason never proves
+// that a submitted/ambiguous broker intent is safe to retry.
+export const STARLIGHT_PRE_DISPATCH_NO_SEND_REASONS=Object.freeze([
+  'athena_starlight_quote_stale_or_pre_stop',
+  'athena_starlight_below_trigger',
+  'athena_starlight_trigger_setting_invalid',
+  'athena_starlight_shadow_stop_not_verified',
+  'no_executable_ask',
+  'market_or_book_invalid',
+  'fee_budget_exhausts_aurora_loss_envelope',
+  'starlight_fresh_quote_missing',
+  'starlight_unpersisted_price_change',
+  'unpersisted_price_change',
+  'quote_stale_or_future',
+  'live_exchange_balance_unavailable',
+  'sc1_entry_execution_or_own_aurora_invalid'
+]);
+export function starlightPreDispatchNoSendReason(reason){
+  return STARLIGHT_PRE_DISPATCH_NO_SEND_REASONS.includes(String(reason||''));
+}
+// Share the strict rejected-child evidence contract across the two existing
+// transactional rearm paths. Never infer no-send from a missing order ID.
+export function starlightCertifiedRejectedNoSendChild(child,w){
+  const c=child?.entry_config||{},rec=c.starlightRecovery||{},stamp=c.starlightCapital||{};
+  return child?.status==='rejected'&&starlightLocalNoSendProof(c)
+    &&['sc1_intent_receipted_or_changed','live_entry_not_dispatched'].includes(child.close_reason)
+    &&child.archived===false
+    &&child.execution_class==='CAPITAL'&&c.executionClass==='CAPITAL'
+    &&String(child.system_name)===String(w.systemName)
+    &&String(child.owner_id)===String(w.ownerId)&&child.mode==='LIVE'
+    &&String(child.ticker)===String(w.ticker)
+    &&String(child.event_ticker)===String(w.eventTicker)
+    &&String(rec.parentEntryId)===String(w.parentEntryId)
+    &&String(rec.authorizationId)===String(w.authorizationId)
+    &&Number(rec.resetEpoch)===Number(w.resetEpoch)
+    &&stamp.version===STARLIGHT_CAPITAL_VERSION
+    &&Number(stamp.resetTimestampMs)===Number(w.resetEpoch)
+    &&Number.isSafeInteger(Number(stamp.seat))&&Number(stamp.seat)>=1
+    &&Number(stamp.seat)<=Number(w.maximumSeats)
+    &&Number.isFinite(Number(child.count))&&Number(child.count)>0
+    &&Number(child.remaining_count)===0
+    &&typeof child.entry_client_order_id==='string'&&child.entry_client_order_id.length>0
+    &&child.entry_order_id==null&&child.exit_order_id==null
+    &&child.exit_client_order_id==null
+    &&Number(child.entry_fee_cents||0)===0&&Number(child.exit_fee_cents||0)===0
+    &&Number(child.exit_filled_count||0)===0&&Number(child.exit_notional_cents||0)===0;
+}
 export function starlightCapitalEntryId(snapshot={}){
   const fields=[snapshot.systemName,snapshot.ownerId,snapshot.mode,snapshot.resetEpoch,snapshot.parentEntryId];
   if(fields.some(v=>v==null||String(v)===''))throw new Error('starlight_scoped_parent_identity_required');
@@ -46,6 +94,38 @@ export function starlightCapitalEntryId(snapshot={}){
   if(generation===null)throw new Error('sc1_retry_generation_or_no_send_proof_invalid');
   if(generation>0)fields.push(`verified-no-send-retry:${generation}`);
   return 'SE2R5-'+createHash('sha256').update(JSON.stringify(fields.map(String))).digest('hex').slice(0,32);
+}
+// Preserve SAFE historical rejected children across increasing retry
+// generations. A child from an older generation is valid only when the last
+// committed watch explicitly listed that exact ID as verified no-send.
+// Current-generation children must be fresh to the claim, individually
+// rejected with affirmative never-submitted proof, and in the correct scope.
+// This prevents R11's repair from creating a generation-2 deadlock while
+// refusing every unknown or ambiguous historical/active broker intent.
+export function starlightNoSendChildrenForRearm(w,children=[]){
+  const generation=starlightNoSendRetryGeneration(w);
+  if(generation===null||!Array.isArray(children)||children.length>64)return {ok:false,reason:'invalid_generation_or_count'};
+  const priorIds=new Set(Array.isArray(w.rearmedNoSubmitChildIds)?w.rearmedNoSubmitChildIds.map(String):[]);
+  const claimAt=Number(w.claimAtMs||0),seenIds=new Set(),current=[];
+  for(const child of children){
+    const id=String(child?.id||'');
+    if(!id||seenIds.has(id)||!starlightCertifiedRejectedNoSendChild(child,w))
+      return {ok:false,reason:'unverified_or_duplicated_child'};
+    seenIds.add(id);
+    const c=child.entry_config||{},childGeneration=c.starlightCapital?.noSendRetryGeneration
+      ??c.starlightRecovery?.noSendRetryGeneration;
+    if(typeof childGeneration!=='number'||!Number.isSafeInteger(childGeneration)
+      ||childGeneration<0||childGeneration>generation)
+      return {ok:false,reason:'invalid_child_generation'};
+    if(childGeneration<generation){
+      if(!priorIds.has(id))return {ok:false,reason:'historical_child_not_prior_certified'};
+    }else{
+      if(claimAt>0 && Number(child.opened_at_ms||0)<claimAt)
+        return {ok:false,reason:'current_child_predates_claim'};
+      current.push(child);
+    }
+  }
+  return {ok:true,reason:'verified_scoped_no_send_children',current,allIds:[...seenIds]};
 }
 const matches=(a,b)=>String(a??'')===String(b??'');
 export function starlightCapitalAdmission({entry,settings,authority,watch}={}){

@@ -9,7 +9,7 @@ import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARL
 import {LP_CONTINUATION_MIGRATION_SQL} from './lightningContinuation.mjs';
 import {LP_CONTINUATION_VERSION,LP_SHADOW_CONTINUATION_SQL,LP_V5_SQL,mapLightningAuthority,lightningParentEligibility,lightningEntryAuroraProof} from './lightningShadowContinuation.mjs';
 import {STARLIGHT_SHADOW_SQL,APS2_VERSION} from './shadowStarlight.mjs';
-import {STARLIGHT_CAPITAL_VERSION,STARLIGHT_CAPITAL_SQL,starlightCapitalAdmission,starlightNoSendRetryGeneration,starlightLocalNoSendProof} from './starlightCapital.mjs';
+import {STARLIGHT_CAPITAL_VERSION,STARLIGHT_CAPITAL_SQL,starlightCapitalAdmission,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightPreDispatchNoSendReason,starlightNoSendChildrenForRearm} from './starlightCapital.mjs';
 import {MODEL_CLONE_CAPITAL_VERSION,MODEL_CLONE_CAPITAL_SQL,modelCloneAdmission,modelCloneCertifiedLocalNoSend,modelCloneCapitalId,MODEL_CLONE_MAX_RETRY_GENERATION} from './modelCloneCapital.mjs';
 import {GREAT_HORN_SQL,verifiedLightningLoss,greatHornWatchFromLoss,greatHornObservationStep,greatHornAdmissionDecision,greatHornOperatorBandAllowed,greatHornSpreadAllowed,GH_CONCEPT} from './greatHornRecovery.mjs';
 import {GH_SIM_VERSION,GH_LIVE_VERSION,greatHornSettingsFingerprint} from './greatHornSimCapital.mjs';
@@ -5684,12 +5684,13 @@ export class Database {
   }
 
   async recordPreDispatchRefusalAndRearm(w, reason){
-    // R46-R11: durable pre-intent boundary. Records an explicit no-send
-    // refusal under lock, verifies no unsafe child or broker intent exists,
-    // then transitions via the same proof rules as the verified rearm.
-    // Empty seats alone are never sufficient.
+    // R11: this is a proof PRODUCER. It may commit generation+1 only when
+    // the proof references, scope and no-send child evidence are committed in
+    // that SAME transaction; otherwise the next entry fails the SQL fence.
+    // A denial reason alone is never evidence of a broker no-send.
     if(!w||w.mode!=='LIVE'||w.status!=='EXECUTING'
-      ||w.virtualGroupVersion!=='SC1-REAL-STARLIGHT-V1'
+      ||w.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
+      ||!starlightPreDispatchNoSendReason(reason)
       ||!Number.isSafeInteger(Number(w.revision))||Number(w.revision)<1
       ||!w.authorizationId||!w.parentEntryId||!w.systemName||!w.ownerId)return null;
     const client=await this.pool.connect();let started=false;
@@ -5705,41 +5706,67 @@ export class Database {
       const row=scoped.rows?.[0],persisted=row?.watch;
       if(scoped.rows?.length!==1||row.status!=='EXECUTING'
         ||Number(row.revision)!==Number(w.revision)||!persisted
-        ||persisted.virtualGroupVersion!=='SC1-REAL-STARLIGHT-V1'){
+        ||persisted.virtualGroupVersion!==STARLIGHT_CAPITAL_VERSION
+        ||String(persisted.authorizationId)!==String(w.authorizationId)
+        ||String(persisted.parentEntryId)!==String(w.parentEntryId)
+        ||String(persisted.systemName)!==String(w.systemName)
+        ||String(persisted.ownerId)!==String(w.ownerId)
+        ||persisted.mode!=='LIVE'
+        ||Number(persisted.resetEpoch)!==Number(w.resetEpoch)
+        ||String(persisted.ticker)!==String(w.ticker)
+        ||String(persisted.eventTicker)!==String(w.eventTicker)
+        ||String(persisted.groupSettingsHash)!==String(w.groupSettingsHash)
+        ||String(persisted.shadowProofHash)!==String(w.shadowProofHash)
+        ||Number(persisted.maximumSeats)!==Number(w.maximumSeats)
+        ||persisted.consumePending===true){
         await client.query('ROLLBACK');started=false;return null;
       }
-      // Prove no unsafe child or broker intent exists.
-      const linked=await client.query(`select id,owner_id,mode,status,entry_order_id,exit_order_id,
-          entry_config,archived,exit_filled_count from sag_entries
-          where concept_name='Crash Recovery Hunter' and source_trade_id=$1 for share`,
+      const priorGen=starlightNoSendRetryGeneration(persisted);
+      if(priorGen===null||priorGen>=64){
+        await client.query('ROLLBACK');started=false;return null;
+      }
+      // Read every linked child in the watch-locked transaction, including
+      // rejected and archived records excluded by the worker's funded seats.
+      // Any unknown, cross-clone or potentially submitted child denies rearm.
+      const linked=await client.query(`select id,system_name,owner_id,mode,ticker,
+          event_ticker,execution_class,status,close_reason,count,remaining_count,
+          entry_client_order_id,entry_order_id,exit_order_id,exit_client_order_id,entry_fee_cents,
+          exit_fee_cents,exit_filled_count,exit_notional_cents,entry_config,
+          archived,opened_at_ms
+        from sag_entries where concept_name='Crash Recovery Hunter'
+          and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
         [String(w.parentEntryId)]);
       const children=linked.rows||[];
-      const unsafe=children.some(c=>{
-        if(String(c.owner_id)!==String(w.ownerId)||String(c.mode)!=='LIVE')return true;
-        if(c.entry_order_id||c.exit_order_id)return true;
-        if(c.entry_config?.dispatchProof?.submitted===true)return true;
-        if(['open','entry_pending','exit_pending','pending_recovery'].includes(c.status))return true;
-        if(c.status==='closed'&&Number(c.exit_filled_count||0)>0)return true;
-        if(c.archived===true && c.entry_config?.dispatchProof?.submitted!==false)return true;
-        return false;
-      });
-      if(unsafe){await client.query('ROLLBACK');started=false;return null;}
-      // Record the durable pre-dispatch refusal on the current revision.
+      const childProof=starlightNoSendChildrenForRearm(persisted,children);
+      if(!childProof.ok){await client.query('ROLLBACK');started=false;return null;}
       const now=Date.now();
       const refusal={version:'HC2-R1-DISPATCH',submitted:false,
-        reason:String(reason||'pre_dispatch_no_send').slice(0,160),
-        authorizationId:String(w.authorizationId),
-        committedRevision:Number(row.revision),atMs:now,id:`pre-${now}`};
+        reason:String(reason).slice(0,160),
+        authorizationId:String(w.authorizationId),parentEntryId:String(w.parentEntryId),
+        systemName:String(w.systemName),ownerId:String(w.ownerId),mode:'LIVE',
+        resetEpoch:Number(w.resetEpoch),claimRevision:Number(row.revision),
+        committedRevision:Number(row.revision)+1,atMs:now,
+        id:`pre:${w.authorizationId}:${row.revision}:${priorGen+1}`};
       const proofs=Array.isArray(persisted.preDispatchRefusals)?[...persisted.preDispatchRefusals]:[];
-      proofs.push(refusal);
-      const priorGen=Number(persisted.noSendRetryGeneration||0);
-      if(priorGen>=64){await client.query('ROLLBACK');started=false;return null;}
-      const nextWatch={...persisted,preDispatchRefusals:proofs,
+      // The generation is bounded and every new proof remains referentially
+      // stable after later quote, dashboard and restart state updates.
+      if(proofs.some(p=>String(p?.id)===refusal.id)){
+        await client.query('ROLLBACK');started=false;return null;
+      }
+      const nextWatch={...persisted,preDispatchRefusals:[...proofs,refusal],
+        lastPreDispatchRefusal:refusal,
         status:'WATCHING',claimAtMs:0,consumePending:false,
         noSendRetryGeneration:priorGen+1,
         recoveredChildId:null,retryNotBeforeMs:now+20_000,
+        rearmedNoSubmitChildIds:children.map(child=>String(child.id)),
+        rearmedNoSubmitProofIds:[refusal.id],
         rearmedNoSubmitAtMs:now,
         lastAttemptReason:'sc1_verified_pre_dispatch_rejection_rearmed',lastAttemptAtMs:now};
+      // Producer/consumer invariant: never commit a WATCHING state that the
+      // normal entry ID and admission proof contract would reject.
+      if(starlightNoSendRetryGeneration(nextWatch)!==priorGen+1){
+        await client.query('ROLLBACK');started=false;return null;
+      }
       const updated=await client.query(`update sag_starlight_recovery_v1
         set status='WATCHING',watch=$7::jsonb,revision=revision+1,updated_at_ms=$8
         where system_name=$1 and owner_id=$2 and mode='LIVE' and reset_epoch=$3
@@ -5801,59 +5828,14 @@ export class Database {
           and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
         [String(w.parentEntryId)]);
       const children=linked.rows||[];
-      const matches=child=>{
-        const c=child.entry_config||{},rec=c.starlightRecovery||{},stamp=c.starlightCapital||{};
-        // A local pre-transmission refusal carries an affirmative dispatch
-        // witness. Absence of an order ID alone is NEVER proof of no BUY.
-        const noSend=starlightLocalNoSendProof(c);
-        return child.status==='rejected'
-          &&noSend
-          &&['sc1_intent_receipted_or_changed','live_entry_not_dispatched'].includes(child.close_reason)
-          &&child.archived===false
-          &&child.execution_class==='CAPITAL'&&c.executionClass==='CAPITAL'
-          &&String(child.system_name)===String(w.systemName)
-          &&String(child.owner_id)===String(w.ownerId)&&child.mode==='LIVE'
-          &&String(child.ticker)===String(w.ticker)
-          &&String(child.event_ticker)===String(w.eventTicker)
-          &&String(rec.parentEntryId)===String(w.parentEntryId)
-          &&String(rec.authorizationId)===String(w.authorizationId)
-          &&Number(rec.resetEpoch)===Number(w.resetEpoch)
-          &&stamp.version===STARLIGHT_CAPITAL_VERSION
-          &&Number(stamp.resetTimestampMs)===Number(w.resetEpoch)
-          &&Number.isSafeInteger(Number(stamp.seat))&&Number(stamp.seat)>=1
-          &&Number(stamp.seat)<=Number(w.maximumSeats)
-          &&Number.isFinite(Number(child.count))&&Number(child.count)>0
-          &&Number(child.remaining_count)===0
-          &&typeof child.entry_client_order_id==='string'&&child.entry_client_order_id.length>0
-          &&child.entry_order_id==null&&child.exit_order_id==null
-          &&child.exit_client_order_id==null
-          &&Number(child.entry_fee_cents||0)===0&&Number(child.exit_fee_cents||0)===0
-          &&Number(child.exit_filled_count||0)===0&&Number(child.exit_notional_cents||0)===0;
-      };
       const proofs=Array.isArray(persisted.preDispatchRefusals)?persisted.preDispatchRefusals:[];
       const latest=proofs.at(-1);
       const watchProof=latest&&latest.submitted===false&&latest.version==='HC2-R1-DISPATCH'
         &&String(latest.authorizationId)===String(w.authorizationId)
         &&Number(latest.committedRevision)===Number(row.revision);
-      const unsafe=children.some(c=>{
-        if(String(c.owner_id)!==String(w.ownerId)||String(c.mode)!=='LIVE')return true;
-        if(c.entry_order_id||c.exit_order_id)return true;
-        if(c.entry_config?.dispatchProof?.submitted===true)return true;
-        if(['open','entry_pending','exit_pending','pending_recovery'].includes(c.status))return true;
-        if(c.status==='closed'&&Number(c.exit_filled_count||0)>0)return true;
-        if(c.archived===true && c.entry_config?.dispatchProof?.submitted!==false)return true;
-        return false;
-      });
-      const claimGen=Number(persisted.noSendRetryGeneration||0);
-      const claimAt=Number(persisted.claimAtMs||0);
-      const childProof=children.length>=1&&children.length<=64&&children.every(c=>{
-        if(!matches(c))return false;
-        const gen=Number(c.entry_config?.starlightCapital?.noSendRetryGeneration??c.entry_config?.starlightRecovery?.noSendRetryGeneration??-1);
-        if(gen!==claimGen)return false;
-        if(claimAt>0 && Number(c.opened_at_ms||0)<claimAt)return false;
-        return true;
-      });
-      if(unsafe||(!watchProof && !childProof)){
+      const inspected=starlightNoSendChildrenForRearm(persisted,children);
+      const childProof=inspected.ok&&inspected.current.length>0;
+      if(!inspected.ok||(!watchProof && !childProof)){
 
         await client.query('ROLLBACK');started=false;return null;
       }
