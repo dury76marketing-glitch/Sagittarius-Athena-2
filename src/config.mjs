@@ -783,6 +783,39 @@ export const LEDGER_FACTORY_OVERRIDES_20261110_2051 = Object.freeze({
   lightningPlasmaMinProfitNetPerOriginalContractCents: 12,
 });
 
+// Factory operator-card defaults from the 2026-11-20T14:42:32Z SIMULATION
+// diagnostic settingsAtExport. Only operator-editable values that changed
+// are applied. Preserve each installation's persisted settings on upgrade,
+// including mode, identity, live authorization, reset epochs and migration flags.
+export const LEDGER_FACTORY_OVERRIDES_20261120_144232 = Object.freeze({
+  sagittariusArrowLinkEnabled: false,
+  athenaExclamationObservationMinutes: 0,
+  lightningPlasmaAuroraDamageControlPercent: 65,
+  sagittariusArrowMinEntryCents: 50,
+  sagittariusArrowMultiply: 2,
+  sagittariusArrowMinReboundCents: 2,
+  sagittariusArrowMinUpwardTicks: 4,
+  sagittariusArrowAuroraDamageControlPercent: 65,
+  scarletNeedleCapitalAuroraDamageControlPercent: 65,
+  pegasusRyuSeiKenCapitalAuroraDamageControlPercent: 65,
+  greatHornAuroraDamageControlPercent: 65,
+  crystalWallRecoveryAuroraDamageControlPercent: 65,
+  crashRecoveryMinEntryCents: 50,
+  crashRecoveryHunterMinCrashCents: 0,
+  crashRecoveryHunterMinReboundCents: 2,
+  crashRecoveryHunterMinUpwardTicks: 4,
+  athenaExclamationMinCrashCents: 0,
+  athenaExclamationMinReboundCents: 0,
+  athenaExclamationMinUpwardTicks: 0,
+  lightningPlasmaMinEntryCents: 50,
+  lightningPlasmaMinCrashCents: 0,
+  lightningPlasmaMinReboundCents: 2,
+  lightningPlasmaMinUpwardTicks: 4,
+  athenaExclamationStarlightTriggerCents: 1,
+  crashRecoveryHunterMultiply: 2,
+  lightningPlasmaMultiply: 2,
+});
+
 export function freshInstallSettings() {
   return {
     ...originalSettings(),
@@ -958,6 +991,7 @@ export function freshInstallSettings() {
     ...LEDGER_FACTORY_OVERRIDES_20261111_1559,
     ...LEDGER_FACTORY_OVERRIDES_20261111_1659,
     ...LEDGER_FACTORY_OVERRIDES_20261116_141852,
+    ...LEDGER_FACTORY_OVERRIDES_20261120_144232,
     resetTimestampMs:null,
     factoryTradingProfile20261005Applied:true,
     athenaArrowCloneApplied:true,

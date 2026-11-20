@@ -21,6 +21,37 @@ for(const file of files){
     process.exit(result.status||1);
   }
 }
+// Factory Reset release gate: every Railway build must contain the exact
+// operator-selected 20 November 2026 diagnostic profile. Without this check,
+// a partial GitHub upload can successfully deploy the old config.mjs while
+// the dashboard's Reset button returns HTTP 200 for the WRONG factory card.
+// This contract is deterministic, broker-free and uses no production database.
+const {freshInstallSettings,factoryOperatorSettingsPatch,sanitizeRuntimeSettings,
+  LEDGER_FACTORY_OVERRIDES_20261120_144232,EDITABLE_NUMERIC_SETTINGS,
+  EDITABLE_BOOLEAN_SETTINGS,SETTINGS_MIGRATION_FLAGS}=await import('../src/config.mjs');
+const expectedFactory=freshInstallSettings(),resetPatch=factoryOperatorSettingsPatch();
+let factoryChecks=0;
+for(const [key,value] of Object.entries(LEDGER_FACTORY_OVERRIDES_20261120_144232)){
+  if(expectedFactory[key]!==value||resetPatch[key]!==value)
+    throw new Error(`railway_factory_profile_mismatch:${key}`);
+  factoryChecks++;
+}
+for(const key of [...EDITABLE_NUMERIC_SETTINGS,...EDITABLE_BOOLEAN_SETTINGS]){
+  if(SETTINGS_MIGRATION_FLAGS.includes(key)||key==='ci1WallCloneApplied')continue;
+  if(!Object.hasOwn(resetPatch,key)||resetPatch[key]!==expectedFactory[key])
+    throw new Error(`railway_factory_reset_incomplete:${key}`);
+  factoryChecks++;
+}
+for(const key of ['mode','liveArmed','liveOwnerAuthorized','engineActive','ownerId',
+  'systemName','resetTimestampMs','liveDashboardStartMs','simulationDashboardStartMs'])
+  if(Object.hasOwn(resetPatch,key))throw new Error(`railway_factory_reset_unsafe_runtime_key:${key}`);
+if(expectedFactory.starlightExtinctionRealTradeEnabled!==true)
+  throw new Error('railway_starlight_capital_factory_mismatch');
+const roundTrip=sanitizeRuntimeSettings({...expectedFactory,...resetPatch});
+for(const [key,value] of Object.entries(resetPatch))
+  if(roundTrip[key]!==value)throw new Error(`railway_factory_reset_not_persistent:${key}`);
+console.log(`Factory Reset selected-ledger profile and ${factoryChecks} operator contract checks: PASS.`);
+
 // Railway release gate: syntax checking does not detect missing named ESM exports.
 // Link the production engine/import graph without executing src/index.mjs,
 // which starts the HTTP server and trading lifecycle. Any missing local export,

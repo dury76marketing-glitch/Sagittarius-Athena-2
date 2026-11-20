@@ -1078,8 +1078,28 @@ $('resetDefaultsBtn').onclick=async()=>{
     invalidateStateReads();
     if(operatorEventStream){operatorEventStream.close();operatorEventStream=null;}
     ATTACK_CONTROL_FINGERPRINT=null;CONTROL_FINGERPRINT=null;
+    // The POST reply has already been checked against committed PostgreSQL
+    // settings by the server. Apply only the operator controls immediately;
+    // /api/state also compiles financial, shadow and telemetry snapshots and
+    // may return 503 independently of a successful Factory Reset.
+    if(STATE?.settings){
+      STATE={...STATE,settings:{...STATE.settings,...committed}};
+      try{
+        renderAttacks(STATE);ATTACK_CONTROL_FINGERPRINT=attackControlsFingerprint(STATE);
+        renderSettings(STATE);renderCosmos(STATE);renderGalactic(STATE);
+        renderFreezingCoffin(STATE);CONTROL_FINGERPRINT=controlFingerprint(STATE);
+      }catch(error){
+        ATTACK_CONTROL_FINGERPRINT=null;CONTROL_FINGERPRINT=null;
+        console.error('sag_factory_settings_control_render_failed',String(error?.message||error));
+      }
+    }
     const fresh=await load();
-    if(!fresh?.settings)throw new Error('Factory settings saved, but dashboard refresh failed. Reload the dashboard to view saved values.');
+    if(!fresh?.settings){
+      // Reporting unavailability is not a failed database commit. Preserve the
+      // verified controls and let the existing operator-state retry recover.
+      msg('Factory settings saved and verified. Full dashboard refresh pending.');
+      return;
+    }
     // Compare the saved operator card, not unrelated engine/mode/reset controls
     // that can be changed by an independent safety action during the refresh.
     const runtimeKeys=new Set(['mode','liveArmed','engineActive','systemName','ownerId',
