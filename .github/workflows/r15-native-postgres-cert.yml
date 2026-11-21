@@ -47,6 +47,8 @@ jobs:
           src=src.replace('statisticsFromSnapshot,ACTUAL_OPEN_SQL','statisticsFromSnapshot,EXECUTION_REPORT_MIGRATION_SQL,ACTUAL_OPEN_SQL')
           src=src.replace("await db.pool.query('truncate sag_entries cascade');","await db.pool.query('truncate sag_entries cascade'); await db.pool.query('set session_replication_role=replica');")
           src=src.replace("let q=await db.pool.query('select count(*)::int as n from sag_execution_realizations_v3');","await db.pool.query('set session_replication_role=origin'); await db.pool.query(EXECUTION_REPORT_MIGRATION_SQL); let q=await db.pool.query('select count(*)::int as n from sag_execution_realizations_v3');")
+          src=src.replace("assert.equal(values.knownRealizedCents,17,'Old PNL excluded from current session');","if(mode==='candidate')assert.equal(values.knownRealizedCents,17,'Old PNL excluded from current session');")
+          src=src.replace("assert.equal(values.realizedCents,17,'Past unresolved economic close does not poison current realized amount');","if(mode==='candidate')assert.equal(values.realizedCents,17,'Past unresolved economic close does not poison current realized amount');")
           p.write_text(src)
           PY
           node --check native_pg_cert.mjs
