@@ -5198,7 +5198,7 @@ export class Database {
     const r=await this.pool.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries where system_name=$1 and archived=false and ($5::text is null or mode=$5) and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and concept_name = any($2::text[]) and status='closed' and count>0 and ($3::bigint=0 or opened_at_ms >= $3) and ($6::text is null or owner_id=$6) order by closed_at_ms desc nulls last,id limit $4`,[String(systemName),['Lightning Plasma'],reset,lim,book,ownerId==null?null:String(ownerId)]);
     return r.rows.map(rowEntry);
   }
-  // Read-only operator history for the two CAPITAL execution attacks. Unlike
+  // Read-only operator history for all seven CAPITAL execution attacks. Unlike
   // /api/state's bounded recent rows, keyset pagination can reach every
   // current-reset entry without hydrating the history on every SSE update.
   // No trades, protections, balances, settings or schema are ever modified.
@@ -5230,7 +5230,7 @@ export class Database {
       const result=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where system_name=$1 and owner_id=$2 and mode=$3 and archived=false
         and concept_name in ('Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery','Crash Recovery Hunter')
-        and (${CAPITAL_SQL} or (concept_name='Crash Recovery Hunter' and coalesce(execution_class, entry_config->>'executionClass')='SHADOW_SAINT'))
+        and ${CAPITAL_SQL}
         and (${isOpen?'$4::bigint >= 0':'opened_at_ms >= $4'})
         and ${stateFilter} and ${orderAt} <= $7
         and ($5::bigint is null or (${orderAt} < $5 or (${orderAt} = $5 and id < $6)))

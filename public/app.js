@@ -563,14 +563,16 @@ function capitalizePageScopeMatches(page,s,kind){
        ||!Number.isSafeInteger(Number(page.nextCursor.beforeAtMs))
        ||typeof page.nextCursor.beforeId!=='string'||!page.nextCursor.beforeId)))return false;
   return page.rows.every(e=>{
-    const starlight=e?.conceptName==='Crash Recovery Hunter';
     const allowed=['Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery','Crash Recovery Hunter'];
     if(!e||!e.id||!allowed.includes(e.conceptName)
       ||!(kind==='open'?dashboardRowIdentityMatches(e,s.settings):dashboardRowScopeMatches(e,s.settings)))return false;
-    if(!starlight&&(e.executionClass==='SHADOW_SAINT'||e.entryConfig?.executionClass==='SHADOW_SAINT'))return false;
+    // A shadow Starlight position is never a CAPITAL trade, even when its
+    // concept name matches capital Starlight. Both stored classification
+    // surfaces must agree with the financial-reporting SQL classifier.
+    if(e.executionClass==='SHADOW_SAINT'||e.entryConfig?.executionClass==='SHADOW_SAINT')return false;
     if(kind==='closed')return e.status==='closed'&&Number(e.count)>0;
     return ['open','exit_pending','entry_pending','pending_recovery'].includes(e.status)
-      &&Number(e.remainingCount)>0&&(starlight||e.positionExposureConfirmed===true);
+      &&Number(e.remainingCount)>0&&e.positionExposureConfirmed===true;
   });
 }
 async function loadCapitalHistoryPage(kind,{refresh=false}={}){
