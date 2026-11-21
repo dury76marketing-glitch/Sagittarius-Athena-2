@@ -24,7 +24,7 @@ jobs:
           --health-timeout 3s
           --health-retries 12
     env:
-      DATABASE_URL: postgres://sagtest:sagtest@127.0.0.1:5432/sagtest
+      DATABASE_URL: postgres://sagtest:sagtest@localhost:5432/sagtest
       SAGITTARIUS_ALLOW_LIVE_TRADING: "false"
     steps:
       - uses: actions/checkout@v4
