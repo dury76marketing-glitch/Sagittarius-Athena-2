@@ -24,7 +24,7 @@ import {PEGASUS_RYU_SEI_KEN_RECOVERY_SQL,verifiedScarletNeedleRecoveryLoss,pegas
 import {PR_SIM_VERSION,PR_LIVE_VERSION,pegasusRyuSeiKenCapitalSettingsFingerprint} from './pegasusRyuSeiKenCapitalSimCapital.mjs';
 import {CRYSTAL_WALL_RECOVERY_SQL,verifiedGreatHornLoss,crystalWallRecoveryWatchFromLoss,crystalWallRecoveryObservationStep,crystalWallRecoveryAdmissionDecision,crystalWallRecoveryOperatorBandAllowed,crystalWallRecoverySpreadAllowed,CW_CONCEPT} from './crystalWallRecovery.mjs';
 import {CW_SIM_VERSION,CW_LIVE_VERSION,crystalWallRecoverySettingsFingerprint} from './crystalWallSimCapital.mjs';
-import {ACTUAL_OPEN_SQL,UNRESOLVED_FUNDED_SQL,unresolvedFundedSql,financialHistoryState,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
+import {ACTUAL_OPEN_SQL,UNVALUED_LIVE_PENDING_SQL,UNRESOLVED_FUNDED_SQL,unresolvedFundedSql,financialHistoryState,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
 import pg from 'pg';
 import { ShadowStore, SHADOW_SCHEMA_SQL } from './shadowStore.mjs';
 import { SHADOW_PROTOCOL, SHADOW_RUNTIME_LOCK, executionSettingsHashMatches, validateShadowEntryWitness, CAPITAL_SQL, SHADOW_SQL, STARLIGHT_SQL } from './shadowProtocol.mjs';
@@ -1770,6 +1770,7 @@ export class Database {
       const groups=await client.query(`select concept_name,
         count(*) filter(where ${ACTUAL_OPEN_SQL})::int as open,
         count(*) filter(where status='entry_pending' and not (${ACTUAL_OPEN_SQL}))::int as pending,
+        count(*) filter(where ${UNVALUED_LIVE_PENDING_SQL})::int as unvalued_live_pending,
         count(*) filter(where ${closedFinancial})::int as closed,
         count(*) filter(where status='closed' and (${UNRESOLVED_FUNDED_SQL}))::int as unresolved_closed,
         count(*) filter(where ${closedFinancial} and pnl_cents>0)::int as wins,
@@ -1780,7 +1781,7 @@ export class Database {
         coalesce(sum(pnl_cents) filter(where ${closedFinancial}),0) as closed_realized_cents,
         coalesce(sum(pnl_cents) filter(where ${ACTUAL_OPEN_SQL}),0) as partial_realized_cents,
         coalesce(sum(coalesce(entry_fee_cents,0)+coalesce(exit_fee_cents,0)) filter(where (${closedFinancial}) or (${ACTUAL_OPEN_SQL})),0) as known_fees_cents
-        from sag_entries where ${scope} and (opened_at_ms >= $4 or (${ACTUAL_OPEN_SQL}))
+        from sag_entries where ${scope} and (opened_at_ms >= $4 or (${ACTUAL_OPEN_SQL}) or (${UNVALUED_LIVE_PENDING_SQL}))
           and concept_name=any($5::text[]) group by concept_name`,args);
       const bounds=`with bounds as (select ${['day','week','month','year'].map(k=>`(extract(epoch from (date_trunc('${k}',now() at time zone 'Europe/Madrid') at time zone 'Europe/Madrid'))*1000)::bigint as ${k}_ms`).join(',')})`;
       const periodScope=`e.system_name=$1 and ($2::text is null or e.owner_id=$2) and ($3::text is null or e.mode=$3) and not e.archived
@@ -1798,11 +1799,20 @@ export class Database {
         where ${scope} and status in ('open','exit_pending','entry_pending','pending_recovery') order by opened_at_ms,id`,args.slice(0,3));
       // At most seven summary rows, regardless of unresolved historical volume.
       // Preserve known fees/partial economics separately from an unknown final result.
-      const unresolved=await client.query(`${bounds} select concept_name,count(*)::int as unreconciled,
-        coalesce(sum(pnl_cents),0) as known_realized_cents,
-        coalesce(sum(coalesce(entry_fee_cents,0)+coalesce(exit_fee_cents,0)),0) as known_fees_cents,
-        ${['day','week','month','year'].map(k=>`count(*) filter(where coalesce(closed_at_ms,(extract(epoch from now())*1000)::bigint)>=b.${k}_ms)::int as ${k}_unknown`).join(',')}
-        from sag_entries cross join bounds b where ${scope} and (${UNRESOLVED_FUNDED_SQL}) group by concept_name`,args.slice(0,3));
+      // Keep historical unresolved economic closures outside the active
+      // dashboard session, but never certify a complete current valuation
+      // while an older authenticated broker-orphan exposure remains active.
+      // Same bounded query, snapshot transaction, owner and execution scope;
+      // no backfilled P/L or guessed settlement timestamps.
+      const unresolved=await client.query(`${bounds} select concept_name,
+        count(*) filter(where opened_at_ms >= $4)::int as unreconciled,
+        count(*) filter(where status='reconciliation_orphaned' and remaining_count>0)::int as unvalued_reconciliation_orphans,
+        coalesce(sum(pnl_cents) filter(where opened_at_ms >= $4),0) as known_realized_cents,
+        coalesce(sum(coalesce(entry_fee_cents,0)+coalesce(exit_fee_cents,0)) filter(where opened_at_ms >= $4),0) as known_fees_cents,
+        ${['day','week','month','year'].map(k=>`count(*) filter(where opened_at_ms >= $4 and coalesce(closed_at_ms,(extract(epoch from now())*1000)::bigint)>=b.${k}_ms)::int as ${k}_unknown`).join(',')}
+        from sag_entries cross join bounds b where ${scope} and concept_name=any($5::text[])
+          and (opened_at_ms >= $4 or (status='reconciliation_orphaned' and remaining_count>0))
+          and (${UNRESOLVED_FUNDED_SQL}) group by concept_name`,args);
       const closed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Lightning Plasma'],Math.max(1,Math.min(5000,Number(limit)||150))]);

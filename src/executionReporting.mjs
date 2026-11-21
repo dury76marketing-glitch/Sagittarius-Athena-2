@@ -52,7 +52,13 @@ export function financialHistoryState(e){
     confirmedPnlCents:unresolved?null:finite(e?.pnlCents)?Number(e.pnlCents):null};
 }
 export const actualOpenExposure=(e)=>EXPOSURE_STATUSES.includes(String(e?.status))&&Number(e?.remainingCount)>0&&hasConfirmedEntryFill(e);
+// An unconfirmed LIVE BUY may have reached Kalshi; do not report a complete
+// account-wide open-position valuation before its status/quantity is proven.
+// This is READ-ONLY reporting. It does not reserve, retry or authorize orders.
+export const hasUnvaluedLivePendingExposure=(e)=>e?.status==='entry_pending'&&e?.mode==='LIVE'
+  &&Number(e?.remainingCount)>0&&!actualOpenExposure(e);
 export const ACTUAL_OPEN_SQL="status in ('open','exit_pending','entry_pending','pending_recovery') and remaining_count>0 and (status<>'entry_pending' or mode<>'LIVE' or (coalesce(entry_config#>>'{entryFillProof,authoritative}','false')='true' and coalesce((entry_config#>>'{entryFillProof,filledCount}')::numeric,0)>0 and (entry_config#>>'{entryFillProof,filledCount}')::numeric=count))";
+export const UNVALUED_LIVE_PENDING_SQL="status='entry_pending' and mode='LIVE' and remaining_count>0 and not ("+ACTUAL_OPEN_SQL+")";
 export function dashboardReportingStartMs(s){
   const period=s?.mode==='LIVE'?s?.liveDashboardStartMs:s?.mode==='SIMULATION'?s?.simulationDashboardStartMs:null;
   const start=Number(period||0),epoch=Number(s?.resetTimestampMs||0);
@@ -63,7 +69,7 @@ export function executionScopeMatches(e,s,{ignoreReset=false}={}){
     // Open exposure is authoritative across dashboard sessions and restarts;
     // the epoch restricts only historic/closed session performance. This
     // predicate is reporting-only and never grants entry/exit authority.
-    &&(ignoreReset||actualOpenExposure(e)||Number(e.openedAtMs)>=dashboardReportingStartMs(s));
+    &&(ignoreReset||actualOpenExposure(e)||hasUnvaluedLivePendingExposure(e)||Number(e.openedAtMs)>=dashboardReportingStartMs(s));
 }
 /** Mark at a verified current best bid. This is NOT a full-depth liquidation claim. */
 export function executionValuation(e,quote,settings={},now=Date.now()){
@@ -115,7 +121,9 @@ export function combineExecutionStats(byAttack){
   out.financialComplete=out.unreconciled===0;
   out.realizedCents=out.financialComplete?out.knownRealizedCents:null;
   out.winRate=out.closed?out.wins/out.closed:0;
-  out.valuationComplete=out.missingValuations===0&&out.financialComplete;
+  // Open-position marks are independent from unresolved historical realized
+  // economics. A missing/unauthenticated CURRENT mark still fails closed.
+  out.valuationComplete=out.missingValuations===0;
   out.unrealizedCents=out.valuationComplete?out.knownUnrealizedCents:null;
   for(const p of ['day','week','month','year'])if(!out.periodsComplete[p])out[`${p}RealizedCents`]=null;
   return out;
@@ -136,7 +144,7 @@ function finalizeExecutionStats(a){
   a.knownRealizedCents=a.realizedCents;
   a.realizedCents=a.financialComplete?a.knownRealizedCents:null;
   a.avgEntryCents=a.total?a.avgEntryCents/a.total:0;a.winRate=a.closed?a.wins/a.closed:0;
-  a.valuationComplete=a.missingValuations===0&&a.financialComplete;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
+  a.valuationComplete=a.missingValuations===0;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
   for(const p of ['day','week','month','year'])if(!a.periodsComplete[p])a[`${p}RealizedCents`]=null;
 }
 /** Bounded legacy/offline reader: time-uncertain historic partials are NOT fabricated. */
@@ -146,7 +154,15 @@ export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now
     if(!executionCapital(e)||!executionScopeMatches(e,settings,{ignoreReset:true}))continue;
     const a=byAttack[e.conceptName];
     if(unresolvedFundedCapital(e)){
+      // Pre-reset broker-orphaned funded exposure remains an UNKNOWN CURRENT
+      // mark even though its historical realized amounts belong outside this
+      // dashboard session. Do not import old P/L or erase its exposure risk.
+      if(!executionScopeMatches(e,settings)){
+        if(e.status==='reconciliation_orphaned'&&Number(e.remainingCount)>0)a.missingValuations++;
+        continue;
+      }
       a.unreconciled++;a.financialComplete=false;a.feesComplete=false;
+      if(e.status==='reconciliation_orphaned')a.missingValuations++;
       if(e.status==='closed'&&executionScopeMatches(e,settings))a.unresolvedClosed++;
       a.realizedCents+=n(e.pnlCents);a.partialRealizedCents+=n(e.pnlCents);
       a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
@@ -154,7 +170,7 @@ export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now
     }
     if(!executionScopeMatches(e,settings))continue;
     const closed=e.status==='closed'&&Number(e.count)>0,open=actualOpenExposure(e);
-    if(!closed&&!open){if(e.status==='entry_pending')a.pending++;continue;}
+    if(!closed&&!open){if(e.status==='entry_pending'){a.pending++;if(hasUnvaluedLivePendingExposure(e))a.missingValuations++;}continue;}
     a.total++;a.avgEntryCents+=n(e.entryPriceCents);
     a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
     a.realizedCents+=n(e.pnlCents);
@@ -181,17 +197,20 @@ export function statisticsFromSnapshot(snapshot,settings,{getQuote=()=>null,now=
     a.closedRealizedCents=n(r.closed_realized_cents);a.partialRealizedCents=n(r.partial_realized_cents);
     a.realizedCents=a.closedRealizedCents+a.partialRealizedCents;a.avgEntryCents=n(r.avg_entry_cents);
     a.knownFeesCents=n(r.known_fees_cents);
+    a.missingValuations+=n(r.unvalued_live_pending);
   }
   for(const r of snapshot.periods||[]){const a=byAttack[r.concept_name];if(!a)continue;for(const p of ['day','week','month','year']){a.periodsComplete[p]=Number(r[`${p}_unknown`]||0)===0;a[`${p}RealizedCents`]=a.periodsComplete[p]?n(r[`${p}_realized_cents`]):null;}}
   for(const r of snapshot.unresolvedAggregates||[]){
     const a=byAttack[r.concept_name];if(!a)continue;
     a.unreconciled+=n(r.unreconciled);a.financialComplete=a.unreconciled===0;a.feesComplete=a.financialComplete;
+    a.missingValuations+=n(r.unvalued_reconciliation_orphans);
     a.realizedCents+=n(r.known_realized_cents);a.partialRealizedCents+=n(r.known_realized_cents);a.knownFeesCents+=n(r.known_fees_cents);
     for(const p of ['day','week','month','year'])if(Number(r[`${p}_unknown`]||0)>0)a.periodsComplete[p]=false;
   }
   for(const e of snapshot.unresolvedAggregates?[]:(snapshot.unresolvedRows||[])){
     if(!unresolvedFundedCapital(e)||!executionScopeMatches(e,settings,{ignoreReset:true}))continue;
     const a=byAttack[e.conceptName];a.unreconciled++;a.financialComplete=false;a.feesComplete=false;
+    if(e.status==='reconciliation_orphaned')a.missingValuations++;
     a.realizedCents+=n(e.pnlCents);a.partialRealizedCents+=n(e.pnlCents);a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
     unresolvedPeriodCompleteness(a,e,now);
   }

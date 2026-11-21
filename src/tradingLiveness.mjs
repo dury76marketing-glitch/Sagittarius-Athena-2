@@ -35,7 +35,10 @@ export function classifyTradingLiveness({workers=[],queues=[],health={},lastEven
   if(impairedWorkers.length||impairedQueues.length||health.scannerFresh===false||health.websocketFresh===false)
     return{state:'LIVENESS_DEGRADED',reason:impairedWorkers.length?'worker_progress_stale':impairedQueues.length?'queue_progress_stale':'market_or_scanner_evidence_stale',
       workers:impairedWorkers.map(x=>clean(x.name,64)),queues:impairedQueues.map(x=>clean(x.name,64))};
-  if(Number(activity.unresolvedEvictions)>0)return{state:'LIVENESS_DEGRADED',reason:'incomplete_pending_candidate_coverage'};
+  // Losing a bounded diagnostic record is a loss of historical COVERAGE, not
+  // evidence that a required trading worker or broker operation is stalled.
+  // Retain the eviction count in coverage; use live worker/queue/health evidence
+  // (above) and the age of retained in-progress candidates (below) for liveness.
   if(Number(activity.oldestInProgressAtMs)>0&&now-Number(activity.oldestInProgressAtMs)>LIVENESS_LIMITS.staleWorkMs)
     return{state:'LIVENESS_DEGRADED',reason:'observed_candidate_progress_stale'};
   const safetyReasons=health.operational?.reasons||[];
@@ -128,7 +131,8 @@ export class TradingLiveness {
       while(this.samples.length>LIVENESS_LIMITS.samples||this.sampleBytes>LIVENESS_LIMITS.sampleBytes){this.samples.shift();this.sampleBytes-=this.sampleSizes.shift();}
       this.lastSampleAtMs=at;
     }
-    this.last={...status,atMs:at,workers:workerRows,queues:queueRows};
+    this.last={...status,atMs:at,workers:workerRows,queues:queueRows,
+      coverageWarning:this.unresolvedAttemptEvictions>0?'historical_pending_candidate_coverage_lost':null};
     return this.snapshot();
   }
   snapshot({history=false}={}){
@@ -140,6 +144,7 @@ export class TradingLiveness {
       coverage:{observationStartedAtMs:this.observationStartedAtMs,firstSampleAtMs:this.samples[0]?.atMs||null,lastSampleAtMs:this.samples.at(-1)?.atMs||null,
         samples:this.samples.length,maximumSamples:LIVENESS_LIMITS.samples,sampleBytes:this.sampleBytes,maximumSampleBytes:LIVENESS_LIMITS.sampleBytes,events:this.events.length,maximumEvents:LIVENESS_LIMITS.events,sampleEveryMs:LIVENESS_LIMITS.sampleEveryMs,
         retainedAttempts:this.attempts.size,maximumAttempts:LIVENESS_LIMITS.attempts,attemptEvictions:this.attemptEvictions,unresolvedAttemptEvictions:this.unresolvedAttemptEvictions,
+        historicalPendingCoverageComplete:this.unresolvedAttemptEvictions===0,
         retainedReceipts:this.receipts.size,maximumReceipts:LIVENESS_LIMITS.receipts,receiptEvictions:this.receiptEvictions,fullHistory:false},
       ...(history?{current:this.last,samples:this.samples.slice(),events:this.events.slice()}:{} )};
   }
