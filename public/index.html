@@ -41,7 +41,7 @@
       <div class="stat"><span>Profit This Week</span><strong id="capitalCombinedWeek">Unavailable</strong></div>
       <div class="stat"><span>Profit This Month</span><strong id="capitalCombinedMonth">Unavailable</strong></div>
       <div class="stat"><span>Profit This Year</span><strong id="capitalCombinedYear">Unavailable</strong></div>
-      <div class="stat"><span>Pending BUY orders</span><strong id="capitalCombinedPending">Unavailable</strong></div>
+      <div class="stat"><span>Unreconciled BUY intents (local)</span><strong id="capitalCombinedPending">Unavailable</strong></div>
     </div>
     <div id="capitalCombinedFinancialStatus" class="muted">Waiting for matching financial reports for both chains.</div>
   </section>
@@ -51,7 +51,7 @@
       <span class="muted">Chain 1 first, then Chain 2. Each row is a separate verified CAPITAL attack in the selected system, owner, SIM/LIVE mode and reset. Period profits are realized net P/L on the Madrid calendar; SHADOW and legacy results are excluded.</span>
     </div></div>
     <div class="table-wrap capital-results-table" role="region" aria-label="Results for all seven capital attacks; scroll horizontally for profit periods" tabindex="0">
-      <table><thead><tr><th>Capital attack</th><th>Open</th><th>Closed</th><th>Wins / Losses</th><th>Win %</th><th>Pending</th><th>Realized net</th><th>Unrealized</th><th>Profit Today</th><th>Profit This Week</th><th>Profit This Month</th></tr></thead>
+      <table><thead><tr><th>Capital attack</th><th>Open</th><th>Closed</th><th>Wins / Losses</th><th>Win %</th><th>Local BUY intents</th><th>Realized net</th><th>Unrealized</th><th>Profit Today</th><th>Profit This Week</th><th>Profit This Month</th></tr></thead>
       <tbody id="capitalAttackResultsBody"><tr><td colspan="11" class="muted">Waiting for verified capital reports.</td></tr></tbody></table>
     </div>
     <p id="capitalAttackResultsStatus" class="capital-history-status muted" role="status" aria-live="polite">Waiting for a matching financial snapshot.</p>
@@ -137,7 +137,7 @@
   <section class="card"><div class="section-title"><div><h2>Q-17 MARKET DATA FEED</h2><p class="muted">The quote WebSocket requires Kalshi feed credentials configured as private Railway Variables. SIMULATION uses simulated capital. LIVE broker requests require deployment permission, explicit owner authorization, verified account and parent evidence, and all execution safeguards. Credentials are never entered in this dashboard.</p></div></div></section>
   <section class="card" style="display:none"><div class="section-title"><div><h2>MARKET FEED CONFIGURATION (RAILWAY VARIABLES ONLY)</h2><p class="muted">Credentials must be entered in Railway, never in a public Q-17 dashboard.</p></div><span id="connectionPill" class="pill"></span></div><form id="credentialsForm" class="credential-grid"><label>System Name<input id="systemNameInput" autocomplete="off"></label><label>API Key ID<input id="apiKeyInput" autocomplete="off"></label><label class="wide">Private Key (PEM)<textarea id="privateKeyInput" rows="7"></textarea></label><div class="wide form-actions"><button class="btn primary" type="submit">Save credentials</button><button class="btn light" id="testConnectionBtn" type="button">Test connection</button></div></form><div id="actionMessage" class="message"></div></section>
 </main>
-<script src="/app.js?v=sag-r15-megawave-20261121"></script>
+<script src="/app.js?v=sag-r16-megawave-20261121"></script>
   <script type="module" src="/ledgerDownload.js?v=integrity-r5"></script>
 </body>
 </html>

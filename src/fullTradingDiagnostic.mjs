@@ -97,7 +97,7 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
   };
   const locks = {
     tickerLock: {
-      rule: 'exactTickerExposureClear: one open hunter per ticker per attack when Multiply is 1. Galactic ON allows a different attack on the same ticker.',
+      rule: 'R16: Galactic ON permits distinct authenticated opportunity intents for the same attack/ticker, subject to durable event/global caps, cash and exact order safeguards. Galactic OFF retains original same-attack ticker restrictions.',
       currentBlocks: pipeline.filter(e => e.reason === 'ticker_lock').slice(-30),
       suspectedStale: false,
       note: 'A lock held by an open shadow is expected. This export does not release locks.',
@@ -105,7 +105,7 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     eventCap: {
       configuredMaximum: Number(settings.maxEntriesPerTrade ?? 1),
       rule: 'shadow_event_lifetime_cap counts non-rejected shadow rows on the event for the epoch. Closed rows count. Rejected rows do not.',
-      sharedOrIndependent: settings.galacticExplosionEnabled === true ? 'per attack when Galactic is ON' : 'shared across attacks',
+      sharedOrIndependent: settings.galacticExplosionEnabled === true ? 'per attack plus immutable opportunity identity when Galactic ON' : 'shared across attacks',
       currentBlocks: pipeline.filter(e => e.reason === 'shadow_event_lifetime_cap').slice(-30),
       refusalCorrectIfCountAtOrAboveMaximum: true,
     },

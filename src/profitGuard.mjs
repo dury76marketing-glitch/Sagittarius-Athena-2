@@ -1,5 +1,5 @@
 import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
-import {proveSingleLiveSettlement, proveExactLiveSellClose, proveLiveSettlementSeats, isLegacyFundedQuarantine} from './liveSettlementReconciliation.mjs';
+import {proveSingleLiveSettlement, proveExactLiveSellClose, proveLiveSettlementSeats, isLegacyFundedQuarantine, isBrokerFlatEconomicUnknown} from './liveSettlementReconciliation.mjs';
 import {deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { randomUUID } from 'node:crypto';
 import {clientCloneTag,classifyCloneRestingOrders} from './cloneIdentity.mjs';
@@ -451,6 +451,10 @@ export class ProfitGuard {
     // Throttle read-only exact SELL receipt reconciliation when closed markets
     // no longer publish an executable book; no new order is submitted here.
     this.livePendingExitReceiptCheckedAtMs = new Map();
+    // R16: a historic ambiguous BUY must remain durable, but the broker
+    // current+archival readback cannot run on every protection sweep. New
+    // intents / already-filled partials retain a fast reconciliation cadence.
+    this.pendingEntryInspectionAtMs = new Map();
     // Infinity fast wake stays immediate, but low-value observing telemetry is
     // bounded independently so protection cannot turn into a hot DB write loop.
     this.infinityObservingAudit = new Map();
@@ -486,6 +490,7 @@ export class ProfitGuard {
     for(const ticker of [...this.infinityBreakFastWake.keys()])if(!activeTickers.has(String(ticker)))this.infinityBreakFastWake.delete(ticker);
     for(const id of [...this.brokerOrphanCandidates.keys()])if(!activeIds.has(String(id)))this.brokerOrphanCandidates.delete(id);
     for(const id of [...this.livePendingExitReceiptCheckedAtMs.keys()])if(!activeIds.has(String(id)))this.livePendingExitReceiptCheckedAtMs.delete(id);
+    for(const id of [...this.pendingEntryInspectionAtMs.keys()])if(!activeIds.has(String(id)))this.pendingEntryInspectionAtMs.delete(id);
     for(const id of [...this.infinityObservingAudit.keys()])if(!activeIds.has(String(id)))this.infinityObservingAudit.delete(id);
   }
 
@@ -3590,7 +3595,8 @@ export class ProfitGuard {
     const settings=this.getSettings();
     if(!snapshot||snapshot.mode!=='LIVE'||isShadowSaintEntry(snapshot)
       ||snapshot.ownerId!==settings.ownerId||snapshot.systemName!==settings.systemName
-      ||!(['open','exit_pending'].includes(snapshot.status)||isLegacyFundedQuarantine(snapshot)))
+      ||!(['open','exit_pending'].includes(snapshot.status)||isLegacyFundedQuarantine(snapshot)
+        ||isBrokerFlatEconomicUnknown(snapshot)))
       return {closed:false,skipped:'settlement_candidate_invalid'};
     if(typeof this.db?.entryById!=='function'||typeof this.db?.liveOpenHunterEntries!=='function'
       ||typeof this.db?.liveCapitalTickerHistory!=='function')
@@ -3601,7 +3607,7 @@ export class ProfitGuard {
       const findLegacyOrphans=async()=>{
         const history=await this.db.liveCapitalTickerHistory(settings.ownerId,ticker);
         if(!Array.isArray(history)||history.length>2000)throw Error('legacy_orphan_history_invalid');
-        return history.filter(isLegacyFundedQuarantine);
+        return history.filter(e=>isLegacyFundedQuarantine(e)||isBrokerFlatEconomicUnknown(e));
       };
       let legacyOrphans=await findLegacyOrphans();
       const outcome=(reason,extra={})=>({closed:closedIds.includes(snapshot.id),closedIds,
@@ -3619,8 +3625,10 @@ export class ProfitGuard {
       if(!active.some(e=>e.id===snapshot.id)
         &&!legacyOrphans.some(e=>e.id===snapshot.id)){
         const e=await this.db.entryById(snapshot.id);
-        return outcome(e?.status==='closed'?'position_already_closed':'settlement_candidate_changed',
-          {closed:e?.status==='closed'&&e?.ownerId===settings.ownerId&&e?.ticker===ticker});
+        return outcome(e?.status==='closed'&&!isBrokerFlatEconomicUnknown(e)
+          ?'position_already_closed':'settlement_candidate_changed',
+          {closed:e?.status==='closed'&&!isBrokerFlatEconomicUnknown(e)
+            &&e?.ownerId===settings.ownerId&&e?.ticker===ticker});
       }
       const conflicts=[];
       for(const original of active){
@@ -3643,7 +3651,7 @@ export class ProfitGuard {
       // Recover older funded seats hidden by the previous quarantine version
       // only from complete, authenticated, uniquely owned SELL history.
       // A contradictory current SELL is still a conflict for its own seat.
-      for(const old of legacyOrphans.slice(0,4)){
+      for(const old of legacyOrphans.filter(isLegacyFundedQuarantine).slice(0,4)){
         const e=await this.db.entryById(old.id);
         if(!isLegacyFundedQuarantine(e))continue;
         const p=e.entryConfig?.entryFillProof;
@@ -3680,7 +3688,12 @@ export class ProfitGuard {
           ||issues.unattributed)return outcome('settlement_resting_order_present');
       }
       const buyIds=new Set(),sellIds=new Set();
+      let unprovenPendingBuy=false;
       for(const e of history){
+        // An unsent/ambiguous BUY is not funded inventory and has no broker
+        // ORDER id. Do not mistake it for a duplicate; it will bar settlement
+        // attribution later but cannot block unrelated exact SELL evidence.
+        if(e.status==='entry_pending'&&!e.entryOrderId){unprovenPendingBuy=true;continue;}
         if(!e.entryOrderId||buyIds.has(e.entryOrderId)||(e.exitOrderId&&sellIds.has(e.exitOrderId)))
           return outcome('settlement_duplicate_order_owner');
         buyIds.add(e.entryOrderId);if(e.exitOrderId)sellIds.add(e.exitOrderId);
@@ -3739,16 +3752,89 @@ export class ProfitGuard {
         }
         // Every historical local SELL must remain a verified ASK. A local BUY
         // or any unidentified order must never become an exit receipt.
-        if(brokerReceiptDirection(order.raw).bookSide!=='ask')
+        if(brokerReceiptDirection(order.raw).bookSide!=='ask'){
+          // Read-only evidence of the SAME durable pending client may be a
+          // legitimate BUY, never an exit. Its uncertain fill state still
+          // blocks settlement allocation, not exact historical SELL replay.
+          if(brokerReceiptDirection(order.raw).bookSide==='bid'
+            &&history.some(e=>e.status==='entry_pending'&&e.entryClientOrderId===clientId)){
+            unprovenPendingBuy=true;continue;
+          }
           return outcome('settlement_historical_order_side_unverified');
+        }
         const owners=history.filter(e=>clientId.startsWith(this.kalshi.exitHistoryPrefixForEntry(e)));
         if(owners.length!==1)return outcome('settlement_historical_order_owner_conflict');
         historicalOrders.push({...order,entryId:owners[0].id,authoritative:true});
       }
+      // A CLOSED BOR1 row can be rehabilitated by the same strict exact-order
+      // proof as an exit_pending row, but with an atomic FINANCIAL-ONLY update.
+      // No seat is reopened; the original unauthenticated zero remains a
+      // non-economic historical fact until this complete broker proof passes.
+      for(const old of history.filter(isBrokerFlatEconomicUnknown)){
+        const exact=historicalOrders.filter(o=>o.entryId===old.id&&Number(o.fillCount)>0);
+        if(exact.length!==1)continue;
+        const order=exact[0];
+        const ownFills=fills.filter(f=>String(f.order_id)===String(old.entryOrderId)
+          ||String(f.order_id)===String(order.orderId));
+        const synthetic={...old,status:'exit_pending',remainingCount:old.count,
+          exitOrderId:order.orderId,exitClientOrderId:order.clientOrderId};
+        const receipt=proveExactLiveSellClose(synthetic,ownFills);
+        if(!receipt.ok){seatResults.push({positionId:old.id,closed:false,reason:receipt.reason});continue;}
+        const current=await this.db.entryById(old.id);
+        if(!isBrokerFlatEconomicUnknown(current))continue;
+        const commit=await this.db.finalizeBrokerFlatEconomics(current,{
+          type:'exact_sell',grossProceedsCents:receipt.fillCount*receipt.averageFillPriceCents,
+          exitFeeCents:receipt.feePaidCents,receiptAtMs:receipt.provenance.lastSellAtMs,
+          provenance:receipt.provenance});
+        seatResults.push({positionId:old.id,closed:commit.applied,reason:commit.reason});
+        if(commit.applied){updated=true;closedIds.push(old.id);}
+      }
+      if(updated){
+        history=await this.db.liveCapitalTickerHistory(settings.ownerId,ticker);
+        legacyOrphans=await findLegacyOrphans();
+      }
+      if(!active.length&&!legacyOrphans.length)return outcome(null,{closed:true,reason:'verified_close'});
+      // A planned entry_pending BUY is neither filled inventory nor safe to
+      // silently ignore. It overlaps the historical BOR1 markets in real
+      // production ledgers. Only a COMPLETE broker current+archive order
+      // inspection plus COMPLETE ticker fill history can establish that this
+      // pending intent contributes ZERO to the account settlement. This does
+      // not delete, retry, cancel, or mark the pending order as no-send.
+      const pendingBuys=history.filter(e=>e.status==='entry_pending');
+      if(unprovenPendingBuy||pendingBuys.length){
+        if(!pendingBuys.length||typeof this.kalshi.inspectOrderByClientId!=='function')
+          return outcome('settlement_pending_buy_order_inspection_unavailable');
+        for(const pending of pendingBuys){
+          if(!pending.entryClientOrderId||pending.entryConfig?.entryFillProof?.authoritative===true
+            &&Number(pending.entryConfig.entryFillProof.filledCount)>0)
+            return outcome('settlement_pending_buy_funding_possible');
+          const inspected=await this.kalshi.inspectOrderByClientId(ticker,
+            pending.entryClientOrderId,Math.max(0,Math.floor(Number(pending.openedAtMs)/1000)-120),1,'bid');
+          if(inspected?.authoritative!==true)
+            return outcome('settlement_pending_buy_broker_history_unavailable');
+          if(inspected.found){
+            if(!inspected.order||!terminalOrder(inspected.order)
+              ||Number(inspected.order.fillCount)!==0
+              ||(pending.entryOrderId&&String(inspected.order.orderId)!==String(pending.entryOrderId)))
+              return outcome('settlement_pending_buy_not_proved_unfilled');
+          }else if(pending.entryOrderId){
+            // A recorded broker order ID cannot disappear from complete
+            // order history and be treated as proven unfilled.
+            return outcome('settlement_pending_buy_order_identity_missing');
+          }
+          if(fills.some(f=>String(f.client_order_id||'')===String(pending.entryClientOrderId)
+            ||(pending.entryOrderId&&String(f.order_id)===String(pending.entryOrderId))))
+            return outcome('settlement_pending_buy_fill_history_conflict');
+        }
+      }
+      // No pending seat becomes an economic beneficiary. The authoritative
+      // ACCOUNT settlement will still have to explain every ticker fill,
+      // aggregate quantity, cost and fee exactly (including foreign clones).
+      const financialSeats=history.filter(e=>e.status!=='entry_pending');
       // Independent systems have no shared registry. Tags proven by an
       // authenticated order inspection are the foreign set for this proof.
       const verifiedTags=[...new Set(verifiedForeignOrders.map(o=>clientCloneTag(o.clientOrderId)).filter(Boolean))];
-      const proof=proveLiveSettlementSeats(history,settlements,fills,market,{
+      const proof=proveLiveSettlementSeats(financialSeats,settlements,fills,market,{
         historicalOrders,foreignCloneTags:verifiedTags,verifiedForeignOrders});
       if(!proof.ok){await this.audit('live_multiseat_settlement_proof_refused',{
         ticker,reason:proof.reason,detail:proof.detail||null,proofEvidence:proof.evidence||null,seatIds:active.map(e=>e.id)},'warning');
@@ -3757,14 +3843,20 @@ export class ProfitGuard {
         const current=await this.db.entryById(allocation.entryId);
         if(!current||current.ownerId!==settings.ownerId||current.systemName!==settings.systemName
           ||current.ticker!==ticker
-          ||!(['open','exit_pending'].includes(current.status)||isLegacyFundedQuarantine(current))
-          ||Math.abs(remainingCount(current)-allocation.quantity)>1e-7)
+          ||!(['open','exit_pending'].includes(current.status)||isLegacyFundedQuarantine(current)
+            ||isBrokerFlatEconomicUnknown(current))
+          ||(isBrokerFlatEconomicUnknown(current)
+            ?Math.abs(Number(current.count)-Number(allocation.soldCount||0)-Number(allocation.quantity))>1e-7
+            :Math.abs(remainingCount(current)-allocation.quantity)>1e-7))
           return outcome('settlement_seat_changed_before_close');
         const decision={action:'settlement',exitPriceCents:allocation.payoutCents,
           reason:allocation.payoutCents===100?'settlement_win':'settlement_loss',guardState:'SETTLEMENT'};
         VERIFIED_LIVE_SETTLEMENTS.set(decision,{id:current.id,remaining:allocation.quantity,
           payoutCents:allocation.payoutCents,provenance:allocation.provenance,
-          unresolvedExitClientOrderId:current.exitClientOrderId||null,unresolvedExitOrderId:current.exitOrderId||null});
+          unresolvedExitClientOrderId:current.exitClientOrderId||null,unresolvedExitOrderId:current.exitOrderId||null,
+          brokerFlatHistorical:allocation.brokerFlatHistorical===true,
+          soldProceedsCents:allocation.soldProceedsCents||0,soldFeeCents:allocation.soldFeeCents||0,
+          settledAtMs:allocation.settledAtMs});
         const result=await this.closeAtSettlement(current,decision);
         seatResults.push({positionId:current.id,closed:result?.closed===true,reason:result?.skipped||'verified_settlement'});
         if(!result?.closed)return outcome(result?.skipped||'settlement_seat_close_failed');
@@ -3788,8 +3880,23 @@ export class ProfitGuard {
       if(!current || current.archived===true || isShadowSaintEntry(current)
         || ['id','systemName','ownerId','mode','ticker','conceptName'].some(k=>current[k]!==entry[k]))
         return{closed:false,pending:true,ambiguous:true,skipped:'settlement_position_identity_changed'};
-      if(current.status==='closed' && remainingCount(current)<=1e-9)
+      if(current.status==='closed' && remainingCount(current)<=1e-9){
+        const witness=VERIFIED_LIVE_SETTLEMENTS.get(decision);
+        if(isBrokerFlatEconomicUnknown(current)&&witness?.brokerFlatHistorical===true
+          &&String(witness.id)===String(current.id)
+          &&Number(witness.payoutCents)===Number(decision.exitPriceCents)
+          &&Number.isFinite(Number(witness.settledAtMs))
+          &&witness.provenance?.version==='LIVE-BROKER-FLAT-ECONOMIC-REPLAY-V1') {
+          const commit=await this.db.finalizeBrokerFlatEconomics(current,{
+            type:'settlement',receiptAtMs:Number(witness.settledAtMs),
+            grossProceedsCents:Number(witness.soldProceedsCents||0)
+              +Number(witness.payoutCents)*Number(witness.remaining),
+            exitFeeCents:Number(witness.soldFeeCents||0),provenance:witness.provenance});
+          return {closed:commit.applied,reconciled:commit.applied,
+            skipped:commit.applied?null:commit.reason,pnlCents:commit.pnlCents};
+        }
         return{closed:true,reconciled:true,skipped:'position_already_closed'};
+      }
       if(!(['open','exit_pending'].includes(current.status)
         ||(isLegacyFundedQuarantine(current)&&VERIFIED_LIVE_SETTLEMENTS.has(decision))))
         return{closed:false,pending:true,skipped:'settlement_position_not_ready'};
@@ -4739,7 +4846,22 @@ export class ProfitGuard {
     if(isShadowSaintEntry(entry) && capability !== SHADOW_EVALUATION){await this.audit?.("shadow_saint_broker_wall",{id:entry?.id,path:"_protect"});return {ok:false,reason:"shadow_saint_no_broker"};}
     const s = this.getSettings();
     if(this.isInfinityBreakTrade(entry))this.registerInfinityBreakFastWake(entry,s);
-    if (entry.status === 'entry_pending') entry = await this.reconcilePending(entry);
+    if (entry.status === 'entry_pending') {
+      // The ticker's cash/broker protection is governed by the account and
+      // durable entry intent, not by repeatedly querying old archival orders.
+      // Exact known order IDs / partial fills remain short-cadence safety
+      // reads. Ambiguous no-order-ID intents receive bounded later rechecks.
+      const now=Date.now(),prior=Number(this.pendingEntryInspectionAtMs.get(entry.id)||0);
+      const brokerOwned=Boolean(entry.entryOrderId
+        ||(entry.entryConfig?.entryFillProof?.authoritative===true
+          &&Number(entry.entryConfig?.entryFillProof?.filledCount)>0));
+      const age=now-Number(entry.openedAtMs||now);
+      const delay=brokerOwned?2000:age<60_000?3000:15_000;
+      if(now-prior<delay)return {protected:false,status:'entry_pending',skipped:'pending_broker_history_paced'};
+      this.pendingEntryInspectionAtMs.set(entry.id,now);
+      entry = await this.reconcilePending(entry);
+      if(entry.status!=='entry_pending')this.pendingEntryInspectionAtMs.delete(entry.id);
+    }
     if (!['open', 'exit_pending'].includes(entry.status)) return { protected: false, status: entry.status };
 
     // Receipt completion is independent of quote availability. A fully sold
@@ -5535,9 +5657,20 @@ export class ProfitGuard {
         :(await this.db.openEntries(s.systemName)).filter(e=>PORTFOLIO_CONCEPTS.has(e.conceptName));
       this.pruneRuntimeState(entries);this.activeTickers=new Set(entries.map(e=>e.ticker));this.infinityBreakFastWake=new Map();
       for(const e of entries)if(this.isInfinityBreakTrade(e))this.registerInfinityBreakFastWake(e,s);
-      let count=0;
-      if(paged){for await(const page of this.db.openProtectionPages(s.systemName,entries)){for(const e of page){await this.protect(e);count++;}}}
-      else{for(const e of entries){await this.protect(e);count++;}}
+      // R16: missing historical BUY receipts are still investigated, but
+      // expensive order-history GETs may never precede a currently funded
+      // position's protective SELL. Process funded seats first across ALL
+      // pages; then durable ambiguous BUY intents on their own paced lane.
+      const pending=[];let count=0;
+      const prioritize=async e=>{
+        if(e.status==='entry_pending')pending.push(e);
+        else await this.protect(e);
+        count++;
+      };
+      if(paged){for await(const page of this.db.openProtectionPages(s.systemName,entries))
+        for(const e of page)await prioritize(e);}
+      else{for(const e of entries)await prioritize(e);}
+      for(const e of pending)await this.protect(e);
       return count;
     }catch(e){this.protectionOk=false;this.lastError=String(e?.message||e);throw e;}
   }

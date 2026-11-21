@@ -1850,20 +1850,26 @@ export class StrategyEngine {
   }
 
 
-  hunterConcurrencyLockKey(concept,ticker,settings=this.getSettings(),stackIndex=1) {
+  hunterConcurrencyLockKey(concept,ticker,settings=this.getSettings(),stackIndex=1,intentId=null) {
     const exact=String(ticker||'');
     if(!exact)return '';
     if(settings?.galacticExplosionEnabled!==true)return exact;
+    // R16: same Attack may trade the same ticker for DIFFERENT immutable
+    // authorizations. No identity -> retain the old conservative lock; never
+    // use the transient pipeline attempt number as duplicate protection.
+    const verified=typeof intentId==='string'&&intentId.trim().length>0;
+    const identity=verified?`|intent:${createHash('sha256').update(intentId).digest('hex').slice(0,32)}`:'';
     const multiply=attackMultiplySeats(settings,concept);
-    const base=`${exact}|attack:${String(concept||'')}`;
+    const base=`${exact}|attack:${String(concept||'')}${identity}`;
     return multiply>1 ? `${base}|seat:${Number(stackIndex||1)}` : base;
   }
 
-  hunterEntryCommitLockKey(concept,ticker,settings=this.getSettings(),stackIndex=1,stackSeat=false) {
+  hunterEntryCommitLockKey(concept,ticker,settings=this.getSettings(),stackIndex=1,stackSeat=false,intentId=null) {
     const exact=String(ticker||'');
     if(settings?.galacticExplosionEnabled!==true)return `commit:${exact}`;
     const multiply=attackMultiplySeats(settings,concept);
-    return multiply>1 || stackSeat===true ? `commit:${exact}|attack:${concept}|seat:${Number(stackIndex||1)}` : `commit:${exact}|attack:${concept}`;
+    const base=this.hunterConcurrencyLockKey(concept,ticker,settings,stackIndex,intentId);
+    return multiply>1 || stackSeat===true ? `commit:${base}` : `commit:${base}`;
   }
 
   async activeHunterTickerExposure(ticker, {concept=null}={}) {
@@ -1895,7 +1901,10 @@ export class StrategyEngine {
     const active = await this.activeHunterTickerExposure(q.ticker,{concept});
     const multiply=attackMultiplySeats(s,concept);
     const sameConcept=active.filter((e)=>e.conceptName===concept);
-    if(sameConcept.length>=multiply){
+    // Multiply limits seats per authorized parent, NOT independent GE
+    // opportunities on the same ticker. The configured global/event caps and
+    // durable per-intent uniqueness still apply to both LIVE and SIM.
+    if(s.galacticExplosionEnabled!==true && sameConcept.length>=multiply){
       const conflicts=sameConcept;
       const existing = conflicts.slice().sort((a, b) => Number(a.openedAtMs || 0) - Number(b.openedAtMs || 0))[0];
       await this.audit('hunter_exact_ticker_exposure_blocked', {
@@ -1957,7 +1966,9 @@ export class StrategyEngine {
     if(multiply>1 || (s.galacticExplosionEnabled===true && concept)){
       const own=(await this.activeHunterTickerExposure(q?.ticker||event,{concept}))
         .filter(e=>String(e.conceptName)===String(concept));
-      eventCapBlocked=own.length >= (multiply>1?multiply:maxEntriesPerTrade);
+      // GE ON must not mistake per-parent Multiply for a global same-ticker
+      // lock. Respect the owner's maxEntriesPerTrade, not a hard-coded seat cap.
+      eventCapBlocked=own.length >= (s.galacticExplosionEnabled===true ? maxEntriesPerTrade : multiply);
     }else if(s.galacticExplosionEnabled===true && !concept)eventCapBlocked=false;
 
     return{eventTicker:event,activeEntries,maxEntriesPerTrade,eventCapBlocked,latestHunterEntryMs,latestByConcept,hunterCooldownMinutes,cooldownScope,sharedCooldownBlocked,attackLatestEntryMs,attackCooldownBlocked,cooldownBlockedConcepts,cooldownBlocked,galacticExplosionEnabled:s.galacticExplosionEnabled===true};
@@ -2459,9 +2470,15 @@ export class StrategyEngine {
     const simulationMutationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
     const exactTicker = String(q?.ticker || '');
     if (!exactTicker) return null;
-    const tickerLockKey = starlightModelClone===true
-      ? `${exactTicker}|attack:${concept}|seat:${Number(stackIndex||1)}`
-      : this.hunterConcurrencyLockKey(concept, exactTicker, s, stackIndex);
+    // A stable lineage from the actual authorized source is the only permitted
+    // per-intent concurrency key. GE must not turn repeated evaluations of the
+    // SAME source into duplicate BUYs; missing lineage stays ticker-serialized.
+    const geIntentId=String(sourceTradeId||athenaFireCommand?.boltId||
+      ci1FireCommand?.boltId||crystalWallFireCommand?.boltId||
+      justiceArrowFireCommand?.boltId||entryQualificationSnapshot?.eventId||
+      entryQualificationSnapshot?.candidate?.id||'');
+    const tickerLockKey = this.hunterConcurrencyLockKey(concept, exactTicker, s,
+      stackIndex,geIntentId);
     const pipelineAttemptId = `${Date.now()}-${++this.entryPipelineAttemptSequence}`;
     let starlightIntentBoundaryEntered=false;
     let starlightPreIntentDenial=null;
@@ -3132,9 +3149,8 @@ export class StrategyEngine {
       // never be decided concurrently from the same stale ledger
       // view. Serialize only this final commit window; the earlier structural
       // qualification/exposure lock remains concept-scoped when GE is ON.
-      localEntryCommitKey = starlightModelClone===true
-        ? `commit:${exactTicker}|attack:${concept}|seat:${Number(stackIndex||1)}`
-        : this.hunterEntryCommitLockKey(concept, exactTicker, s, stackIndex, stackSeat);
+      localEntryCommitKey = this.hunterEntryCommitLockKey(concept, exactTicker, s,
+        stackIndex, stackSeat,geIntentId);
       if (this.hunterEntryCommitLocks.has(localEntryCommitKey)) {
         trace('ENTRY_COMMIT_LOCK','BLOCKED','local_entry_commit_lock_busy');
         await this.audit('hunter_entry_commit_lock_busy',{concept,ticker:exactTicker,eventTicker:expectedEventTicker});

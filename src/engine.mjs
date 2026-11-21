@@ -845,7 +845,7 @@ export class SagittariusEngine {
       const openRows=typeof this.db?.openEntriesByTicker==='function'?await this.db.openEntriesByTicker(s.systemName,ticker).catch(()=>[]):[];
       const coexisting=openRows.filter((e)=>PORTFOLIO_CONCEPTS.has(String(e.conceptName||''))&&openLike(e.status)&&String(e.ownerId||s.ownerId)===String(s.ownerId)&&String(e.mode||s.mode)===String(s.mode));
       const sameConcept=coexisting.filter((e)=>String(e.conceptName||'')==='Recovery Hunter');
-      if(sameConcept.length){
+      if(s.galacticExplosionEnabled!==true && sameConcept.length){
         this.setRecoveryWatchBackoff(this.crystalWallWatches,String(authorizationId),'ticker_exposure_active',RECOVERY_WATCH_EXECUTION_GOVERNOR.exposureBlockedRetryMs);
         stats.watching+=1;record('WATCHING',{reason:'ticker_exposure_active',existingEntryIds:sameConcept.map((e)=>String(e.id))});return {status:'WATCHING',reason:'ticker_exposure_active'};
       }
@@ -3407,7 +3407,7 @@ export class SagittariusEngine {
       const openRows=typeof this.db?.openEntriesByTicker==='function'?await this.db.openEntriesByTicker(s.systemName,ticker).catch(()=>[]):[];
       const coexisting=openRows.filter((e)=>PORTFOLIO_CONCEPTS.has(String(e.conceptName||''))&&openLike(e.status)&&String(e.ownerId||s.ownerId)===String(s.ownerId)&&String(e.mode||s.mode)===String(s.mode));
       const sameConcept=coexisting.filter((e)=>String(e.conceptName||'')==='Sagittarius Justice Arrow');
-      if(sameConcept.length){
+      if(s.galacticExplosionEnabled!==true && sameConcept.length){
         this.setRecoveryWatchBackoff(this.justiceArrowWatches,String(authorizationId),'ticker_exposure_active',RECOVERY_WATCH_EXECUTION_GOVERNOR.exposureBlockedRetryMs);
         stats.watching+=1;record('WATCHING',{reason:'ticker_exposure_active',existingEntryIds:sameConcept.map((e)=>String(e.id))});return {status:'WATCHING',reason:'ticker_exposure_active'};
       }
@@ -8396,6 +8396,79 @@ export class SagittariusEngine {
     try{return await run;}finally{if(this.simulationResetPromise===run)this.simulationResetPromise=null;}
   }
 
+  // R16: economic-only history has no authority over LIVE order admission.
+  // The R15 path synchronously did multiple full broker history scans INSIDE
+  // account readiness. On three clones that creates avoidable pacing stalls.
+  // Schedule one bounded low-priority probe after a fresh, healthy account
+  // proof instead. It cannot send BUY/SELL, alter settings, or reopen seats.
+  scheduleHistoricalBrokerFlatRecovery(economicClosures=[],recordProbe=()=>{},knownOwned=[]) {
+    const s=this.settings;
+    if(this.shuttingDown||s?.mode!=='LIVE'||this.health?.reconciliationOk!==true
+      ||this.historicalEconomicTimer||this.historicalEconomicInFlight
+      ||this.resourceResearchDeferred===true
+      ||typeof this.profitGuard?.reconcileBrokerSettledPosition!=='function')return false;
+    const read=this.kalshi?.resourceSnapshot?.()?.reads||{};
+    if(Number(read.pending||0)>1||Number(read.active||0)>2)return false;
+    this.liveSettlementProbeAtMs||=new Map();
+    const now=Date.now(),scope=scopeKey(s);
+    // Never queue broker-history IO behind a currently funded LIVE seat. The
+    // protective SELL owns the broker mutation lane; financial-only backlog
+    // must yield on the same market when genuine LIVE capital is exposed.
+    const fundedOnTicker=new Set((Array.isArray(knownOwned)?knownOwned:[])
+      .filter(e=>e?.mode==='LIVE'&&e.ownerId===s.ownerId
+        &&['open','exit_pending','pending_recovery'].includes(e.status)
+        &&Number(e.remainingCount)>0).map(e=>e.ticker));
+    const candidates=(Array.isArray(economicClosures)?economicClosures:[])
+      .filter(e=>e?.mode==='LIVE'&&e.systemName===s.systemName
+        &&e.ownerId===s.ownerId&&e.status==='closed'&&!e.archived
+        &&e.closeReason==='broker_zero_inventory_closed'
+        &&e.postExitState?.brokerZeroInventoryClose?.economicClosure===false
+        &&Number(e.remainingCount)===0)
+      .filter(e=>!fundedOnTicker.has(e.ticker)
+        &&!this.profitGuard?.tickerExitLocks?.has?.(e.ticker)
+        &&String(this.market?.getQuote?.(e.ticker)?.status||'').toLowerCase()!=='active')
+      .filter(e=>now-Number(this.liveSettlementProbeAtMs.get(e.ticker)||0)>=300_000)
+      .sort((a,b)=>Number(this.liveSettlementProbeAtMs.get(a.ticker)||0)
+        -Number(this.liveSettlementProbeAtMs.get(b.ticker)||0));
+    const candidate=candidates[0];
+    if(!candidate)return false;
+    const timer=setTimeout(()=>{
+      if(this.historicalEconomicTimer===timer)this.historicalEconomicTimer=null;
+      if(this.shuttingDown||scopeKey(this.settings)!==scope
+        ||this.health?.reconciliationOk!==true||this.resourceResearchDeferred===true)return;
+      const currentRead=this.kalshi?.resourceSnapshot?.()?.reads||{};
+      if(Number(currentRead.pending||0)>1||Number(currentRead.active||0)>2)return;
+      // A different legal attack can open on this ticker while the delayed
+      // finance-only task is queued. Re-read the local durable ownership; if
+      // genuine LIVE exposure or a protective mutation exists, defer instead
+      // of waiting behind that order's broker lock.
+      const task=Promise.resolve().then(async()=>{
+        if(this.profitGuard?.tickerExitLocks?.has?.(candidate.ticker))
+          return {closed:false,skipped:'priority_live_broker_mutation'};
+        const owned=await this.db.liveOpenHunterEntries(this.settings.ownerId);
+        if(owned.some(e=>e.ticker===candidate.ticker
+          &&['open','exit_pending','pending_recovery'].includes(e.status)
+          &&Number(e.remainingCount)>0))
+          return {closed:false,skipped:'priority_live_funded_exposure'};
+        if(scopeKey(this.settings)!==scope||this.shuttingDown||this.health?.reconciliationOk!==true)
+          return {closed:false,skipped:'economic_probe_scope_changed'};
+        this.liveSettlementProbeAtMs.set(candidate.ticker,Date.now());
+        return this.profitGuard.reconcileBrokerSettledPosition(candidate);
+      });
+      this.historicalEconomicInFlight=task;
+      void task.then(result=>{
+        recordProbe(candidate,result?.closed?'verified_close':result?.skipped||result?.reason||'not_verified',
+          Boolean(result?.closed),result||{});
+      }).catch(error=>{
+        recordProbe(candidate,'historical_broker_proof_failed');
+        void Promise.resolve(this.db?.audit?.('warning','historical_broker_flat_recovery_failed',
+          {ticker:candidate.ticker,reason:String(error?.message||error).slice(0,120)})).catch(()=>{});
+      }).finally(()=>{if(this.historicalEconomicInFlight===task)this.historicalEconomicInFlight=null;});
+    },1500);
+    timer.unref?.();this.historicalEconomicTimer=timer;
+    return true;
+  }
+
   async _reconcileBroker({balanceProof=null,authorityMode=null}={}) {
     // Q17-R9: a successful account proof must come from the authenticated
     // broker and owned durable positions; never return synthetic SIM green.
@@ -8447,6 +8520,12 @@ export class SagittariusEngine {
       if(typeof this.db.liveFundedOrphanEntries!=='function')
         throw Error('legacy_funded_orphan_reader_unavailable');
       let financialOrphans=await this.db.liveFundedOrphanEntries(this.settings.ownerId,this.settings.systemName);
+      if(typeof this.db.liveUnresolvedBrokerFlatEntries!=='function')
+        throw Error('historical_broker_flat_reader_unavailable');
+      // Finance-only obligations are NOT active inventory and must never
+      // change LIVE entry authorization or shared-account balance semantics.
+      let economicClosures=await this.db.liveUnresolvedBrokerFlatEntries(
+        this.settings.ownerId,this.settings.systemName);
 
 
       // A verified broker settlement must be imported BEFORE account ownership
@@ -8499,6 +8578,8 @@ export class SagittariusEngine {
       // sibling still has broker inventory or an outstanding order.
       // Orphan-only markets also need a read-only recovery opportunity; no
       // active position or new BUY/SELL is created by these candidate rows.
+      // Only ACTIVE account obligations belong in the synchronous LIVE
+      // readiness path. Closed financial-only history is scheduled separately.
       for(const e of financialOrphans){
         const group=ownedByTicker.get(e.ticker)||[];
         group.push(e);ownedByTicker.set(e.ticker,group);
@@ -8509,13 +8590,20 @@ export class SagittariusEngine {
         const candidate=rows.find(e=>e.systemName===this.settings.systemName
           &&e.mode==='LIVE'&&['exit_pending','open'].includes(e.status))
           ||rows.find(e=>e.systemName===this.settings.systemName&&e.mode==='LIVE'
-          &&e.status==='reconciliation_orphaned');
+          &&e.status==='reconciliation_orphaned')
+          ||rows.find(e=>e.systemName===this.settings.systemName&&e.mode==='LIVE'
+            &&e.status==='closed'&&e.closeReason==='broker_zero_inventory_closed'
+            &&e.postExitState?.brokerZeroInventoryClose?.economicClosure===false);
         if(!candidate)continue;
         const exactPending=rows.some(e=>e.exitClientOrderId&&['open','exit_pending'].includes(e.status));
         if(!exactPending&&(tickersWithBrokerInventory.has(ticker)||tickersWithRestingOrders.has(ticker)))continue;
+        const historicalEconomicOnly=candidate.status==='closed'
+          &&candidate.closeReason==='broker_zero_inventory_closed';
         const lastProbe=Number(this.liveSettlementProbeAtMs.get(ticker)||0);
+        // Active readback is limited to two cohorts per account cycle. The
+        // expensive finance-only backlog never holds account readiness open.
         if(Date.now()-lastProbe<15_000)continue;
-        if(settlementProbesThisCycle>=2)break; // bounded broker reads per account cycle
+        if(settlementProbesThisCycle>=2)break;
         if(typeof this.profitGuard?.reconcileBrokerSettledPosition!=='function')continue;
         settlementProbesThisCycle++;
         this.liveSettlementProbeAtMs.set(ticker,Date.now());
@@ -8534,10 +8622,11 @@ export class SagittariusEngine {
         // No stale snapshot can change LIVE health from blocked to green.
         // Both broker inventory/orders and the durable capital ledger must
         // agree AGAIN after applying an authenticated settlement receipt.
-        [positions,orders,owned,financialOrphans]=await Promise.all([
+        [positions,orders,owned,financialOrphans,economicClosures]=await Promise.all([
           this.kalshi.getPositions(),this.kalshi.getOpenOrders(),
           this.db.liveOpenHunterEntries(this.settings.ownerId),
           this.db.liveFundedOrphanEntries(this.settings.ownerId,this.settings.systemName),
+          this.db.liveUnresolvedBrokerFlatEntries(this.settings.ownerId,this.settings.systemName),
         ]);
         validateRestingOrders(orders);
         this.brokerPositions=positions;
@@ -8660,6 +8749,9 @@ export class SagittariusEngine {
         ok:summary.ok,reason:accountFailReason,balance:accountBalance,orders,ownIssues:orderIssues});
       this.health.reconciliationOk=summary.ok === true;
       this.recomputeHealth();
+      // Financial recovery is intentionally NOT awaited. A slow or missing
+      // archival endpoint cannot make an otherwise healthy LIVE clone choke.
+      if(summary.ok===true)this.scheduleHistoricalBrokerFlatRecovery(economicClosures,recordSettlementProbe,owned);
       return summary.ok;
     } catch (e) {
       this.operational?.invalidateAccount('broker_reconciliation_failed');
@@ -9286,7 +9378,7 @@ export class SagittariusEngine {
     const portfolioValueCents=settings.mode==='LIVE'?kalshiAccountSnapshot(this.balance)?.portfolioCents??null
       :simulationAccountValue(openRows,simulationCashCents,settings,{getQuote,now});
     return {entries:rows,active,hunters:[...open,...closed],closed,open,greatHornOpen,greatHornClosed,crystalWallOpen,crystalWallClosed,megawaveOpen,megawaveClosed,
-      wins:c.wins,losses:c.losses,scratches:c.scratches,winRate:c.winRate,openHunters:c.open,closedHunters:c.closed,pendingHunters:c.pending,
+      wins:c.wins,losses:c.losses,scratches:c.scratches,winRate:c.winRate,openHunters:c.open,closedHunters:c.closed,pendingHunters:c.pending,unverifiedBuyIntents:report.combined.unverifiedBuyIntents,
       hunterRealizedCents:c.realizedCents,knownRealizedCents:c.knownRealizedCents,financialComplete:c.financialComplete,unreconciled:c.unreconciled,closedRealizedCents:c.closedRealizedCents,partialRealizedCents:c.partialRealizedCents,
       dayRealizedCents:c.dayRealizedCents,weekRealizedCents:c.weekRealizedCents,monthRealizedCents:c.monthRealizedCents,yearRealizedCents:c.yearRealizedCents,
       hunterUnrealizedCents:c.unrealizedCents,knownUnrealizedCents:c.knownUnrealizedCents,valuationComplete:c.valuationComplete,missingValuations:c.missingValuations,
@@ -10240,7 +10332,7 @@ export class SagittariusEngine {
       brokerLedgerGaps: this.brokerLedgerGaps || brokerLedgerGaps(this.brokerPositions, []),
       performance: {
         reportingVersion:p.reportingVersion,asOfMs:p.asOfMs,scope:p.reportingScope,byAttack:{'Lightning Plasma':p.byAttack['Lightning Plasma']},
-        valuationComplete:p.valuationComplete,missingValuations:p.missingValuations,knownUnrealizedCents:p.knownUnrealizedCents,periodsComplete:p.periodsComplete,pending:p.pendingHunters,
+        valuationComplete:p.valuationComplete,missingValuations:p.missingValuations,knownUnrealizedCents:p.knownUnrealizedCents,periodsComplete:p.periodsComplete,pending:p.pendingHunters,unverifiedBuyIntents:p.unverifiedBuyIntents,
         portfolioValueCents: this.settings.mode==='LIVE' && kalshiAccountSnapshot(this.balance) ? kalshiAccountSnapshot(this.balance).portfolioCents : p.portfolioValueCents,
         kalshiPortfolioCents: this.settings.mode==='LIVE' ? kalshiAccountSnapshot(this.balance)?.portfolioCents ?? null : null,
         kalshiCashCents: this.settings.mode==='LIVE' ? kalshiAccountSnapshot(this.balance)?.cashCents ?? null : null,
@@ -10708,6 +10800,10 @@ export class SagittariusEngine {
     this.crashRecoveryEvaluationTimers.clear();
     this.entryAdmissionProbeAt?.clear?.();
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    // Optional finance probe is not part of order protection and cannot be
+    // started after shutdown begins. Never cancel broker mutations here.
+    if(this.historicalEconomicTimer)clearTimeout(this.historicalEconomicTimer);
+    this.historicalEconomicTimer=null;
     this.cancelLiveAutoRearm();
     this.shadowStopping=true;
     if(this.shadowSweepPromise)await Promise.race([this.shadowSweepPromise.catch(()=>{}),sleep(2000)]);

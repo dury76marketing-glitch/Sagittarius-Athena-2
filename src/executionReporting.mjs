@@ -104,14 +104,14 @@ export function executionValuation(e,quote,settings={},now=Date.now()){
     estimatedExitFeeCents:exitFee,unrealizedCents:(price-n(e.entryPriceCents))*remaining-entryFeeRemaining-exitFee,
     remainingMarketValueCents:price*remaining-exitFee};
 }
-export function emptyExecutionStats(name){return {name,open:0,closed:0,unresolvedClosed:0,closedHistory:0,pending:0,wins:0,losses:0,scratches:0,total:0,winRate:0,
+export function emptyExecutionStats(name){return {name,open:0,closed:0,unresolvedClosed:0,closedHistory:0,pending:0,unverifiedBuyIntents:0,wins:0,losses:0,scratches:0,total:0,winRate:0,
   unreconciled:0,financialComplete:true,realizedCents:0,knownRealizedCents:0,knownFeesCents:0,feesComplete:true,closedRealizedCents:0,partialRealizedCents:0,unrealizedCents:0,knownUnrealizedCents:0,
   valuationComplete:true,missingValuations:0,avgEntryCents:0,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,
   periodsComplete:{day:true,week:true,month:true,year:true}};}
 export function combineExecutionStats(byAttack){
   const out=emptyExecutionStats('Lightning Plasma + genuine legacy capital');
   for(const a of Object.values(byAttack)){
-    for(const k of ['open','closed','unresolvedClosed','closedHistory','pending','unreconciled','wins','losses','scratches','total','knownRealizedCents','knownFeesCents','closedRealizedCents','partialRealizedCents','knownUnrealizedCents','missingValuations'])out[k]+=n(a[k]);
+    for(const k of ['open','closed','unresolvedClosed','closedHistory','pending','unverifiedBuyIntents','unreconciled','wins','losses','scratches','total','knownRealizedCents','knownFeesCents','closedRealizedCents','partialRealizedCents','knownUnrealizedCents','missingValuations'])out[k]+=n(a[k]);
     out.feesComplete&&=a.feesComplete!==false;
     for(const p of ['day','week','month','year']){
       out.periodsComplete[p]&&=a.periodsComplete?.[p]!==false;
@@ -170,7 +170,7 @@ export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now
     }
     if(!executionScopeMatches(e,settings))continue;
     const closed=e.status==='closed'&&Number(e.count)>0,open=actualOpenExposure(e);
-    if(!closed&&!open){if(e.status==='entry_pending'){a.pending++;if(hasUnvaluedLivePendingExposure(e))a.missingValuations++;}continue;}
+    if(!closed&&!open){if(e.status==='entry_pending'){a.pending++;if(e.mode==='LIVE'&&!e.entryOrderId&&e.entryConfig?.entryFillProof?.authoritative!==true)a.unverifiedBuyIntents++;if(hasUnvaluedLivePendingExposure(e))a.missingValuations++;}continue;}
     a.total++;a.avgEntryCents+=n(e.entryPriceCents);
     a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
     a.realizedCents+=n(e.pnlCents);
@@ -193,7 +193,7 @@ export function statisticsFromSnapshot(snapshot,settings,{getQuote=()=>null,now=
   for(const r of snapshot.aggregates||[]){
     const a=byAttack[r.concept_name];if(!a)continue;
     for(const k of ['open','closed','pending','wins','losses','scratches','total'])a[k]=n(r[k]);
-    a.unresolvedClosed=n(r.unresolved_closed);
+    a.unresolvedClosed=n(r.unresolved_closed);a.unverifiedBuyIntents=n(r.unverified_buy_intents);
     a.closedRealizedCents=n(r.closed_realized_cents);a.partialRealizedCents=n(r.partial_realized_cents);
     a.realizedCents=a.closedRealizedCents+a.partialRealizedCents;a.avgEntryCents=n(r.avg_entry_cents);
     a.knownFeesCents=n(r.known_fees_cents);
@@ -250,18 +250,33 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
  );
  create index if not exists sag_execution_realizations_v3_entry on sag_execution_realizations_v3(entry_id,latest_ms);
  create or replace function sag_execution_realization_v3() returns trigger language plpgsql as $$
- declare delta double precision;at_ms bigint;
+ declare delta double precision;at_ms bigint;basis text;receipt_ms bigint;
  begin
    if NEW.concept_name not in ('Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery') or coalesce(NEW.execution_class,'CAPITAL')='SHADOW_SAINT'
      or coalesce(NEW.entry_config->>'executionClass','CAPITAL')='SHADOW_SAINT' then return NEW;end if;
    at_ms:=(extract(epoch from clock_timestamp())*1000)::bigint;
+   basis:='ledger_posting';
+   -- One original BOR1 broker-flat closure may be rehabilitated only after an
+   -- authenticated receipt. Its historical economic booking belongs to the
+   -- proven broker timestamp, never the day the audit happened to run.
+   if TG_OP='UPDATE' and OLD.status='closed'
+     and OLD.close_reason='broker_zero_inventory_closed'
+     and OLD.post_exit_state#>>'{brokerZeroInventoryClose,economicClosure}'='false'
+     and NEW.post_exit_state#>>'{brokerZeroInventoryClose,economicClosure}'='true'
+     and coalesce(NEW.post_exit_state#>>'{brokerZeroInventoryClose,verifiedReceiptAtMs}','') ~ '^[0-9]{13}$'
+     then
+       receipt_ms:=(NEW.post_exit_state#>>'{brokerZeroInventoryClose,verifiedReceiptAtMs}')::bigint;
+       if receipt_ms>=NEW.opened_at_ms and receipt_ms<=at_ms+30000 then
+         at_ms:=receipt_ms;basis:='authenticated_broker_receipt';
+       end if;
+   end if;
    if TG_OP='INSERT' then
      insert into sag_execution_realizations_v3(entry_id,event_key,amount_cents,earliest_ms,latest_ms,time_basis)
        values(NEW.id,'initial',NEW.pnl_cents,at_ms,at_ms,'ledger_posting') on conflict do nothing;
    else
      delta:=NEW.pnl_cents-OLD.pnl_cents;
      if delta<>0 then insert into sag_execution_realizations_v3(entry_id,amount_cents,earliest_ms,latest_ms,time_basis)
-       values(NEW.id,delta,at_ms,at_ms,'ledger_posting');end if;
+       values(NEW.id,delta,at_ms,at_ms,basis);end if;
    end if;
    return NEW;
  end; $$;

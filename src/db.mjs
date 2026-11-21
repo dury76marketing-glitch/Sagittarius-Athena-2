@@ -1770,6 +1770,9 @@ export class Database {
       const groups=await client.query(`select concept_name,
         count(*) filter(where ${ACTUAL_OPEN_SQL})::int as open,
         count(*) filter(where status='entry_pending' and not (${ACTUAL_OPEN_SQL}))::int as pending,
+        count(*) filter(where status='entry_pending' and mode='LIVE' and not (${ACTUAL_OPEN_SQL})
+          and coalesce(entry_order_id,'')=''
+          and coalesce(entry_config#>>'{entryFillProof,authoritative}','false')<>'true')::int as unverified_buy_intents,
         count(*) filter(where ${UNVALUED_LIVE_PENDING_SQL})::int as unvalued_live_pending,
         count(*) filter(where ${closedFinancial})::int as closed,
         count(*) filter(where status='closed' and (${UNRESOLVED_FUNDED_SQL}))::int as unresolved_closed,
@@ -5672,6 +5675,102 @@ export class Database {
   }
   // Historical funded quarantines are NOT active BUY/SELL inventory, but
   // cannot be treated as financially closed until exact broker proof arrives.
+  // Closed broker-flat rows are NOT financially closed until a broker receipt
+  // proves the disposition. Select beyond reset epochs: absence of dashboard
+  // history is never proof that an old economics obligation disappeared.
+  // This reader does not change cash reservations, orders, or inventory.
+  async liveUnresolvedBrokerFlatEntries(ownerId,systemName,{limit=200}={}){
+    if(!ownerId||!systemName)throw Error('invalid_closed_broker_flat_scope');
+    const cap=Math.max(1,Math.min(200,Math.floor(Number(limit)||200)));
+    const r=await this.pool.query(`select * from sag_entries where owner_id=$1
+      and system_name=$2 and mode='LIVE' and archived=false and ${CAPITAL_SQL}
+      and concept_name=any($3::text[]) and status='closed'
+      and close_reason='broker_zero_inventory_closed' and count>0
+      and remaining_count=0 and entry_order_id is not null
+      and coalesce(post_exit_state#>>'{brokerZeroInventoryClose,version}','')='BOR1'
+      and coalesce(post_exit_state#>>'{brokerZeroInventoryClose,economicClosure}','')='false'
+      and coalesce(post_exit_state#>>'{brokerZeroInventoryClose,pnlInferred}','')='false'
+      and coalesce(post_exit_state#>>'{brokerZeroInventoryClose,exitPriceInferred}','')='false'
+      order by opened_at_ms asc,id asc limit $4`,[ownerId,systemName,PORTFOLIO_CONCEPT_NAMES,cap]);
+    return r.rows.map(rowEntry);
+  }
+
+  // Fenced, idempotent and accounting-only rehabilitation of a BOR1 broker-flat
+  // closure. Receipt validation is performed in the broker reconciliation path;
+  // this method additionally pins the ORIGINAL frozen identity, entry proof,
+  // unverified economic state and no SELL receipt before one atomic SQL write.
+  // It never makes a closed seat open or grants order authority.
+  async finalizeBrokerFlatEconomics(entry,proof){
+    if(!entry||entry.mode!=='LIVE'||entry.status!=='closed'||entry.archived===true
+      ||entry.closeReason!=='broker_zero_inventory_closed'||Number(entry.count)<=0
+      ||Number(entry.remainingCount)!==0||Number(entry.exitFilledCount||0)!==0
+      ||Number(entry.exitNotionalCents||0)!==0||Number(entry.exitFeeCents||0)!==0
+      ||Number(entry.pnlCents||0)!==0||entry.exitPriceCents!=null
+      ||entry.exitClientOrderId||entry.exitOrderId||!entry.entryOrderId||!entry.entryClientOrderId
+      ||entry.postExitState?.brokerZeroInventoryClose?.version!=='BOR1'
+      ||entry.postExitState?.brokerZeroInventoryClose?.economicClosure!==false
+      ||entry.postExitState?.brokerZeroInventoryClose?.pnlInferred!==false
+      ||entry.postExitState?.brokerZeroInventoryClose?.exitPriceInferred!==false)
+      throw Error('broker_flat_original_economic_fence_failed');
+    const ep=entry.entryConfig?.entryFillProof;
+    if(ep?.authoritative!==true||ep.orderId!==entry.entryOrderId
+      ||ep.clientOrderId!==entry.entryClientOrderId
+      ||Math.abs(Number(ep.filledCount)-Number(entry.count))>1e-7)
+      throw Error('broker_flat_entry_fill_authority_missing');
+    const qty=Number(entry.count),n=Number(proof?.grossProceedsCents),fee=Number(proof?.exitFeeCents),
+      receiptAtMs=Number(proof?.receiptAtMs),type=String(proof?.type||'');
+    if(!['exact_sell','settlement'].includes(type)||!Number.isFinite(n)||n<0||n>qty*100+0.021
+      ||!Number.isFinite(fee)||fee<0||!Number.isSafeInteger(receiptAtMs)
+      ||receiptAtMs<Number(entry.openedAtMs)||receiptAtMs>Date.now()+30000
+      ||!proof?.provenance||typeof proof.provenance!=='object'
+      ||(type==='exact_sell'&&(proof.provenance.version!=='LIVE-EXACT-SELL-FILL-RECOVERY-V1'
+        ||proof.provenance.orderId==null||proof.provenance.clientOrderId==null
+        ||proof.provenance.sellQuantity!==qty
+        ||Math.abs(Number(proof.provenance.sellNotionalCents)-n)>0.021
+        ||Math.abs(Number(proof.provenance.sellFeeCents)-fee)>0.021
+        ||Number(proof.provenance.lastSellAtMs)!==receiptAtMs))
+      ||(type==='settlement'&&(proof.provenance.version!=='LIVE-BROKER-FLAT-ECONOMIC-REPLAY-V1'
+        ||Number(proof.provenance.settledAtMs)!==receiptAtMs
+        ||proof.provenance.entryOrderId!==entry.entryOrderId
+        ||proof.provenance.entryClientOrderId!==entry.entryClientOrderId
+        ||Number(proof.provenance.quantity)+Number(proof.provenance.soldCount||0)!==qty
+        ||Math.abs(Number(proof.provenance.soldProceedsCents||0)
+          +Number(proof.provenance.revenueCents)-n)>0.021
+        ||Math.abs(Number(proof.provenance.soldFeeCents||0)-fee)>0.021))
+      ||!Number.isFinite(Number(entry.entryPriceCents))||!Number.isFinite(Number(entry.entryFeeCents)))
+      throw Error('broker_flat_verified_economics_invalid');
+    const pnl=n-Number(entry.entryPriceCents)*qty-Number(entry.entryFeeCents)-fee;
+    const post={...(entry.postExitState||{}),brokerZeroInventoryClose:{
+      ...(entry.postExitState?.brokerZeroInventoryClose||{}),economicClosure:true,
+      financialRecoveredAtMs:Date.now(),verifiedReceiptAtMs:receiptAtMs,
+      disposition:type,brokerProof:proof.provenance,pnlInferred:false,exitPriceInferred:false}};
+    const exit={...(entry.exitExecutionState||{}),terminal:true,
+      ...(type==='settlement'?{brokerSettlementProof:proof.provenance,
+        settlementConfirmed:true,settlementConfirmedAtMs:receiptAtMs}:{}),
+      brokerFlatFinancialReconciliation:{version:'BOR1-HISTORICAL-FINANCIAL-RECEIPT-V1',
+        type,receiptAtMs,provenance:proof.provenance}};
+    const values=[entry.id,entry.systemName,entry.ownerId,entry.ticker,entry.entryOrderId,
+      entry.entryClientOrderId,qty,entry.entryConfig||{},entry.postExitState||{},
+      n/qty,qty,n,fee,pnl,post,exit];
+    const r=await this.pool.query(`update sag_entries set
+      exit_price_cents=$10,exit_filled_count=$11,exit_notional_cents=$12,
+      exit_fee_cents=$13,pnl_cents=$14,updated_at_ms=(extract(epoch from clock_timestamp())*1000)::bigint,
+      post_exit_state=$15::jsonb,exit_execution_state=$16::jsonb
+      where id=$1 and system_name=$2 and owner_id=$3 and ticker=$4
+      and entry_order_id=$5 and entry_client_order_id=$6 and count=$7
+      and entry_config=$8::jsonb and post_exit_state=$9::jsonb
+      and mode='LIVE' and status='closed' and archived=false
+      and close_reason='broker_zero_inventory_closed' and remaining_count=0
+      and exit_filled_count=0 and exit_notional_cents=0 and exit_fee_cents=0
+      and pnl_cents=0 and exit_price_cents is null and exit_order_id is null
+      and exit_client_order_id is null
+      and post_exit_state#>>'{brokerZeroInventoryClose,economicClosure}'='false'
+      and post_exit_state#>>'{brokerZeroInventoryClose,pnlInferred}'='false'
+      and post_exit_state#>>'{brokerZeroInventoryClose,exitPriceInferred}'='false'
+      returning id`,values);
+    return {applied:r.rowCount===1,reason:r.rowCount===1?'verified_economics_committed':'broker_flat_concurrent_or_already_reconciled',pnlCents:r.rowCount===1?pnl:null};
+  }
+
   async liveFundedOrphanEntries(ownerId,systemName){
     if(!ownerId||!systemName)throw Error('invalid_live_funded_orphan_scope');
     const r=await this.pool.query(`select * from sag_entries where owner_id=$1

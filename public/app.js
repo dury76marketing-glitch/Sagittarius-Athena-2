@@ -94,7 +94,7 @@ const GH1_REQUIRED_SETTINGS=['greatHornEnabled','greatHornLinkEnabled','greatHor
   'greatHornObservationMinutes','greatHornParentEntryRiseCents',
   'greatHornAuroraDamageControlPercent','greatHornMinProfitNetPerOriginalContractCents',
   'greatHornAthenaX1Enabled'];
-const capitalCounts=['open','closed','wins','losses','scratches','pending'];
+const capitalCounts=['open','closed','wins','losses','scratches','pending','unverifiedBuyIntents'];
 const capitalPeriods=['day','week','month','year'];
 function numericReportValue(v){return v!==null&&v!==undefined&&Number.isFinite(Number(v));}
 function financialRealizedValid(r){return r?.financialComplete===false
@@ -189,6 +189,7 @@ function renderCapitalCombined(s){
   setText('capitalCombinedFinancialStatus',valid
     ?'Combined: Chain 1, Chain 2, and Starlight Extinction, same owner, system, mode, reset and snapshot. Only funded Starlight positions are included; shadow Starlight is excluded. '+
       (c.financialComplete===false?`${c.unreconciled} funded position(s) still require broker reconciliation. Recorded realized amounts: ${financialMoney(c.knownRealizedCents)}; final results are pending. `:'')+
+      (c.pending>0?`${c.pending} LOCAL pending BUY intents require exact authenticated broker-order reconciliation; ${c.unverifiedBuyIntents} have no verified broker order ID. These are NOT evidence of resting orders at Kalshi. `:'')+
       (c.valuationComplete?'Open counts are ledger positions, not a live broker-inventory confirmation; bid marks do not guarantee liquidation.':'Unrealized P/L is unavailable because one or more capital marks are incomplete.')
     :'Combined capital results unavailable: '+c.reason+' No cross-scope or legacy total is substituted.');
 }

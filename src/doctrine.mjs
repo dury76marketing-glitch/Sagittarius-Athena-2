@@ -197,11 +197,13 @@ export const SAGITTARIUS_JUSTICE_ARROW = Object.freeze({
 
 export const GALACTIC_EXPLOSION = Object.freeze({
   version:'GALACTIC-EXPLOSION-V4',
-  policyRevision:'GE-R4-OPEN-TICKER-CARD-JOIN',
-  role:'open_ticker_then_every_enabled_card_that_passes',
+  policyRevision:'GE-R16-DISTINCT-INTENT-SAME-ATTACK-TICKER',
+  role:'open_ticker_then_all_distinct_authorized_intents_that_pass_including_same_attack',
   disabledLockScope:'exact_ticker',
   enabledLockScope:'exact_ticker_plus_attack_identity',
-  sameAttackDuplicatesAllowed:false,
+  // GE permits the SAME Attack on a ticker for separate verified opportunity IDs.
+  // Re-dispatching the same durable order/episode is never permitted.
+  sameAttackDuplicatesAllowed:true,
   grantOnAthenaOpen:true,
   grantOnIndependentOpen:true,
   grantedSaints:Object.freeze(['Momentum Hunter','Wave Surfer','Scarlet Needle','Lightning Plasma','Recovery Hunter','Sagittarius Justice Arrow','Athena Exclamation']),
@@ -209,7 +211,7 @@ export const GALACTIC_EXPLOSION = Object.freeze({
   excludedMetaAttacks:Object.freeze([]),
   eventCapScopeWhenEnabled:'attack',
   cooldownScopeWhenEnabled:'attack',
-  commitLockScopeWhenEnabled:'exact_ticker_plus_attack_identity',
+  commitLockScopeWhenEnabled:'exact_ticker_attack_plus_immutable_intent_identity',
 });
 
 export const CI1_WALL_CLONE = Object.freeze({

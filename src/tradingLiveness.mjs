@@ -106,10 +106,16 @@ export class TradingLiveness {
     this.useScope(settings);const at=Number(memory.atMs)||Date.now();
     const lastEvent=this.events.at(-1)||null;
     const pending=[...this.attempts.values()].filter(x=>!x.terminal),inProgress=pending.length;
+    // A stage trace is historical OBSERVABILITY, never proof that its evaluator
+    // promise still exists. PREPARED and early returns need not emit OPENED or
+    // BLOCKED. Only the live queue can testify to active evaluator work; other
+    // required workers and broker queues retain independent stall protection.
+    const entryWork=queues.find(q=>q.name==='entryEvaluationQueue');
+    const activeEvaluator=Number(entryWork?.active||0)>0||Number(entryWork?.pending||0)>0;
     const brokerQueues=['reads','mutations'].filter(k=>broker[k]).map(k=>({name:'broker_'+k,...broker[k]}));
     const status=classifyTradingLiveness({workers,queues:[...queues,...brokerQueues],health,lastEvent,
-      activity:{inProgress,evaluated:this.counts.candidateEvaluations,unresolvedEvictions:this.unresolvedAttemptEvictions,
-        oldestInProgressAtMs:pending.length?Math.min(...pending.map(x=>x.atMs)):null},now:at});
+      activity:{inProgress:activeEvaluator?inProgress:0,evaluated:this.counts.candidateEvaluations,unresolvedEvictions:this.unresolvedAttemptEvictions,
+        oldestInProgressAtMs:activeEvaluator&&pending.length?Math.min(...pending.map(x=>x.atMs)):null},now:at});
     const workerRows=workers.slice(0,16).map(w=>({name:clean(w.name,64),active:!!w.active,lastAttemptMs:num(w.lastAttemptMs),lastSuccessMs:num(w.lastSuccessMs),runningMs:num(w.runningMs),stalled:!!w.stalled}));
     const queueRows=[...queues,...brokerQueues].slice(0,24).map(q=>({name:clean(q.name,64),active:num(q.active),pending:num(q.pending),oldestActiveMs:num(q.oldestActiveMs),oldestActiveKey:clean(q.oldestActiveKey),oldestPendingMs:num(q.oldestPendingMs),oldestPendingKey:clean(q.oldestPendingKey),lastAttemptMs:num(q.lastAttemptMs),lastSuccessMs:num(q.lastSuccessMs),lastFailureMs:num(q.lastFailureMs)}));
     const row={atMs:at,rss:num(memory.rss),heapUsed:num(memory.heapUsed),heapTotal:num(memory.heapTotal),external:num(memory.external),

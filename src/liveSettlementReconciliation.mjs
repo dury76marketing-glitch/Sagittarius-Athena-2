@@ -22,6 +22,25 @@ const primaryAccountScope = row => ['subaccount_number','subaccount'].every(key=
 // A prior LIVE build could quarantine a genuinely funded seat when broker
 // inventory reached zero. Only its exact original, non-economic BOR1 marker
 // qualifies for evidence-backed rehabilitation. Never infer payout from status.
+// Broker-flat locally CLOSED rows are not economically CLOSED. Unlike a
+// quarantined funded seat, their remaining_count is zero; only an immutable
+// BOR1 no-inference marker and authoritative BUY proof can recover ownership.
+// This accepts no market inference and grants no SELL/order authority.
+export function isBrokerFlatEconomicUnknown(e){
+  const q=e?.postExitState?.brokerZeroInventoryClose, p=e?.entryConfig?.entryFillProof;
+  return e?.mode==='LIVE'&&e?.status==='closed'&&e?.archived!==true
+    &&e.closeReason==='broker_zero_inventory_closed'&&q?.version==='BOR1'
+    &&q?.economicClosure===false&&q?.pnlInferred===false&&q?.exitPriceInferred===false
+    &&Number(e.count)>0&&Number(e.remainingCount)===0&&Number(e.exitFilledCount||0)===0
+    &&Number(e.exitNotionalCents||0)===0&&Number(e.exitFeeCents||0)===0
+    &&Number(e.pnlCents||0)===0&&e.exitPriceCents==null
+    &&Boolean(e.entryOrderId)&&Boolean(e.entryClientOrderId)
+    &&!e.exitClientOrderId&&!e.exitOrderId&&p?.authoritative===true
+    &&String(p.orderId)===String(e.entryOrderId)
+    &&String(p.clientOrderId)===String(e.entryClientOrderId)
+    &&close(p.filledCount,e.count,1e-7)&&close(p.averageFillPriceCents,e.entryPriceCents,0.02)
+    &&close(p.feePaidCents,e.entryFeeCents,0.011);
+}
 export function isLegacyFundedQuarantine(e){
   const q=e?.postExitState?.brokerOwnershipQuarantine;
   return e?.mode==='LIVE' && e?.status==='reconciliation_orphaned'
@@ -392,7 +411,19 @@ export function proveLiveSettlementSeats(entries, settlements, fills, market,
     const remaining=seat.buy-seat.sold;
     const soldPnl=seat.proceeds-seat.price*seat.sold-seat.fee*seat.sold/seat.quantity-seat.sellFee;
     const prior=e.exitExecutionState?.brokerSettlementProof;
-    if(e.status==='closed'){
+    if(isBrokerFlatEconomicUnknown(e)){
+      // Treat only this original proof-gated BOR1 closure as unpaid. The row
+      // itself never becomes open or sellable. Recovered SELL fills remain
+      // exact-order truth; remaining quantity needs a complete ACCOUNT receipt.
+      if(remaining>1e-7)allocations.push({entryId:e.id,payoutCents,quantity:remaining,settledAtMs,outcome,
+        brokerFlatHistorical:true,soldCount:seat.sold,soldProceedsCents:seat.proceeds,
+        soldFeeCents:seat.sellFee,
+        provenance:{version:'LIVE-BROKER-FLAT-ECONOMIC-REPLAY-V1',ticker,
+          exchangeIndex:seat.shard,settledAtMs,marketResult:outcome,quantity:remaining,
+          soldCount:seat.sold,soldProceedsCents:seat.proceeds,soldFeeCents:seat.sellFee,
+          revenueCents:payoutCents*remaining,entryOrderId:e.entryOrderId,
+          entryClientOrderId:e.entryClientOrderId,ownerSeatIds:[...seats.keys()].sort()}});
+    }else if(e.status==='closed'){
       const expectedPnl=soldPnl+(payoutCents-seat.price)*remaining-seat.fee*remaining/seat.quantity;
       if(!close(e.remainingCount,0,1e-7)||!close(e.exitFilledCount,seat.quantity,1e-7)
         ||!close(e.exitNotionalCents,seat.proceeds+payoutCents*remaining,0.021)
