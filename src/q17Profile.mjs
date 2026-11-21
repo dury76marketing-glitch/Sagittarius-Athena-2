@@ -3,7 +3,7 @@
 // manual confirmation, clone identity, native broker proof and order receipts
 // all remain required. Default deployment policy continues to deny LIVE.
 export const Q17_SIM_ONLY = false;
-export const Q17_RELEASE = 'SAGITTARIUS-Q-17-R9-INTEGRATED-LIVE-PARITY-CANDIDATE-2026-11-20';
+export const Q17_RELEASE = 'SAGITTARIUS-R15-INTEGRATED-MEGAWAVE-TEST-CANDIDATE-2026-11-21';
 export const Q17_DATABASE_ACK = 'Q17_SEPARATE_DISPOSABLE_SIM_DATABASE';
 // Legacy API kept for strategy-module compatibility. The SIM-only mode
 // override is retired; operator execution authority lives in runtime settings.

@@ -19,12 +19,38 @@ export const executionCapital=(e)=>EXECUTION_ATTACKS.includes(e?.conceptName)&&!
 export const hasConfirmedEntryFill=(e)=>e?.status!=='entry_pending'||e?.mode!=='LIVE'||(
   e?.entryConfig?.entryFillProof?.authoritative===true&&Number(e.entryConfig.entryFillProof.filledCount)>0
   && Number(e.entryConfig.entryFillProof.filledCount)===Number(e.count));
-// A funded historical quarantine is neither a new open broker position nor
-// a completed financial record. Keep it visible as unresolved, not a zero-P/L
-// non-position. This predicate is reporting-only and grants no trading authority.
+// Broker-flat proves exposure has gone, not its exit proceeds. A local closure
+// must retain that distinction after SQL projection, restart and pagination.
+// Reporting only: this never grants entry/exit/recovery authority.
+export const FINANCIAL_CLOSURE_REVISION='R15-BROKER-FLAT-ECONOMIC-TRUTH';
 export const unresolvedFundedCapital=(e)=>executionCapital(e)&&e?.mode==='LIVE'
-  &&e?.status==='reconciliation_orphaned'&&Number(e.count)>0&&!!e.entryOrderId
-  &&e.entryConfig?.entryFillProof?.authoritative===true;
+  &&Number(e.count)>0&&!!e.entryOrderId&&e.entryConfig?.entryFillProof?.authoritative===true
+  &&(e.status==='reconciliation_orphaned'||(e.status==='closed'
+    &&(e.closeReason==='broker_zero_inventory_closed'||e.postExitState?.brokerZeroInventoryClose!=null)
+    &&e.postExitState?.brokerZeroInventoryClose?.economicClosure!==true));
+// One SQL rendering of the same read contract. The optional identifier is
+// internal-only; validate it so callers cannot supply arbitrary SQL fragments.
+export function unresolvedFundedSql(alias=''){
+  if(alias&&!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(alias))throw Error('invalid_financial_sql_alias');
+  const p=alias?alias+'.':'';
+  return `(${p}concept_name in (${EXECUTION_ATTACKS.map(x=>"'"+x+"'").join(',')})
+    and coalesce(${p}execution_class,'CAPITAL')<>'SHADOW_SAINT'
+    and coalesce(${p}entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT'
+    and ${p}mode='LIVE' and ${p}count>0 and coalesce(${p}entry_order_id,'')<>''
+    and coalesce(${p}entry_config#>'{entryFillProof,authoritative}','false'::jsonb)='true'::jsonb
+    and (${p}status='reconciliation_orphaned' or (${p}status='closed'
+      and (coalesce(${p}close_reason,'')='broker_zero_inventory_closed'
+        or coalesce(${p}post_exit_state->'brokerZeroInventoryClose','null'::jsonb)<>'null'::jsonb)
+      and coalesce(${p}post_exit_state#>'{brokerZeroInventoryClose,economicClosure}','false'::jsonb)<>'true'::jsonb)))`;
+}
+export const UNRESOLVED_FUNDED_SQL=unresolvedFundedSql();
+export function financialHistoryState(e){
+  const unresolved=unresolvedFundedCapital(e);
+  return {financialClosureRevision:FINANCIAL_CLOSURE_REVISION,
+    financialReconciliationRequired:unresolved,economicStateComplete:!unresolved,
+    recordedPnlCents:finite(e?.pnlCents)?Number(e.pnlCents):null,
+    confirmedPnlCents:unresolved?null:finite(e?.pnlCents)?Number(e.pnlCents):null};
+}
 export const actualOpenExposure=(e)=>EXPOSURE_STATUSES.includes(String(e?.status))&&Number(e?.remainingCount)>0&&hasConfirmedEntryFill(e);
 export const ACTUAL_OPEN_SQL="status in ('open','exit_pending','entry_pending','pending_recovery') and remaining_count>0 and (status<>'entry_pending' or mode<>'LIVE' or (coalesce(entry_config#>>'{entryFillProof,authoritative}','false')='true' and coalesce((entry_config#>>'{entryFillProof,filledCount}')::numeric,0)>0 and (entry_config#>>'{entryFillProof,filledCount}')::numeric=count))";
 export function dashboardReportingStartMs(s){
@@ -72,22 +98,24 @@ export function executionValuation(e,quote,settings={},now=Date.now()){
     estimatedExitFeeCents:exitFee,unrealizedCents:(price-n(e.entryPriceCents))*remaining-entryFeeRemaining-exitFee,
     remainingMarketValueCents:price*remaining-exitFee};
 }
-export function emptyExecutionStats(name){return {name,open:0,closed:0,pending:0,wins:0,losses:0,scratches:0,total:0,winRate:0,
-  unreconciled:0,financialComplete:true,realizedCents:0,closedRealizedCents:0,partialRealizedCents:0,unrealizedCents:0,knownUnrealizedCents:0,
+export function emptyExecutionStats(name){return {name,open:0,closed:0,unresolvedClosed:0,closedHistory:0,pending:0,wins:0,losses:0,scratches:0,total:0,winRate:0,
+  unreconciled:0,financialComplete:true,realizedCents:0,knownRealizedCents:0,knownFeesCents:0,feesComplete:true,closedRealizedCents:0,partialRealizedCents:0,unrealizedCents:0,knownUnrealizedCents:0,
   valuationComplete:true,missingValuations:0,avgEntryCents:0,dayRealizedCents:0,weekRealizedCents:0,monthRealizedCents:0,yearRealizedCents:0,
   periodsComplete:{day:true,week:true,month:true,year:true}};}
 export function combineExecutionStats(byAttack){
   const out=emptyExecutionStats('Lightning Plasma + genuine legacy capital');
   for(const a of Object.values(byAttack)){
-    for(const k of ['open','closed','pending','unreconciled','wins','losses','scratches','total','realizedCents','closedRealizedCents','partialRealizedCents','knownUnrealizedCents','missingValuations'])out[k]+=n(a[k]);
+    for(const k of ['open','closed','unresolvedClosed','closedHistory','pending','unreconciled','wins','losses','scratches','total','knownRealizedCents','knownFeesCents','closedRealizedCents','partialRealizedCents','knownUnrealizedCents','missingValuations'])out[k]+=n(a[k]);
+    out.feesComplete&&=a.feesComplete!==false;
     for(const p of ['day','week','month','year']){
       out.periodsComplete[p]&&=a.periodsComplete?.[p]!==false;
       out[`${p}RealizedCents`]+=n(a[`${p}RealizedCents`]);
     }
   }
   out.financialComplete=out.unreconciled===0;
+  out.realizedCents=out.financialComplete?out.knownRealizedCents:null;
   out.winRate=out.closed?out.wins/out.closed:0;
-  out.valuationComplete=out.missingValuations===0;
+  out.valuationComplete=out.missingValuations===0&&out.financialComplete;
   out.unrealizedCents=out.valuationComplete?out.knownUnrealizedCents:null;
   for(const p of ['day','week','month','year'])if(!out.periodsComplete[p])out[`${p}RealizedCents`]=null;
   return out;
@@ -96,21 +124,43 @@ const localFormatter=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Madrid',y
 const localDate=(ms)=>{const p=Object.fromEntries(localFormatter.formatToParts(new Date(ms)).map(x=>[x.type,x.value]));return {year:p.year,month:p.year+'-'+p.month,day:Date.UTC(+p.year,+p.month-1,+p.day)};};
 function eventInPeriod(ms,period,now){const t=localDate(ms),d=localDate(now),week=d.day-((new Date(d.day).getUTCDay()+6)%7)*86400000;
   return period==='day'?t.day===d.day:period==='week'?t.day>=week&&t.day<=d.day:period==='month'?t.month===d.month:t.year===d.year;}
+function unresolvedPeriodCompleteness(a,e,now){
+  // The unknown closure belongs somewhere between entry and the confirmed
+  // local flat observation; never insert a made-up realization timestamp.
+  const latest=Math.min(now,n(e.closedAtMs)||now),earliest=n(e.openedAtMs);
+  for(const p of ['day','week','month','year'])if((latest>0&&eventInPeriod(latest,p,now))
+    ||(earliest>0&&eventInPeriod(earliest,p,now)))a.periodsComplete[p]=false;
+}
+function finalizeExecutionStats(a){
+  a.closedHistory=a.closed+a.unresolvedClosed;
+  a.knownRealizedCents=a.realizedCents;
+  a.realizedCents=a.financialComplete?a.knownRealizedCents:null;
+  a.avgEntryCents=a.total?a.avgEntryCents/a.total:0;a.winRate=a.closed?a.wins/a.closed:0;
+  a.valuationComplete=a.missingValuations===0&&a.financialComplete;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
+  for(const p of ['day','week','month','year'])if(!a.periodsComplete[p])a[`${p}RealizedCents`]=null;
+}
 /** Bounded legacy/offline reader: time-uncertain historic partials are NOT fabricated. */
 export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now()}={}){
   const byAttack=Object.fromEntries(EXECUTION_ATTACKS.map(x=>[x,emptyExecutionStats(x)]));
   for(const e of rows){
     if(!executionCapital(e)||!executionScopeMatches(e,settings,{ignoreReset:true}))continue;
     const a=byAttack[e.conceptName];
-    if(unresolvedFundedCapital(e)){a.unreconciled++;a.financialComplete=false;continue;}
+    if(unresolvedFundedCapital(e)){
+      a.unreconciled++;a.financialComplete=false;a.feesComplete=false;
+      if(e.status==='closed'&&executionScopeMatches(e,settings))a.unresolvedClosed++;
+      a.realizedCents+=n(e.pnlCents);a.partialRealizedCents+=n(e.pnlCents);
+      a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
+      unresolvedPeriodCompleteness(a,e,now);continue;
+    }
     if(!executionScopeMatches(e,settings))continue;
     const closed=e.status==='closed'&&Number(e.count)>0,open=actualOpenExposure(e);
     if(!closed&&!open){if(e.status==='entry_pending')a.pending++;continue;}
     a.total++;a.avgEntryCents+=n(e.entryPriceCents);
+    a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
     a.realizedCents+=n(e.pnlCents);
     if(closed){a.closed++;a.closedRealizedCents+=n(e.pnlCents);if(n(e.pnlCents)>0)a.wins++;else if(n(e.pnlCents)<0)a.losses++;else a.scratches++;}
     else {a.open++;a.partialRealizedCents+=n(e.pnlCents);const v=executionValuation(e,getQuote(e.ticker),settings,now);if(v.complete)a.knownUnrealizedCents+=v.unrealizedCents;else a.missingValuations++;
-      if(v.reason==='broker_settlement_not_reconciled'&&e.mode==='LIVE'){a.unreconciled++;a.financialComplete=false;}}
+      if(v.reason==='broker_settlement_not_reconciled'&&e.mode==='LIVE'){a.unreconciled++;a.financialComplete=false;a.feesComplete=false;unresolvedPeriodCompleteness(a,e,now);}}
     if(n(e.pnlCents)!==0){
       const earliest=n(e.openedAtMs),latest=closed?n(e.closedAtMs):now;
       for(const p of ['day','week','month','year']){
@@ -119,11 +169,7 @@ export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now
       }
     }
   }
-  for(const a of Object.values(byAttack)){
-    a.avgEntryCents=a.total?a.avgEntryCents/a.total:0;a.winRate=a.closed?a.wins/a.closed:0;
-    a.valuationComplete=a.missingValuations===0;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
-    for(const p of ['day','week','month','year'])if(!a.periodsComplete[p])a[`${p}RealizedCents`]=null;
-  }
+  for(const a of Object.values(byAttack))finalizeExecutionStats(a);
   return {byAttack,combined:combineExecutionStats(byAttack)};
 }
 export function statisticsFromSnapshot(snapshot,settings,{getQuote=()=>null,now=Date.now()}={}){
@@ -131,24 +177,36 @@ export function statisticsFromSnapshot(snapshot,settings,{getQuote=()=>null,now=
   for(const r of snapshot.aggregates||[]){
     const a=byAttack[r.concept_name];if(!a)continue;
     for(const k of ['open','closed','pending','wins','losses','scratches','total'])a[k]=n(r[k]);
+    a.unresolvedClosed=n(r.unresolved_closed);
     a.closedRealizedCents=n(r.closed_realized_cents);a.partialRealizedCents=n(r.partial_realized_cents);
     a.realizedCents=a.closedRealizedCents+a.partialRealizedCents;a.avgEntryCents=n(r.avg_entry_cents);
+    a.knownFeesCents=n(r.known_fees_cents);
   }
   for(const r of snapshot.periods||[]){const a=byAttack[r.concept_name];if(!a)continue;for(const p of ['day','week','month','year']){a.periodsComplete[p]=Number(r[`${p}_unknown`]||0)===0;a[`${p}RealizedCents`]=a.periodsComplete[p]?n(r[`${p}_realized_cents`]):null;}}
-  for(const e of snapshot.unresolvedRows||[]){
+  for(const r of snapshot.unresolvedAggregates||[]){
+    const a=byAttack[r.concept_name];if(!a)continue;
+    a.unreconciled+=n(r.unreconciled);a.financialComplete=a.unreconciled===0;a.feesComplete=a.financialComplete;
+    a.realizedCents+=n(r.known_realized_cents);a.partialRealizedCents+=n(r.known_realized_cents);a.knownFeesCents+=n(r.known_fees_cents);
+    for(const p of ['day','week','month','year'])if(Number(r[`${p}_unknown`]||0)>0)a.periodsComplete[p]=false;
+  }
+  for(const e of snapshot.unresolvedAggregates?[]:(snapshot.unresolvedRows||[])){
     if(!unresolvedFundedCapital(e)||!executionScopeMatches(e,settings,{ignoreReset:true}))continue;
-    const a=byAttack[e.conceptName];a.unreconciled++;a.financialComplete=false;
+    const a=byAttack[e.conceptName];a.unreconciled++;a.financialComplete=false;a.feesComplete=false;
+    a.realizedCents+=n(e.pnlCents);a.partialRealizedCents+=n(e.pnlCents);a.knownFeesCents+=n(e.entryFeeCents)+n(e.exitFeeCents);
+    unresolvedPeriodCompleteness(a,e,now);
   }
   const observedCounts=Object.fromEntries(EXECUTION_ATTACKS.map(x=>[x,0]));
   for(const e of snapshot.openRows||[]){
     if(!executionCapital(e)||!executionScopeMatches(e,settings)||!actualOpenExposure(e))continue;
     const a=byAttack[e.conceptName];observedCounts[e.conceptName]++;
     const v=executionValuation(e,getQuote(e.ticker),settings,now);if(v.complete)a.knownUnrealizedCents+=v.unrealizedCents;else a.missingValuations++;
-    if(v.reason==='broker_settlement_not_reconciled'&&e.mode==='LIVE'){a.unreconciled++;a.financialComplete=false;}
+    if(v.reason==='broker_settlement_not_reconciled'&&e.mode==='LIVE'){a.unreconciled++;a.financialComplete=false;a.feesComplete=false;unresolvedPeriodCompleteness(a,e,now);}
   }
   for(const a of Object.values(byAttack)){
     if(observedCounts[a.name]!==a.open)throw Error('execution_reporting_snapshot_count_mismatch');
-    a.winRate=a.closed?a.wins/a.closed:0;a.valuationComplete=a.missingValuations===0;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
+    // SQL already returned the arithmetic average, whereas the row reader
+    // accumulates an entry-price sum before this common finalization.
+    a.avgEntryCents*=a.total;finalizeExecutionStats(a);
   }
   return {byAttack,combined:combineExecutionStats(byAttack)};
 }
@@ -204,6 +262,8 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
  alter table sag_snapshots add column if not exists reporting_scope jsonb;
  alter table sag_snapshots add column if not exists reporting_detail jsonb;
  alter table sag_snapshots alter column portfolio_value_cents drop not null;
+ alter table sag_snapshots alter column realized_pnl_cents drop not null;
+ alter table sag_snapshots alter column hunter_realized_pnl_cents drop not null;
  alter table sag_snapshots alter column unrealized_pnl_cents drop not null;
  alter table sag_snapshots alter column hunter_unrealized_pnl_cents drop not null;
 `;

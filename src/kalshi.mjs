@@ -533,7 +533,7 @@ export class KalshiClient {
         return dispatch();
       }
       return dispatch();
-    },deadline,{critical});}
+    },deadline,{critical,owner:`${method}:${this.readCategory(apiPath)}:${String(body?.client_order_id||'').slice(0,100)}`});}
     catch(error){result={ok:false,status:0,...(!started?{notSubmitted:true}:{}),data:{error:String(error?.message||'broker_request_failed')},transportCode:transportCodeOf(error)};}
     finally{if(mutation&&result?.notSubmitted!==true){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'finished'});}}
     if(!result.ok&&!mutation){

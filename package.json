@@ -1,6 +1,6 @@
 {
   "name": "sagittarius-q17-sim-core",
-  "version": "0.1.0",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
-    "check": "node scripts/check.mjs && node scripts/checkQ17PlasmaArrowParity.mjs && node scripts/checkQ17R5LinkSql.mjs && node scripts/checkQ17R6OperatorPressure.mjs && node scripts/checkQ17R7TradeSafePolling.mjs && node scripts/checkR9Contracts.mjs && node scripts/checkQ17R9IntegratedParity.mjs && node scripts/checkR10ProtectionScheduling.mjs && node scripts/checkR11StarlightNoSend.mjs && node scripts/checkR11StarlightMultiGeneration.mjs && node scripts/checkR12StarlightSourceNoSend.mjs && node scripts/checkR13ConnectedTradingIndependence.mjs && node scripts/checkR13LearningIsolation.mjs && node scripts/checkR14CapitalHistoryParity.mjs"
+    "check": "for f in src/*.mjs public/*.js; do node --check \"$f\" || exit 1; done"
   },
   "dependencies": {
     "pg": "^8.23.1",

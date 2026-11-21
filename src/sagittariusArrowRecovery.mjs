@@ -400,8 +400,9 @@ begin
      or NEW.entry_config#>>'{independentAuthority,ticker}' is distinct from NEW.ticker
      or NEW.entry_config#>>'{independentAuthority,eventTicker}' is distinct from NEW.event_ticker
      or (NEW.entry_config#>>'{independentAuthority,resetEpoch}')::bigint is distinct from (rec->>'resetEpoch')::bigint
-     or NEW.entry_price_cents not between (s->>'sagittariusArrowMinEntryCents')::numeric
-       and (s->>'sagittariusArrowMaxEntryCents')::numeric
+     or (coalesce((s->>'sagittariusArrowLinkEnabled')::boolean,false)=false
+       and NEW.entry_price_cents not between (s->>'sagittariusArrowMinEntryCents')::numeric
+         and (s->>'sagittariusArrowMaxEntryCents')::numeric)
      or NEW.entry_price_cents > (NEW.entry_config#>>'{independentAuthority,authorizedMaxEntryCents}')::numeric
      or NEW.entry_config->>'auroraDamageControlPercent' is distinct from s->>'sagittariusArrowAuroraDamageControlPercent'
    then raise exception 'independent_arrow_operator_scope_or_price_invalid';end if;
@@ -422,9 +423,11 @@ begin
         (extract(epoch from clock_timestamp())*1000)::bigint-5000
         and (extract(epoch from clock_timestamp())*1000)::bigint
      or (w.watch->>'releaseAtMs')::bigint>NEW.opened_at_ms
-     or (w.watch->>'crashDepthCents')::numeric<coalesce((s->>'sagittariusArrowMinCrashCents')::numeric,0)
-     or (w.watch->>'reboundCents')::numeric<coalesce((s->>'sagittariusArrowMinReboundCents')::numeric,0)
-     or (w.watch->>'upwardTicks')::int<coalesce((s->>'sagittariusArrowMinUpwardTicks')::int,0)
+     or (w.watch->>'link') is distinct from (s->>'sagittariusArrowLinkEnabled')
+     or (coalesce((w.watch->>'link')::boolean,false)=false and (
+       (w.watch->>'crashDepthCents')::numeric<coalesce((s->>'sagittariusArrowMinCrashCents')::numeric,0)
+       or (w.watch->>'reboundCents')::numeric<coalesce((s->>'sagittariusArrowMinReboundCents')::numeric,0)
+       or (w.watch->>'upwardTicks')::int<coalesce((s->>'sagittariusArrowMinUpwardTicks')::int,0)))
      or w.watch->>'independentRecovery' is distinct from 'true'
      or w.watch->>'authorization' is distinct from 'VALID_SHADOW_HARD_STOP'
      or w.watch->>'parentConcept' is distinct from 'Athena Exclamation'

@@ -64,7 +64,7 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     const key = `${e.stage || 'unknown'}:${e.status || e.reason || 'unknown'}`;
     byReason[key] = (byReason[key] || 0) + 1;
   }
-  const funnel = engine?.entryCandidateFunnel || engine?.strategy?.entryCandidateFunnel || null;
+  const funnel = engine?.entryCandidateFunnelSummary?.() || null;
   const choke = {
     engineProcessing: engine?.health?.operational?.newEntriesAllowed !== false && engine?.health?.degraded !== true,
     activeStages: [...new Set(pipeline.map(e => e.stage).filter(Boolean))],
@@ -143,16 +143,39 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     }) : 'UNAVAILABLE',
   };
   const chains = {
-    chain1: 'Athena shadow hard_stop -> Starlight, Lightning Plasma and Sagittarius Arrow enter together on Starlight settings. Plasma loss still arms Great Horn -> Crystal Wall.',
-    chain2: 'Arrow is a Starlight clone, not a Starlight-open follower. Arrow loss still arms Scarlet Needle -> Pegasus.',
+    chain1: 'Verified still-open CAPITAL Starlight -> qualified Lightning Plasma V5 on its own card -> verified LP net loss -> Great Horn -> verified GH net loss -> Crystal Wall.',
+    chain2: 'Verified Athena shadow-stop or confirmed CAPITAL Starlight authority -> Sagittarius Arrow on its own card -> verified Arrow net loss -> Scarlet Needle Recovery -> verified SN2 net loss -> Pegasus Ryu Sei Ken Recovery.',
+    note: 'LINK, Multiply and original-entry rise remain strategy-specific. Every LIVE parent, cash, book, fee, clock, protection and broker gate remains mandatory.',
     starlightParentsInWindow: athena.qualifyingHardStopsInWindow,
     childStatus: durable.length === 0 ? 'NOT_REACHED_PARENT_NOT_ELIGIBLE' : 'PARENT_WATCH_EXISTS',
   };
-  const parity = { status: 'COMPARISON_UNAVAILABLE_MISSING_MATCHED_EVENT_DATA' };
+  const contexts=pipeline.filter(e=>e.decisionContext?.settingsHash&&e.decisionContext?.marketEventId);
+  const settingsSnapshots=[...(engine?.strategy?.entryPipelineSettingsSnapshots?.values?.()||[])].slice(-32);
+  const liveness=engine?.tradingLiveness?.snapshot?.({history:true})||{state:'LIVENESS_DEGRADED',reason:'runtime_observation_unavailable',coverage:{fullHistory:false}};
+  const parity = { status: 'COMPARISON_UNAVAILABLE_MISSING_MATCHED_EVENT_DATA',
+    observedDecisionContexts:contexts.length,matchingRequired:['canonical market event or identical replay frame','equivalent operator card','equivalent verified parent authority','same market-clock and freshness evidence'],
+    note:'A local trace is evidence, not proof of SIM/LIVE parity. No comparison is fabricated from unrelated opportunities.' };
+  const cached=engine?.stateSnapshotCache?.accountExecutionSummary;
+  const scoped=cached?.scope&&['systemName','ownerId','mode'].every(k=>String(cached.scope[k])===String(settings[k]))
+    &&Number(cached.scope.resetTimestampMs||0)===Number(settings.resetTimestampMs||0)
+    &&Number(cached.scope.dashboardStartMs||0)===Number((settings.mode==='LIVE'?settings.liveDashboardStartMs:settings.simulationDashboardStartMs)||0);
+  const financeKeys=['realizedCents','knownRealizedCents','closedRealizedCents','partialRealizedCents','unrealizedCents','knownUnrealizedCents','feesCents','knownFeesCents',
+    'financialComplete','feesComplete','valuationComplete','unreconciled','missingValuations','pending','open','closed','wins','losses','scratches','winRate',
+    'dayRealizedCents','weekRealizedCents','monthRealizedCents','yearRealizedCents','periodsComplete'];
+  const finance=scoped?{status:'CACHED_AUTHORITATIVE_REPORT',scope:cached.scope,asOfMs:cached.asOfMs??null,
+    ageMs:age(now,cached.asOfMs),reportingVersion:cached.reportingVersion,
+    values:Object.fromEntries(financeKeys.map(k=>[k,k==='feesCents'
+      ?cached.feesComplete===true&&cached.knownFeesCents!=null&&Number.isFinite(Number(cached.knownFeesCents))?Number(cached.knownFeesCents):null
+      :cached[k]??null])),
+    note:'Known subtotals do not complete unresolved economics; null is not zero. Cache age is explicit; this export performs no financial SQL.'}
+    :{status:'UNAVAILABLE',reason:'no_completed_financial_snapshot_in_current_scope',values:null};
   const coverage = {
     windowStartMs: windowStart, windowEndMs: now,
     pipelineEventsUsed: pipeline.length, watchesUsed: durable.length,
-    historicalSettingAtDecision: 'NOT_AVAILABLE',
+    pipelineFirstAtMs:pipeline[0]?.atMs??null,pipelineLastAtMs:pipeline.at(-1)?.atMs??null,
+    historicalSettingAtDecision:contexts.length?'BOUNDED_DECISION_CONTEXTS':'NOT_AVAILABLE',
+    decisionContexts:contexts.length,settingsSnapshots:settingsSnapshots.length,maximumSettingsSnapshots:32,
+    liveness:liveness.coverage||null,financialAsOfMs:finance.asOfMs??null,
     sampled: true, fullHistory: false,
   };
   const manifest = {
@@ -161,6 +184,8 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     build: BUILD_INFO?.id || RELEASE,
     exportedAtMs: now,
     mode: settings.mode || null,
+    systemName:settings.systemName||null,ownerId:settings.ownerId||null,resetEpoch:Number(settings.resetTimestampMs||0),
+    sourceSha256:BUILD_INFO?.sourceSha256||null,railwayCommit:BUILD_INFO?.railwayCommit||null,
     maxBytes: FULL_TRADING_DIAGNOSTIC_MAX_BYTES,
     readOnly: true,
     tradingUnchanged: true,
@@ -176,6 +201,9 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     'broker-and-fill-lifecycle.json': broker,
     'recovery-chain-transitions.json': chains,
     'sim-live-parity.json': parity,
+    'runtime-liveness.json': liveness,
+    'decision-settings-observations.json': settingsSnapshots,
+    'financial-reconciliation-summary.json': finance,
     'diagnostic-coverage.json': coverage,
   };
   return files;

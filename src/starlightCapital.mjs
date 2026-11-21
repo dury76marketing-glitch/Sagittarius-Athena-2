@@ -25,8 +25,10 @@ export function starlightNoSendRetryGeneration(w={}){
     &&ids.every(id=>typeof id==='string'&&id.length>0);
   const hasExplicit=Object.hasOwn(w,'noSendRetryGeneration');
   const generation=hasExplicit?w.noSendRetryGeneration:hasProof?1:0;
-  if(typeof generation!=='number'||!Number.isSafeInteger(generation)
-    ||generation<0||generation>64)return null;
+  if(typeof generation!=='number'||!Number.isSafeInteger(generation)||generation<0)return null;
+  if(generation>64&&(w.noSendRetryHistory?.version!=='SC1-R15-NO-SEND-HISTORY-V1'
+    ||w.noSendRetryHistory?.generation!==generation||typeof w.noSendRetryHistory?.id!=='string'
+    ||!w.noSendRetryHistory.id))return null;
   if(generation>0&&(w.mode!=='LIVE'||!hasProof))return null;
   if(generation===0&&hasProof)return null;
   return generation;
@@ -63,6 +65,7 @@ export function starlightPreDispatchNoSendReason(reason){
 export function starlightCertifiedRejectedNoSendChild(child,w){
   const c=child?.entry_config||{},rec=c.starlightRecovery||{},stamp=c.starlightCapital||{};
   return child?.status==='rejected'&&starlightLocalNoSendProof(c)
+    &&c.entryFillProof?.authoritative!==true
     &&['sc1_intent_receipted_or_changed','live_entry_not_dispatched'].includes(child.close_reason)
     &&child.archived===false
     &&child.execution_class==='CAPITAL'&&c.executionClass==='CAPITAL'
@@ -190,7 +193,7 @@ export const STARLIGHT_CAPITAL_SQL=`
 create or replace function sag_sc1_authorize_capital_starlight() returns trigger language plpgsql as $$
 declare s jsonb; rec jsonb; stamp jsonb; parent sag_entries; w sag_starlight_recovery_v1;
   proof sag_shadow_stops_v3; a jsonb; witness jsonb; quote jsonb;
-  at_ms bigint; seats int; maximum int; retry_gen int;
+  at_ms bigint; seats int; maximum int; retry_gen bigint;
 begin
  if NEW.concept_name<>'Crash Recovery Hunter' or NEW.execution_class<>'CAPITAL'
   or NEW.entry_config->>'executionClass'<>'CAPITAL' then
@@ -248,15 +251,15 @@ begin
  if w.watch ? 'noSendRetryGeneration' then
    if jsonb_typeof(w.watch->'noSendRetryGeneration')<>'number'
      then raise exception 'sc1_retry_generation_invalid';end if;
-   retry_gen:=(w.watch->>'noSendRetryGeneration')::int;
+   retry_gen:=(w.watch->>'noSendRetryGeneration')::bigint;
  elsif coalesce((w.watch->>'rearmedNoSubmitAtMs')::bigint,0)>0 then
    retry_gen:=1;
  else
    retry_gen:=0;
  end if;
- if retry_gen<0 or retry_gen>64
-   or coalesce((rec->>'noSendRetryGeneration')::int,0)<>retry_gen
-   or coalesce((stamp->>'noSendRetryGeneration')::int,0)<>retry_gen
+ if retry_gen<0 or retry_gen>9007199254740991
+   or coalesce((rec->>'noSendRetryGeneration')::bigint,0)<>retry_gen
+   or coalesce((stamp->>'noSendRetryGeneration')::bigint,0)<>retry_gen
    or (retry_gen>0 and (NEW.mode<>'LIVE'
       or coalesce((w.watch->>'rearmedNoSubmitAtMs')::bigint,0)<=0
       or not (
@@ -267,6 +270,23 @@ begin
       )))
    or (retry_gen=0 and coalesce((w.watch->>'rearmedNoSubmitAtMs')::bigint,0)>0)
  then raise exception 'sc1_retry_generation_or_no_send_proof_invalid';end if;
+ if retry_gen>64 or w.watch ? 'noSendRetryHistory' or exists(
+  select 1 from sag_sc1_no_send_history_v1 h where h.system_name=NEW.system_name
+   and h.owner_id=NEW.owner_id and h.mode=NEW.mode and h.reset_epoch=w.reset_epoch
+   and h.authorization_id=w.authorization_id and h.parent_entry_id=NEW.source_trade_id) then
+  if w.watch#>>'{noSendRetryHistory,version}' is distinct from 'SC1-R15-NO-SEND-HISTORY-V1'
+   or (w.watch#>>'{noSendRetryHistory,generation}')::bigint is distinct from retry_gen
+   or not exists(select 1 from sag_sc1_no_send_history_v1 h
+    where h.id=w.watch#>>'{noSendRetryHistory,id}' and h.generation=retry_gen
+     and h.system_name=NEW.system_name and h.owner_id=NEW.owner_id and h.mode=NEW.mode
+     and h.reset_epoch=w.reset_epoch and h.authorization_id=w.authorization_id
+     and h.parent_entry_id=NEW.source_trade_id)
+   or exists(select 1 from sag_sc1_no_send_history_v1 newer
+    where newer.system_name=NEW.system_name and newer.owner_id=NEW.owner_id and newer.mode=NEW.mode
+     and newer.reset_epoch=w.reset_epoch and newer.authorization_id=w.authorization_id
+     and newer.parent_entry_id=NEW.source_trade_id and newer.generation>retry_gen)
+  then raise exception 'sc1_durable_no_send_history_required';end if;
+ end if;
  select count(*) into seats from sag_entries where system_name=NEW.system_name
   and owner_id=NEW.owner_id and mode=NEW.mode and concept_name='Crash Recovery Hunter'
   and source_trade_id=NEW.source_trade_id and execution_class='CAPITAL'

@@ -68,6 +68,13 @@ const R13_ATTACK_KEYS=Object.freeze(Object.fromEntries(Object.entries(R13_ATTACK
   return [concept,Object.freeze(keys)];
 })));
 function hashCard(settings,keys){return authorityHash(Object.fromEntries(keys.map(k=>[k,settings?.[k]??null])));}
+// Read-only R15 diagnostic projection of the same allowlist used by the
+// authority hash. No credentials, new authorization, or hash semantics.
+export function executionSettingsObservation(settings,concept=null){
+  const keys=R13_ATTACK_KEYS[concept]||EXECUTION_V2_KEYS;
+  return Object.fromEntries(keys.map(k=>{const v=settings?.[k]??null;
+    return[k,typeof v==='string'?v.slice(0,200):v==null||typeof v==='number'||typeof v==='boolean'?v:null];}));
+}
 export function legacyExecutionSettingsHash(settings){return hashCard(settings,LEGACY_EXECUTION_KEYS);}
 export function executionSettingsHash(settings,concept=null){
   const scoped=R13_ATTACK_KEYS[concept];

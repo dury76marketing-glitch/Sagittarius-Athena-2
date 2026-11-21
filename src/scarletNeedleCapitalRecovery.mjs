@@ -8,6 +8,7 @@ import {isShadowSaintEntry} from './doctrine.mjs';
 import {verifiedLiveCapitalParentEntryFill,liveCapitalParentEntryFillSql} from './liveParentEntryProof.mjs';
 import {sagittariusArrowId} from './sagittariusArrowRecovery.mjs';
 import {MODEL_CLONE_CAPITAL_VERSION,modelCloneCapitalId} from './modelCloneCapital.mjs';
+import {independentArrowParentLineage,INDEPENDENT_ARROW_PARENT_SQL} from './independentArrowParent.mjs';
 export const SN_CONCEPT='Scarlet Needle Recovery';
 export const SN_VERSION='SN2-RECOVERY-WATCH-V1';
 /** Link bypasses *strategy* thresholds only. Exchange prices, spread, depth,
@@ -76,6 +77,14 @@ export function verifiedSagittariusArrowLoss(e,s={},now=Date.now()){
     // A LIVE parent needs exact broker entry-fill/fee/client identity, not an order receipt.
     if(!verifiedLiveCapitalParentEntryFill(e).ok)
       return deny('sn2_parent_live_entry_fill_unverified');
+  }
+  if(e.entryConfig?.independentRecovery!=null){
+    const lineage=independentArrowParentLineage(e,s);if(!lineage.ok)return lineage;
+    if(e.entryConfig?.aurora?.frozen!==true)return deny('lightning_capital_or_protection_unverified');
+    return {ok:true,reason:'verified_independent_arrow_net_loss',parentEntryId:String(e.id),parentConcept:e.conceptName,entryPriceCents:entry,
+      exitPriceCents:exit,realizedNetCents:pnl,closedAtMs:number(e.closedAtMs),
+      count:qty,systemName:e.systemName,ownerId:e.ownerId,mode:e.mode,resetEpoch:reset,
+      ticker:e.ticker,eventTicker:e.eventTicker,side:'YES'};
   }
   if(e.entryConfig?.starlightModelClone===true){
     // A historical JSON flag is never sufficient to create downstream
@@ -258,11 +267,11 @@ export function scarletNeedleCapitalAdmissionDecision({watch,seat,settings,quote
  return {ok:true,reason:'sn2_signal_only_no_capital_authority',seat,groupId:watch.id,positionId:scarletNeedleCapitalId(loss,loss.parentEntryId,seat)};
 }
 /** Additive schema; scoped LIVE requires a transaction-local proof and durable pending intent. */
-export const SCARLET_NEEDLE_RECOVERY_SQL=`
+export const SCARLET_NEEDLE_RECOVERY_SQL=INDEPENDENT_ARROW_PARENT_SQL+`
 -- SN2-LIVE: no general direct-insert authority. Only a locked, scoped
 -- transaction can insert an individually authorized SIM or LIVE seat.
 create or replace function sag_sn2_pre_certification_fence() returns trigger language plpgsql as $$
-declare w record; p record; s jsonb; rec jsonb; seat_n int; at_ms bigint;
+declare w record; p sag_entries; s jsonb; rec jsonb; seat_n int; at_ms bigint;
 begin
  if NEW.concept_name<>'Scarlet Needle Recovery' then return NEW;end if;
  if NEW.mode not in ('SIMULATION','LIVE')
@@ -342,6 +351,7 @@ begin
           and sp.proof->>'full'='true'
       )
     )
+    or sag_r15_independent_arrow_origin(p,w.reset_epoch)
     or (
       p.entry_config->>'starlightModelClone' is distinct from 'true'
       and p.entry_config#>>'{sagittariusArrowRecovery,parentEntryId}'=p.source_trade_id

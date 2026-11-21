@@ -1,11 +1,13 @@
 import {createQ17LiveCashWitness} from './q17LiveCapitalAdmissibility.mjs';
+import {INDEPENDENT_LIFECYCLE_VERSION,independentCapitalId} from './independentRecoveryLifecycle.mjs';
+import {LP_SEAT_LIFECYCLE_VERSION,lightningCapitalId,lightningCapitalSeatPlan} from './lightningCapitalLifecycle.mjs';
 import {liveEntryDispatchBookConfirmation} from './liveEntryDispatchBook.mjs';
 import {MODEL_CLONE_CAPITAL_VERSION,modelCloneCapitalId} from './modelCloneCapital.mjs';
 import {maximumSettlementNetAdmission,verifiedLiveBuyFillEconomics} from './executionEconomics.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision} from './athenaStarlightTrigger.mjs';
-import {LP_CONTINUATION_VERSION,lightningParentEligibility,plasmaGeometryEligibility} from './lightningShadowContinuation.mjs';
+import {LP_CONTINUATION_VERSION,lightningParentEligibility,plasmaGeometryEligibility,observePlasmaGeometry,lightningObservationTiming,lightningObservationStartMs} from './lightningShadowContinuation.mjs';
 import {STARLIGHT_CAPITAL_VERSION,starlightCapitalEntryId,starlightNoSendRetryGeneration} from './starlightCapital.mjs';
-import { SHADOW_PROTOCOL, executionSettingsHash, executionSettingsHashMatches, shadowScope, sameShadowScope, shadowAdmissionId, validateShadowEntry } from './shadowProtocol.mjs';
+import { SHADOW_PROTOCOL, executionSettingsHash, executionSettingsObservation, executionSettingsHashMatches, shadowScope, sameShadowScope, shadowAdmissionId, validateShadowEntry } from './shadowProtocol.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { classifyLiveOrderResult } from './kalshi.mjs';
 import {
@@ -46,6 +48,7 @@ import {
   estimateTimeLeftMs,
 } from './doctrine.mjs';
 import { RELEASE } from './config.mjs';
+import {BoundedDiagnosticReporter} from './tradingLiveness.mjs';
 import { authoritativeClockSnapshot, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
 import { AthenaExclamationEngine, ATHENA_EXCLAMATION, athenaExclamationPrimeReview, isGoldSaintConcept } from './athenaExclamation.mjs';
 import { BUILD_INFO, authorityHash, sealAthenaFireCommand, verifyAthenaFireCommandHash } from './authority.mjs';
@@ -382,6 +385,8 @@ export function lightningPlasmaScaleInDecision({
   if(!eligibility.ok)return eligibility;
   if(settings?.lightningPlasmaEnabled!==true)
     return {ok:false,reason:'lp_disabled'};
+  const timing=lightningObservationTiming(starlight,settings,quote);
+  if(!timing.ok)return timing;
   const geometry=plasmaGeometryEligibility(observation,settings,quote);
   if(!geometry.ok)return geometry;
   const thr=Number(thresholdCents??settings?.lightningPlasmaStarlightScaleInCents);
@@ -404,7 +409,7 @@ export function lightningPlasmaScaleInDecision({
 // LP-V5: last-price signal before SIM persistence and LIVE BUY. Durable
 // OPEN CAPITAL Starlight authority is separately revalidated in the database.
 export function lightningPlasmaFinalEntrySignal({quote=null,ticker='',parentEntryCents=0,
-  triggerCents=0,minEntryCents=0,maxEntryCents=100,authorizedAskCents=100,now=Date.now(),settings=null,observation=null}={}){
+  triggerCents=0,minEntryCents=0,maxEntryCents=100,authorizedAskCents=100,now=Date.now(),settings=null,observation=null,parent=null}={}){
   const at=Number(now);
   if(!quote || String(quote.ticker||'')!==String(ticker||'')
     || String(quote.status||'').toLowerCase()!=='active'
@@ -413,6 +418,7 @@ export function lightningPlasmaFinalEntrySignal({quote=null,ticker='',parentEntr
   const observedAt=Number(quote.quoteAtMs||quote.updatedAtMs||0);
   if(!(observedAt>0) || observedAt>at || at-observedAt>5000)
     return {ok:false,reason:'lp_final_quote_stale'};
+  if(parent){const timing=lightningObservationTiming(parent,settings,quote,at);if(!timing.ok)return timing;}
   const bid=Number(quote.yesBid),ask=Number(quote.yesAsk),parentEntry=Number(parentEntryCents),thr=Number(triggerCents);
   if(!(thr>0) || !(bid>0) || !(ask>0) || !(parentEntry>0) || bid-parentEntry+1e-9<thr)
     return {ok:false,reason:'lp_parent_profit_no_longer_qualified'};
@@ -1384,11 +1390,33 @@ export class StrategyEngine {
     // pipeline identity fields must be authoritative. Put caller data first so
     // fields such as a Hunter's runtime `status=open` cannot overwrite EPT1's
     // gate result `status=PASS` (a defect caught by the R35 end-to-end test).
+    let decisionContext;
+    try{
+    const settings=this.getSettings?.()||{},quote=this.market?.getQuote?.(String(ticker||''));
+    const observation=quote?.quoteObservation;
+    // Capture the actual decision-time settings and canonical observation.
+    // This is a bounded diagnostic tape, never an authorization token. Mode
+    // comparisons are valid only when their market/settings identities match.
+    decisionContext={version:'R15-DECISION-CONTEXT-1',
+      systemName:String(settings.systemName||''),ownerId:String(settings.ownerId||''),mode:String(settings.mode||''),resetEpoch:Number(settings.resetTimestampMs||0),
+      settingsHash:executionSettingsHash(settings,String(concept||'')),
+      marketEventId:observation?.epoch&&observation?.revision!=null?`${observation.epoch}:${observation.revision}`:null,
+      quoteEpoch:observation?.epoch||null,quoteRevision:observation?.revision??null,
+      quoteAtMs:quote?.quoteAtMs??quote?.updatedAtMs??null,quoteReceivedAtMs:observation?.receivedAtMs??null,
+      quoteSource:observation?.source||null,sequence:observation?.sequence??null,
+      yesBid:quote?.yesBid??null,yesAsk:quote?.yesAsk??null,bookInvalid:quote?.bookInvalid??null};
+    this.entryPipelineSettingsSnapshots ||= new Map();
+    if(!this.entryPipelineSettingsSnapshots.has(decisionContext.settingsHash)){
+      this.entryPipelineSettingsSnapshots.set(decisionContext.settingsHash,{hash:decisionContext.settingsHash,concept:String(concept||''),
+        firstObservedAtMs:Date.now(),values:executionSettingsObservation(settings,String(concept||''))});
+      while(this.entryPipelineSettingsSnapshots.size>32)this.entryPipelineSettingsSnapshots.delete(this.entryPipelineSettingsSnapshots.keys().next().value);
+    }
+    }catch{decisionContext={version:'R15-DECISION-CONTEXT-1',unavailable:true,reason:'observation_capture_failed'};}
     const row = {
       ...data,
       version:'EPT1', attemptId:String(attemptId), concept:String(concept || ''), ticker:String(ticker || ''),
       stage:String(stage || 'UNKNOWN'), status:String(status || 'INFO'), reason:reason == null ? null : String(reason),
-      atMs:Date.now(),
+      atMs:Date.now(),decisionContext,
     };
     this.entryPipelineEvents.push(row);
     if (this.entryPipelineEvents.length > 500) this.entryPipelineEvents.splice(0, this.entryPipelineEvents.length - 500);
@@ -1436,7 +1464,12 @@ export class StrategyEngine {
   }
 
   async audit(event, data = {}) {
-    await this.db.audit('info', event, data).catch(() => {});
+    // sag_audit is optional evidence, never the durable trading proof. A
+    // stalled write must not retain entry locks, subscriptions or Multiply
+    // progress. Keep one actual write and one latest report, with no timeout
+    // that would abandon a still-running trading transaction.
+    this.diagnosticReporter ||= new BoundedDiagnosticReporter();
+    this.diagnosticReporter.submit(()=>this.db.audit('info',event,data));
   }
 
   async observeGoldSaintQualification(concept, q, {sourceFeeder=null,sourceTradeId=null,qualificationSnapshot=null,legacyCompatibility=false}={}) {
@@ -1542,10 +1575,12 @@ export class StrategyEngine {
       const clone=entry?.mode==='LIVE'&&entry?.entryConfig?.starlightModelClone===true;
       const independent=entry?.mode==='LIVE'
         &&entry?.entryConfig?.independentRecovery?.version==='INDEPENDENT-ATHENA-LOSS-V2';
+      const scaleIn=entry?.mode==='LIVE'&&entry?.conceptName==='Lightning Plasma'
+        &&entry?.entryConfig?.lightningPlasmaScaleIn?.lifecycleVersion===LP_SEAT_LIFECYCLE_VERSION;
       // Called only at the LOCAL pre-submit boundary, or following an
       // authoritative broker result explicitly proving notSubmitted=true.
       // A terminal CAS rejection without this proof must never free a seat.
-      if(starlight||clone||independent){
+      if(starlight||clone||independent||scaleIn){
         if(entryConfig?.dispatchProof&&entryConfig.dispatchProof.submitted!==false)
           throw new Error('sc1_no_send_proof_conflict');
         if(!entryConfig?.dispatchProof)entryConfig={...entryConfig,dispatchProof:{
@@ -2313,13 +2348,15 @@ export class StrategyEngine {
     }finally{release?.();}
   }
 
-  async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, ci1SourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, ci1FireCommand = null, liveWatch = null, legacyCompatibility = false, stackSeat = false, stackIndex = 1, stackParentId = null, observationRelease = false, starlightRecovery = false, starlightRecoverySnapshot = null, lightningPlasmaScaleIn = false, parentStarlightId = null, shadowAdmissionBatch = null, multiplySeatDiagnostic = null, starlightModelClone = false, cloneRefusal = null, cloneAttemptGeneration = 0, independentRecovery = false } = {}) {
-    // Q17-R4: stop admitting the superseded Lightning Plasma shadow/FIRE,
-    // Starlight-profit scale-in and model-clone capital pathways. LP now has
-    // one independent verified Athena-shadow-loss CAPITAL authority, matching
-    // Arrow's independent watch/geometry/financial-admission machinery.
-    // Existing shadow rows remain historical; no ledger entries are deleted.
-    if(concept==='Lightning Plasma' && independentRecovery!==true)return null;
+  async createHunter(concept, q, stakeCents, _legacyStopLossCents = 0, { sourceFeeder = null, sourceTradeId = null, sourceEntryConfig = null, recoverySourceSnapshot = null, crystalWallSourceSnapshot = null, justiceArrowSourceSnapshot = null, ci1SourceSnapshot = null, crashSourceSnapshot = null, entryQualificationSnapshot = null, athenaFireCommand = null, crystalWallFireCommand = null, justiceArrowFireCommand = null, ci1FireCommand = null, liveWatch = null, legacyCompatibility = false, stackSeat = false, stackIndex = 1, stackParentId = null, observationRelease = false, starlightRecovery = false, starlightRecoverySnapshot = null, lightningPlasmaScaleIn = false, parentStarlightId = null, shadowAdmissionBatch = null, multiplySeatDiagnostic = null, starlightModelClone = false, cloneRefusal = null, cloneAttemptGeneration = 0, independentRecovery = false, independentAttemptGeneration = 0, lightningAttemptGeneration = 0 } = {}) {
+    // R15 owner-approved LP-V5 route. Merely selecting this path is not
+    // authority: the actual parent, observation, cash and durable seat are
+    // validated below and again inside the PostgreSQL admission transaction.
+    // Older Athena-loss/model-clone LP rows remain reconciliation evidence.
+    if(concept==='Lightning Plasma' && (lightningPlasmaScaleIn!==true
+      ||independentRecovery===true||starlightModelClone===true||legacyCompatibility===true
+      ||starlightRecovery===true||!String(parentStarlightId||sourceTradeId||'')
+      ||(parentStarlightId&&sourceTradeId&&String(parentStarlightId)!==String(sourceTradeId))))return null;
     // Snapshot the ORIGINAL committed operator card before deriving clone-only
     // effective LP/Arrow settings. Comparing the derived card to the live raw
     // card would reject every clone at the final setting-authority gate.
@@ -2486,7 +2523,7 @@ export class StrategyEngine {
     const starlightRealEarly=concept==='Crash Recovery Hunter' && starlightRecovery===true && s.starlightExtinctionRealTradeEnabled===true;
     const starlightClaimedCapitalProof=concept==='Crash Recovery Hunter'&&starlightRecovery===true
       &&s.mode==='LIVE'&&starlightRecoverySnapshot?.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION;
-    if ((!isShadowSaintConcept(concept) || lightningPlasmaScaleIn===true || starlightRealEarly || starlightModelClone===true || independentRecovery===true) && s.mode === 'LIVE' && !this.getLiveReady(independentRecovery===true?concept:null)) {
+    if ((!isShadowSaintConcept(concept) || lightningPlasmaScaleIn===true || starlightRealEarly || starlightModelClone===true || independentRecovery===true) && s.mode === 'LIVE' && !this.getLiveReady(independentRecovery===true||lightningPlasmaScaleIn===true?concept:null)) {
       trace('MODE_AUTHORIZATION','BLOCKED','live_not_ready');
       if(starlightClaimedCapitalProof){
         await this.recordStarlightSourcePreIntentRefusal({snapshot:starlightRecoverySnapshot,
@@ -2640,7 +2677,9 @@ export class StrategyEngine {
           signalQuoteRevision:Number(independentWatch.lastQuoteRevision),
           concept,ticker:exactTicker,eventTicker:String(q.eventTicker||exactTicker),
           systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-          resetEpoch:Number(s.resetTimestampMs||0)};
+          resetEpoch:Number(s.resetTimestampMs||0),lifecycleVersion:INDEPENDENT_LIFECYCLE_VERSION,
+          seat:Number(stackIndex||1),maximumSeats:attackMultiplySeats(s,concept),
+          attemptGeneration:Number(independentAttemptGeneration)};
         independentAuthority={...authorityIdentity,
           authorizationId:`INDEP-STOP:${authorityHash(authorityIdentity)}`,
           authorityMode:'INDEPENDENT_ATHENA_SHADOW_STOP',
@@ -2697,7 +2736,7 @@ export class StrategyEngine {
         trace('SC_CLONE_AUTHORITY','PASS','sc_clone_verified_parent_and_signal',{
           parentEntryId:sourceTradeId,watchId:watch.authorizationId,watchRevision:watch.revision,seat:Number(stackIndex)});
       }
-      let lpInitialParentEntryPriceCents=null,lpInitialParentAuthority=null,lpInitialObservation=null;
+      let lpInitialParentEntryPriceCents=null,lpInitialParentAuthority=null,lpInitialObservation=null,lpInitialParent=null;
       if(lightningPlasmaScaleIn===true){
         const parentId=String(parentStarlightId||sourceTradeId||'');
         if(concept!=='Lightning Plasma' || !parentId){
@@ -2709,6 +2748,10 @@ export class StrategyEngine {
           trace('LP_SCALEIN','BLOCKED','lp_disabled');
           await this.audit('lightning_plasma_scalein_blocked',{concept,ticker:q.ticker,reason:'lp_disabled'});
           return null;
+        }
+        if(!(Number(s.lightningPlasmaFieldStakeCents)>0)
+          ||Number(stakeCents)!==Number(s.lightningPlasmaFieldStakeCents)){
+          trace('LP_SCALEIN','BLOCKED','lp_v5_own_field_stake_changed');return null;
         }
         const thr=Number(s.lightningPlasmaStarlightScaleInCents);
         if(!Number.isFinite(thr)||thr<=0){
@@ -2728,8 +2771,17 @@ export class StrategyEngine {
           await this.audit('lightning_plasma_scalein_blocked',{concept,ticker:q.ticker,reason:eligibility.reason,parentStarlightId:parentId});
           return null;
         }
+        const timing=lightningObservationTiming(parent,s,q);
+        if(!timing.ok){trace('LP_SCALEIN','BLOCKED',timing.reason);return null;}
+        lpInitialParent=parent;
         lpInitialParentAuthority=eligibility;
         lpInitialObservation=parent.lpObservation||null;
+        const observeLpQuote=quote=>{
+          if(String(quote?.ticker)!==exactTicker||Number(quote?.quoteAtMs||quote?.updatedAtMs||0)<lightningObservationStartMs(parent))return;
+          lpInitialObservation=observePlasmaGeometry(lpInitialObservation,quote,parent.entryPriceCents);
+        };
+        observeLpQuote(q);
+        if(typeof this.market?.subscribeQuote==='function')releaseWitness=this.market.subscribeQuote(exactTicker,observeLpQuote);
         const geometry=plasmaGeometryEligibility(lpInitialObservation,s,q);
         if(!geometry.ok){trace('LP_SCALEIN','BLOCKED',geometry.reason);return null;}
         lpInitialParentEntryPriceCents=Number(parent.entryPriceCents);
@@ -2749,21 +2801,13 @@ export class StrategyEngine {
         // Durable seat cap. Counts open and closed so a restart or a second
         // actor cannot exceed Multiply for this parent.
         const multiply=attackMultiplySeats(s,'Lightning Plasma');
-        let used=0;
-        if(typeof this.db?.pool?.query==='function'){
-          try{
-            const r=await this.db.pool.query(
-              "select count(*)::int as n from sag_entries where system_name=$1 and owner_id=$2 and mode=$3 and concept_name='Lightning Plasma' and source_trade_id=$4 and coalesce(execution_class,'CAPITAL')<>'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT' and not (status='rejected' and coalesce(remaining_count,0)=0)",
-              [s.systemName,s.ownerId,s.mode,parentId],
-            );
-            used=Number(r.rows?.[0]?.n||0);
-          }catch{used=multiply;}
+        let seatPlan;
+        try{seatPlan=lightningCapitalSeatPlan(await this.db.lightningPlasmaSeatRows(parentId,s),s,parentId);}
+        catch{trace('LP_SCALEIN','BLOCKED','lp_v5_durable_seat_query_unavailable');return null;}
+        if(!seatPlan.ok||!seatPlan.seats.some(x=>x.seat===Number(stackIndex||1)&&x.attemptGeneration===Number(lightningAttemptGeneration))){
+          trace('LP_SCALEIN','BLOCKED',seatPlan.reason||'multiply_or_generation_occupied');return null;
         }
-        if(used>=multiply){
-          trace('LP_SCALEIN','BLOCKED','multiply_full',{used,multiply});
-          await this.audit('lightning_plasma_scalein_blocked',{concept,ticker:q.ticker,reason:'multiply_full',used,multiply,parentStarlightId:parentId});
-          return null;
-        }
+        const used=seatPlan.occupied;
         fireValidation={ok:true,reason:'lp_scalein_authority',stakeCents:Number(s.lightningPlasmaFieldStakeCents||0),authorizedMaxEntryCents:envelope.maxEntryCents};
         trace('LP_SCALEIN','PASS','starlight_scoped_profit_authority',{parentStarlightId:parentId,thresholdCents:thr,ask,profitCents,used,multiply});
       }
@@ -3141,7 +3185,7 @@ export class StrategyEngine {
       trace('FINAL_ENTRY_POLICY','PASS',finalEntryPolicy.reason,finalEntryPolicy);
       const finalConfirmation=()=>{
         const currentSettings=this.getSettings();
-        if(!sameShadowScope(currentSettings,s) || currentSettings.engineActive===false || (!isModelEnabled(currentSettings,concept) && !((starlightModelClone===true || independentRecovery===true) && ((concept==='Lightning Plasma' && currentSettings.lightningPlasmaEnabled===true) || (concept==='Sagittarius Arrow Recovery' && currentSettings.sagittariusArrowEnabled===true)))) || ((!isShadowSaintConcept(concept)||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true||(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true))&&s.mode==='LIVE'&&!this.getLiveReady(independentRecovery===true?concept:null)))return {ok:false,reason:'execution_authority_changed'};
+        if(!sameShadowScope(currentSettings,s) || currentSettings.engineActive===false || (!isModelEnabled(currentSettings,concept) && !((starlightModelClone===true || independentRecovery===true) && ((concept==='Lightning Plasma' && currentSettings.lightningPlasmaEnabled===true) || (concept==='Sagittarius Arrow Recovery' && currentSettings.sagittariusArrowEnabled===true)))) || ((!isShadowSaintConcept(concept)||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true||(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true))&&s.mode==='LIVE'&&!this.getLiveReady(independentRecovery===true||lightningPlasmaScaleIn===true?concept:null)))return {ok:false,reason:'execution_authority_changed'};
         if(cardIdentity(currentSettings)!==submittedCardIdentity)return {ok:false,reason:'execution_settings_changed'};
         const currentFamily=executionMarketFamilyExclusion(exactTicker,currentSettings,{concept});
         if(currentFamily.blocked)return {ok:false,reason:currentFamily.reason};
@@ -3206,12 +3250,14 @@ export class StrategyEngine {
         if(lightningPlasmaScaleIn===true){
           const at=Date.now();
           const quote=this.market?.getQuote?.(exactTicker)||null;
+          if(quote&&Number(quote.quoteAtMs||quote.updatedAtMs||0)>=lightningObservationStartMs(lpInitialParent))
+            lpInitialObservation=observePlasmaGeometry(lpInitialObservation,quote,lpInitialParentEntryPriceCents);
           const envelope=hunterEntryEnvelope(currentSettings,concept);
           const decision=lightningPlasmaFinalEntrySignal({quote,ticker:exactTicker,
             parentEntryCents:lpInitialParentEntryPriceCents,
             triggerCents:currentSettings.lightningPlasmaStarlightScaleInCents,
             minEntryCents:envelope?.minEntryCents,maxEntryCents:envelope?.maxEntryCents,
-            authorizedAskCents:q.yesAsk,now:at,settings:currentSettings,observation:lpInitialObservation});
+            authorizedAskCents:q.yesAsk,now:at,settings:currentSettings,observation:lpInitialObservation,parent:lpInitialParent});
           if(!decision.ok)return decision;
           if(!envelope || !hunterEntryBoundaryQualifiedAtQuote(concept,quote,currentSettings,plan).ok)
             return {ok:false,reason:'lp_final_entry_guards_changed'};
@@ -3299,6 +3345,12 @@ export class StrategyEngine {
       }
 
       const id = starlightRecovery===true?starlightRecoveryEntryId({...starlightRecoverySnapshot,stackIndex})
+        :independentRecovery===true?independentCapitalId({systemName:s.systemName,ownerId:s.ownerId,
+          mode:s.mode,resetEpoch:Number(s.resetTimestampMs||0),parentEntryId:String(sourceTradeId),
+          concept,seat:Number(stackIndex||1),attemptGeneration:Number(independentAttemptGeneration)})
+        :lightningPlasmaScaleIn===true?lightningCapitalId({systemName:s.systemName,ownerId:s.ownerId,
+          mode:s.mode,resetEpoch:Number(s.resetTimestampMs||0),parentEntryId:String(parentStarlightId||sourceTradeId),
+          seat:Number(stackIndex||1),attemptGeneration:Number(lightningAttemptGeneration)})
         :starlightModelClone===true?modelCloneCapitalId({systemName:s.systemName,ownerId:s.ownerId,
           mode:s.mode,resetEpoch:Number(s.resetTimestampMs||0),parentEntryId:String(sourceTradeId),
           concept,seat:Number(stackIndex||1),attemptGeneration:Number(cloneAttemptGeneration||0)}):nowId();
@@ -3480,7 +3532,9 @@ export class StrategyEngine {
       }
       if(independentRecovery===true){
         frozenEntryConfig.independentRecovery={
-          version:'INDEPENDENT-ATHENA-LOSS-V2',
+          version:'INDEPENDENT-ATHENA-LOSS-V2',lifecycleVersion:INDEPENDENT_LIFECYCLE_VERSION,
+          positionId:id,seat:Number(stackIndex||1),maximumSeats:attackMultiplySeats(s,concept),
+          attemptGeneration:Number(independentAttemptGeneration),
           authorizationId:independentAuthority.authorizationId,
           parentProofHash:independentAuthority.parentProofHash,
           watchAuthorizationId:independentAuthority.watchAuthorizationId,
@@ -3509,7 +3563,8 @@ export class StrategyEngine {
       if(scaleInCapital){
         frozenEntryConfig.executionClass='CAPITAL';
         frozenEntryConfig.lightningPlasmaScaleIn={
-          version:LP_CONTINUATION_VERSION,
+          version:LP_CONTINUATION_VERSION,lifecycleVersion:LP_SEAT_LIFECYCLE_VERSION,
+          seat:Number(stackIndex||1),attemptGeneration:Number(lightningAttemptGeneration),
           parentAuthorityRevision:lpInitialParentAuthority.revision,
           parentEntryPriceCents:lpInitialParentEntryPriceCents,parentKind:lpInitialParentAuthority.kind,
           parentStarlightId:String(parentStarlightId||sourceTradeId),
@@ -3561,6 +3616,17 @@ export class StrategyEngine {
               // A delayed write cannot commit a SIM fill after the signal died.
               await this.db.insertStarlightCapitalEntry(entry,{isCurrent:()=>finalConfirmation().ok===true});
             }else if(lightningPlasmaScaleIn===true){
+              const confirmation=finalConfirmation();
+              if(!confirmation.ok)throw new Error(confirmation.reason);
+              if(typeof this.db.persistLightningPlasmaObservation!=='function')throw new Error('lp_v5_observation_persistence_unavailable');
+              await this.db.persistLightningPlasmaObservation(lpInitialParent,lpInitialObservation,s);
+              const final=finalConfirmation();
+              if(!final.ok)throw new Error(final.reason);
+              Object.assign(entry.entryConfig.lightningPlasmaScaleIn,{
+                observationQuoteAtMs:Number(lpInitialObservation?.lastQuoteAtMs||0),
+                crashDepth:Number(lpInitialObservation?.crashDepth||0),reboundCents:Number(lpInitialObservation?.reboundCents||0),
+                upwardTicks:Number(lpInitialObservation?.upwardTicks||0)});
+              entry.entryConfig.finalEntryConfirmation=structuredClone(final);
               await this.db.insertLightningPlasmaScaleInEntry(entry,{isCurrent:()=>finalConfirmation().ok===true});
             }else throw new Error('capital_parent_authority_missing');
             return true;
@@ -3649,7 +3715,7 @@ export class StrategyEngine {
       // any broker BUY can occur. A crash/network ambiguity after submission is
       // therefore recoverable by entryClientOrderId instead of becoming an
       // unowned broker position.
-      if(!this.getLiveReady(independentRecovery===true?concept:null)){trace('EXECUTION','BLOCKED','live_not_ready');return null;}
+      if(!this.getLiveReady(independentRecovery===true||lightningPlasmaScaleIn===true?concept:null)){trace('EXECUTION','BLOCKED','live_not_ready');return null;}
 
       // LIVE shard preflight is execution infrastructure, not trading doctrine.
       // Resolve Kalshi's authoritative market shard, prove that shard has the
@@ -3678,7 +3744,7 @@ export class StrategyEngine {
       // Independent Athena-loss LP/Arrow starts join the same native pending
       // cash admission fence as GH/CW/SN/PR. Normal SIM and other attack
       // qualification policies remain untouched.
-      if(independentRecovery===true){
+      if(independentRecovery===true||lightningPlasmaScaleIn===true){
         const cashWitness=createQ17LiveCashWitness(e,shardPreflight);
         if(!cashWitness.ok){
           trace('EXECUTION','BLOCKED',cashWitness.reason,{hunterId:e.id});
@@ -3719,9 +3785,12 @@ export class StrategyEngine {
       const confirmLiveEntryDispatch=()=>{
         const current=finalConfirmation();recordFinalConfirmation(current);
         if(!current.ok)return current;
-        return liveEntryDispatchBookConfirmation({execution:dispatchExecution,market:this.market,
+        const bookConfirmation=liveEntryDispatchBookConfirmation({execution:dispatchExecution,market:this.market,
           ticker:exactTicker,eventTicker:expectedEventTicker,count:plannedCount,
           limitCents:Number(q.yesAsk),maximumBookAgeMs:5000});
+        if(bookConfirmation.ok)trace('DISPATCH_ADMITTED','PASS','transport_authorized',
+          {hunterId:id,entryClientOrderId});
+        return bookConfirmation;
       };
       try{
         const confirmation=finalConfirmation();recordFinalConfirmation(confirmation);
@@ -3811,7 +3880,7 @@ export class StrategyEngine {
                 ticker:exactTicker,parentEntryCents:lpInitialParentEntryPriceCents,
                 triggerCents:currentSettings.lightningPlasmaStarlightScaleInCents,
                 minEntryCents:envelope?.minEntryCents,maxEntryCents:envelope?.maxEntryCents,
-                authorizedAskCents:q.yesAsk,now:Date.now(),settings:currentSettings,observation:lpInitialObservation});
+                authorizedAskCents:q.yesAsk,now:Date.now(),settings:currentSettings,observation:lpInitialObservation,parent:lpInitialParent});
               if(!freshSignal.ok)return freshSignal;
               if(!hunterEntryBoundaryQualifiedAtQuote(concept,refreshed.freshMarket,currentSettings,refreshed).ok)
                 return {ok:false,reason:'lp_live_queued_entry_guards_changed'};

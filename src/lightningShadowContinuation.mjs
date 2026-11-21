@@ -3,6 +3,7 @@
  * fictional broker receipt is manufactured to make a virtual LIVE parent pass.
  */
 import {authorityHash,verifyAthenaFireCommandHash} from './authority.mjs';
+import {LP_SEAT_LIFECYCLE_VERSION,LP_MAX_RETRY_GENERATION,LP_CERTIFIED_NO_SEND_SQL} from './lightningCapitalLifecycle.mjs';
 import {isShadowSaintEntry,AURORA_EXECUTION} from './doctrine.mjs';
 import {SHADOW_PROTOCOL,shadowEntryHash,sameShadowScope} from './shadowProtocol.mjs';
 import {STARLIGHT_SHADOW_VERSION} from './shadowStarlight.mjs';
@@ -23,6 +24,27 @@ export const lightningParentProof=(e)=>({...capitalParentProof(e),
   entryOrderId:e.entryOrderId||null,entryClientOrderId:e.entryClientOrderId||null,
   entryFillAuthoritative:e.entryConfig?.entryFillProof?.authoritative===true});
 export const lightningClosedProfitProof=()=>false;
+// A pending-order timestamp cannot lend pre-fill price history to a funded
+// continuation. The authenticated receipt and durable enrolment delimit the
+// first usable observation; the operator's own observation clock starts here.
+export function lightningObservationStartMs(parent){
+  const opened=Number(parent?.openedAtMs||0),enrolled=Number(parent?.lpContinuation?.enrolledAtMs||0);
+  if(!(opened>0))return null;
+  if(parent?.mode==='LIVE'){
+    const filled=Number(parent?.entryConfig?.entryFillProof?.observedAtMs||0);
+    if(!Number.isSafeInteger(filled)||filled<opened)return null;
+    return Math.max(opened,filled,enrolled);
+  }
+  return Math.max(opened,enrolled);
+}
+export function lightningObservationTiming(parent,settings,quote,now=Date.now()){
+  const start=lightningObservationStartMs(parent),at=Number(quote?.quoteAtMs||quote?.updatedAtMs||0);
+  if(start===null||!(at>=start)||at>now||now-at>5000)
+    return {ok:false,reason:'lp_v5_quote_before_parent_fill_or_stale'};
+  const wait=settings?.lightningPlasmaLinkEnabled===true?0:Math.max(0,Number(settings?.lightningPlasmaObservationMinutes||0))*60000;
+  if(at<start+wait)return {ok:false,reason:'lp_v5_parent_observation_wait',releaseAtMs:start+wait};
+  return {ok:true,startAtMs:start,releaseAtMs:start+wait};
+}
 export function lightningParentEligibility(parent,settings={}, {ticker=null,strictScope=true}={}){
   const e=parent||{},a=e.lpContinuation;
   const fail=reason=>({ok:false,reason});
@@ -88,6 +110,12 @@ export function observePlasmaGeometry(state,quote,openingPrice){
     upwardTicks:ticks,lastBid:bid,lastQuoteAtMs:at,observations:Number(old.observations||0)+1};
 }
 export function plasmaGeometryEligibility(observation,settings={},quote=null){
+  // LINK bypasses only this route's observation/geometry and price band.
+  // Parent fill, original-entry rise, executable book, fees and cash still
+  // pass their separate gates at strategy, commit and dispatch boundaries.
+  if(settings.lightningPlasmaLinkEnabled===true)return {ok:true,link:true,
+    crashDepth:Number(observation?.crashDepth||0),reboundCents:Number(observation?.reboundCents||0),
+    upwardTicks:Number(observation?.upwardTicks||0),quoteAtMs:Number(quote?.quoteAtMs||0)};
   const minCrash=Math.max(0,Number(settings.lightningPlasmaMinCrashCents||0));
   const minRebound=Math.max(0,Number(settings.lightningPlasmaMinReboundCents||0));
   const minTicks=Math.max(0,Math.floor(Number(settings.lightningPlasmaMinUpwardTicks||0)));
@@ -333,115 +361,20 @@ create or replace function sag_lp_v5_parent_eligible(p sag_entries,a sag_lp_cont
   and a.state='OPEN' and a.revision>0 and a.proof=sag_lp_v5_parent_proof(p),false);$$;
 create or replace function sag_lp_v5_child_admission() returns trigger language plpgsql as $$
 declare p sag_entries;a sag_lp_continuation_v5;s jsonb;stamp jsonb;q jsonb;aurora jsonb;
- obs sag_lp_v5_observations;seats int;at_ms bigint;w record;rec jsonb;
+ obs sag_lp_v5_observations;seats int;at_ms bigint;generation bigint;chosen_seat int;prior_count bigint;
+ prior_min bigint;prior_max bigint;prior_certified bigint;prior_distinct bigint;
 begin
  if NEW.concept_name<>'Lightning Plasma' or NEW.execution_class='SHADOW_SAINT'
   or NEW.entry_config->>'executionClass'='SHADOW_SAINT' then return NEW;end if;
- -- SC clone authority is a distinct BEFORE INSERT fence installed in the SAME
- -- schema transaction. This never grants permission by a JSON boolean alone.
- -- The transaction-local GUC is set ONLY after locked JavaScript admission.
+ -- R15: new capital LP has exactly one parent route. Old independent and
+ -- model-clone entries remain in the ledger; INSERT cannot restore them.
  if NEW.entry_config->>'starlightModelClone'='true'
-   and NEW.entry_config#>>'{modelCloneCapital,version}'='SC-MODEL-CLONE-V1'
-   and current_setting('sagittarius.model_clone_entry',true)='admitted'
- then return NEW;end if;
- -- Q17-R5: the R4 independent Athena-hard-stop CAPITAL route is NOT the
- -- retired Starlight-profit LP-V5 scale-in route. Its own atomic JavaScript
- -- admission holds settings, shadow-parent, watch and event-cap locks and sets
- -- this transaction-local capability only after all checks have passed.
- -- Revalidate durable facts here; a JSON stamp alone is never authority.
- if NEW.entry_config#>>'{independentRecovery,version}'='INDEPENDENT-ATHENA-LOSS-V2' then
-   rec:=NEW.entry_config->'independentRecovery';
-   if current_setting('sagittarius.independent_recovery_entry',true) is distinct from 'admitted'
-     or NEW.execution_class is distinct from 'CAPITAL'
-     or NEW.entry_config->>'executionClass' is distinct from 'CAPITAL'
-     or NEW.mode not in ('SIMULATION','LIVE')
-     or (NEW.mode='SIMULATION' and (NEW.status<>'open' or NEW.entry_client_order_id is not null))
-     or (NEW.mode='LIVE' and (NEW.status<>'entry_pending' or NEW.entry_client_order_id is null))
-     or NEW.entry_order_id is not null or NEW.remaining_count<>NEW.count or NEW.count<=0
-     or NEW.entry_price_cents<=0 or NEW.entry_price_cents>=100
-     or NEW.entry_config#>>'{freezingCoffin,enabled}'='true'
-   then raise exception 'lp_independent_atomic_admission_required';end if;
-   select value into s from sag_settings where key='runtime' for update;
-   if s->>'engineActive' is distinct from 'true'
-     or s->>'lightningPlasmaEnabled' is distinct from 'true'
-     or s->>'mode' is distinct from NEW.mode
-     or (NEW.mode='LIVE' and (s->>'liveArmed' is distinct from 'true'
-       or s->>'liveOwnerAuthorized' is distinct from 'true'))
-     or s->>'systemName' is distinct from NEW.system_name
-     or s->>'ownerId' is distinct from NEW.owner_id
-     or (s->>'resetTimestampMs')::bigint is distinct from (rec->>'resetEpoch')::bigint
-     or rec->>'concept' is distinct from 'Lightning Plasma'
-     or rec->>'parentEntryId' is distinct from NEW.source_trade_id
-     or rec->>'authorizationId' is distinct from NEW.entry_config#>>'{independentAuthority,authorizationId}'
-     or rec->>'parentProofHash' is distinct from NEW.entry_config#>>'{independentAuthority,parentProofHash}'
-     or rec->>'watchAuthorizationId' is distinct from NEW.entry_config#>>'{independentAuthority,watchAuthorizationId}'
-     or (rec->>'watchRevision')::bigint is distinct from
-       (NEW.entry_config#>>'{independentAuthority,watchRevision}')::bigint
-     or NEW.entry_config#>>'{independentAuthority,authorityMode}' is distinct from 'INDEPENDENT_ATHENA_SHADOW_STOP'
-     or NEW.entry_config#>>'{independentAuthority,verifiedStop}' is distinct from 'true'
-     or NEW.entry_config#>>'{independentAuthority,mode}' is distinct from NEW.mode
-     or NEW.entry_config#>>'{independentAuthority,systemName}' is distinct from NEW.system_name
-     or NEW.entry_config#>>'{independentAuthority,ownerId}' is distinct from NEW.owner_id
-     or NEW.entry_config#>>'{independentAuthority,ticker}' is distinct from NEW.ticker
-     or NEW.entry_config#>>'{independentAuthority,eventTicker}' is distinct from NEW.event_ticker
-     or (NEW.entry_config#>>'{independentAuthority,resetEpoch}')::bigint is distinct from (rec->>'resetEpoch')::bigint
-     or NEW.entry_price_cents<=0 or NEW.entry_price_cents>=100
-     or NEW.entry_price_cents > (NEW.entry_config#>>'{independentAuthority,authorizedMaxEntryCents}')::numeric
-     or NEW.entry_config->>'auroraDamageControlPercent' is distinct from s->>'lightningPlasmaAuroraDamageControlPercent'
-     or (NEW.mode='SIMULATION' and NEW.entry_config#>>'{aurora,frozen}' is distinct from 'true')
-   then raise exception 'lp_independent_operator_scope_or_price_invalid';end if;
-   select * into w from sag_independent_recovery_v1 where
-     system_name=NEW.system_name and owner_id=NEW.owner_id and mode=NEW.mode
-     and reset_epoch=(rec->>'resetEpoch')::bigint
-     and authorization_id=rec->>'watchAuthorizationId'
-     and concept='Lightning Plasma' and parent_entry_id=NEW.source_trade_id for update;
-   select * into p from sag_entries where id=NEW.source_trade_id for share;
-   if w.authorization_id is null or p.id is null
-     or w.status is distinct from 'WATCHING'
-     or w.revision is distinct from (rec->>'watchRevision')::bigint
-     or w.watch->>'qualified' is distinct from 'true'
-     or (w.watch->>'lastQuoteAtMs')::bigint is distinct from (rec->>'signalQuoteAtMs')::bigint
-     or w.watch->>'lastQuoteEpoch' is distinct from rec->>'signalQuoteEpoch'
-     or (w.watch->>'lastQuoteRevision')::bigint is distinct from (rec->>'signalQuoteRevision')::bigint
-     or (rec->>'signalQuoteAtMs')::bigint not between
-       (extract(epoch from clock_timestamp())*1000)::bigint-5000
-       and (extract(epoch from clock_timestamp())*1000)::bigint
-     or (w.watch->>'releaseAtMs')::bigint>NEW.opened_at_ms
-     or (w.watch->>'link') is distinct from (s->>'lightningPlasmaLinkEnabled')
-     or (coalesce((w.watch->>'link')::boolean,false)=false and
-       NEW.entry_price_cents not between (s->>'lightningPlasmaMinEntryCents')::numeric
-       and (s->>'lightningPlasmaMaxEntryCents')::numeric)
-     or (coalesce((w.watch->>'link')::boolean,false)=false and
-       (w.watch->>'crashDepthCents')::numeric<coalesce((s->>'lightningPlasmaMinCrashCents')::numeric,0))
-     or (coalesce((w.watch->>'link')::boolean,false)=false and
-       (w.watch->>'reboundCents')::numeric<coalesce((s->>'lightningPlasmaMinReboundCents')::numeric,0))
-     or (coalesce((w.watch->>'link')::boolean,false)=false and
-       (w.watch->>'upwardTicks')::int<coalesce((s->>'lightningPlasmaMinUpwardTicks')::int,0))
-     or w.watch->>'independentRecovery' is distinct from 'true'
-     or w.watch->>'authorization' is distinct from 'VALID_SHADOW_HARD_STOP'
-     or w.watch->>'parentConcept' is distinct from 'Athena Exclamation'
-     or w.watch->>'ticker' is distinct from NEW.ticker
-     or w.watch->>'eventTicker' is distinct from NEW.event_ticker
-     or p.concept_name is distinct from 'Athena Exclamation'
-     or p.execution_class is distinct from 'SHADOW_SAINT'
-     or p.archived is distinct from false or p.status is distinct from 'closed'
-     or p.close_reason is distinct from 'hard_stop_loss'
-     or p.pnl_cents is null or p.pnl_cents>=0 or p.remaining_count<>0
-     or p.ticker is distinct from NEW.ticker or p.event_ticker is distinct from NEW.event_ticker
-     or p.system_name is distinct from NEW.system_name or p.owner_id is distinct from NEW.owner_id
-     or p.mode is distinct from NEW.mode
-     or p.shadow_epoch is distinct from (rec->>'resetEpoch')::bigint
-     or not exists(select 1 from sag_shadow_stops_v3 v
-       where v.parent_entry_id=p.id and v.system_name=NEW.system_name
-       and v.owner_id=NEW.owner_id and v.mode=NEW.mode
-       and v.reset_epoch=(rec->>'resetEpoch')::bigint
-       and v.proof_hash=rec->>'parentProofHash'
-       and v.proof->>'authorization'='VALID_SHADOW_HARD_STOP')
-   then raise exception 'lp_independent_durable_parent_or_watch_invalid';end if;
-   return NEW;
- end if;
+   or NEW.entry_config->'independentRecovery' is not null
+   or current_setting('sagittarius.lp_v5_entry',true) is distinct from 'admitted'
+ then raise exception 'lp_v5_atomic_capital_parent_route_required';end if;
  stamp:=NEW.entry_config->'lightningPlasmaScaleIn';
  if stamp->>'version' is distinct from '${LP_CONTINUATION_VERSION}'
+  or stamp->>'lifecycleVersion' is distinct from '${LP_SEAT_LIFECYCLE_VERSION}'
   then raise exception 'lp_v5_capital_starlight_build_required';end if;
  select value into s from sag_settings where key='runtime' for update;
  select * into p from sag_entries where id=NEW.source_trade_id for update;
@@ -449,7 +382,7 @@ begin
  if coalesce(s->>'engineActive','false')<>'true' or s->>'lightningPlasmaEnabled'<>'true'
   or NEW.system_name is distinct from s->>'systemName'
   or NEW.owner_id is distinct from s->>'ownerId' or NEW.mode is distinct from s->>'mode'
-  or (NEW.mode='LIVE' and s->>'liveArmed'<>'true')
+  or (NEW.mode='LIVE' and (s->>'liveArmed' is distinct from 'true' or s->>'liveOwnerAuthorized' is distinct from 'true'))
   or not sag_lp_v5_parent_eligible(p,a,s)
   or p.ticker is distinct from NEW.ticker or p.event_ticker is distinct from NEW.event_ticker
  then raise exception 'lp_v5_parent_or_operator_ineligible';end if;
@@ -463,17 +396,22 @@ begin
  q:=NEW.entry_config->'finalEntryConfirmation';
  select * into obs from sag_lp_v5_observations where parent_entry_id=p.id for update;
  if not coalesce(q->>'ok'='true'
-  and (q->>'quoteAtMs')::bigint between greatest(p.opened_at_ms,at_ms-5000) and at_ms
+  and (q->>'quoteAtMs')::bigint between greatest(p.opened_at_ms,a.enrolled_at_ms,at_ms-5000,
+    case when p.mode='LIVE' then coalesce((p.entry_config#>>'{entryFillProof,observedAtMs}')::bigint,9223372036854775807) else p.opened_at_ms end) and at_ms
+  and (s->>'lightningPlasmaLinkEnabled'='true' or (q->>'quoteAtMs')::bigint>=greatest(p.opened_at_ms,a.enrolled_at_ms,
+    case when p.mode='LIVE' then coalesce((p.entry_config#>>'{entryFillProof,observedAtMs}')::bigint,9223372036854775807) else p.opened_at_ms end)
+    +coalesce((s->>'lightningPlasmaObservationMinutes')::numeric,0)*60000)
   and (q->>'bidCents')::numeric-p.entry_price_cents>=(stamp->>'thresholdCents')::numeric
   and (stamp->>'thresholdCents')::numeric>0
   and (q->>'askCents')::numeric>=(q->>'bidCents')::numeric
-  and NEW.entry_price_cents between (s->>'lightningPlasmaMinEntryCents')::numeric
-                                  and (s->>'lightningPlasmaMaxEntryCents')::numeric
+  and NEW.entry_price_cents between case when s->>'lightningPlasmaLinkEnabled'='true' then 1 else (s->>'lightningPlasmaMinEntryCents')::numeric end
+                                  and case when s->>'lightningPlasmaLinkEnabled'='true' then 99 else (s->>'lightningPlasmaMaxEntryCents')::numeric end
   and NEW.count>0 and NEW.remaining_count=NEW.count
+  and NEW.count=trunc(NEW.count) and NEW.entry_price_cents*NEW.count<=(s->>'lightningPlasmaFieldStakeCents')::numeric
   and ((NEW.mode='SIMULATION' and NEW.status='open' and NEW.entry_client_order_id is null)
     or (NEW.mode='LIVE' and NEW.status='entry_pending' and nullif(NEW.entry_client_order_id,'') is not null)),false)
  then raise exception 'lp_v5_final_signal_or_execution_invalid';end if;
- if (coalesce((s->>'lightningPlasmaMinCrashCents')::numeric,0)>0
+ if coalesce(s->>'lightningPlasmaLinkEnabled','false')<>'true' and (coalesce((s->>'lightningPlasmaMinCrashCents')::numeric,0)>0
      or coalesce((s->>'lightningPlasmaMinReboundCents')::numeric,0)>0
      or coalesce((s->>'lightningPlasmaMinUpwardTicks')::int,0)>0)
   and (obs.parent_entry_id is null or obs.quote_at_ms<>(q->>'quoteAtMs')::bigint
@@ -495,17 +433,30 @@ begin
   and coalesce(NEW.entry_config#>>'{freezingCoffin,enabled}','false')<>'true'
   and (NEW.mode<>'LIVE' or NEW.entry_config#>>'{auroraPending,exactFillRequired}'='true'),false)
  then raise exception 'lp_v5_own_aurora_required';end if;
- select count(*) into seats from sag_entries where system_name=NEW.system_name
-  and owner_id=NEW.owner_id and mode=NEW.mode and concept_name='Lightning Plasma'
-  and source_trade_id=NEW.source_trade_id and execution_class<>'SHADOW_SAINT'
-  and not(status='rejected' and remaining_count=0);
- if seats>=greatest(1,least(20,coalesce((s->>'lightningPlasmaMultiply')::int,1)))
-  then raise exception 'lp_v5_multiply_full';end if;
+ chosen_seat:=(stamp->>'seat')::int;generation:=(stamp->>'attemptGeneration')::bigint;
+ if chosen_seat is null or generation is null or chosen_seat<1
+  or chosen_seat>greatest(1,least(20,coalesce((s->>'lightningPlasmaMultiply')::int,1)))
+  or generation<0 or generation>${LP_MAX_RETRY_GENERATION}
+ then raise exception 'lp_v5_seat_generation_invalid';end if;
+ select count(*),min((e.entry_config#>>'{lightningPlasmaScaleIn,attemptGeneration}')::bigint),
+    max((e.entry_config#>>'{lightningPlasmaScaleIn,attemptGeneration}')::bigint),
+    count(*) filter(where coalesce(${LP_CERTIFIED_NO_SEND_SQL},false)),
+    count(distinct (e.entry_config#>>'{lightningPlasmaScaleIn,attemptGeneration}')::bigint)
+   into prior_count,prior_min,prior_max,prior_certified,prior_distinct
+   from sag_entries e left join sag_lp_v5_no_send_v1 c on c.entry_id=e.id
+   where e.system_name=NEW.system_name and e.owner_id=NEW.owner_id and e.mode=NEW.mode
+    and e.concept_name='Lightning Plasma' and e.source_trade_id=NEW.source_trade_id
+    and e.execution_class='CAPITAL'
+    and (e.entry_config#>>'{lightningPlasmaScaleIn,seat}')::int=chosen_seat;
+ if prior_certified<>prior_count then raise exception 'lp_v5_seat_prior_intent_unresolved';end if;
+ if prior_count<>generation or prior_distinct<>prior_count
+  or (prior_count>0 and (prior_min<>0 or prior_max<>generation-1))
+ then raise exception 'lp_v5_retry_generation_not_next';end if;
  return NEW;
 end $$;
 -- V4 table persists for existing records; only the V5 insert guard remains.
 -- V4 has no new admission rights. PostgreSQL fires ALL BEFORE INSERT
--- triggers, so retaining V4 here would reject the independent Athena route.
+-- triggers, so retaining V4 here would reject the CAPITAL Starlight route.
 drop trigger if exists sag_lp_v4_entry_guard on sag_entries;
 drop trigger if exists sag_lp_v5_entry_guard on sag_entries;
 create trigger sag_lp_v5_entry_guard before insert on sag_entries

@@ -115,9 +115,11 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
   const settlementUnverified=capital&&row.mode==='LIVE'&&actualExposure
     &&mark?.reason==='broker_settlement_not_reconciled';
   const unresolved=historicalUnresolved||settlementUnverified;
-  const fees=historyUnknown?null:(num(row.entryFeeCents)||0)+(num(row.exitFeeCents)||0);
-  const realized=historyUnknown?null:(num(row.pnlCents)||0);
-  const unrealized=closedInSnapshot?0:historyUnknown||unresolved?null:capital
+  const recordedFees=historyUnknown?null:(num(row.entryFeeCents)||0)+(num(row.exitFeeCents)||0);
+  const recordedRealized=historyUnknown?null:(num(row.pnlCents)||0);
+  const fees=unresolved?null:recordedFees;
+  const realized=unresolved?null:recordedRealized;
+  const unrealized=historyUnknown||unresolved?null:closedInSnapshot?0:capital
     ?actualExposure?(mark?.complete===true?num(mark.unrealizedCents):null):0
     :(num(row.pnlCents)||0);
   const qty=num(row.count)||0;
@@ -164,10 +166,13 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
     status:closedInSnapshot?'closed':closedAfterCutoff?'unknown_at_cutoff':row.status,
     capitalPositionConfirmed:capital?(closedInSnapshot?qty>0:historyUnknown?null:actualExposure):null,
     economicStateComplete:!historyUnknown&&!unresolved,financialReconciliationRequired:unresolved,reportingVersion:EXECUTION_REPORT_VERSION,
+    financialCloseEvidence:historicalUnresolved?{status:'UNRESOLVED',reason:row.closeReason||row.status,
+      economicClosure:false,source:'persisted_broker_flat_or_orphan_evidence'}:null,
     openedAtMs:opened,closedAtMs:closedInSnapshot?closed:null,
     entryPriceCents:num(row.entryPriceCents),exitPriceCents:closedInSnapshot?num(row.exitPriceCents):null,
     quantity:qty,remainingQuantity:historyUnknown?null:num(row.remainingCount),exitFilledQuantity:historyUnknown?null:num(row.exitFilledCount),
-    feesCents:fees,realizedNetCents:realized,unrealizedNetCents:unrealized,
+    feesCents:fees,recordedFeesCents:recordedFees,realizedNetCents:realized,
+    recordedRealizedNetCents:recordedRealized,unrealizedNetCents:unrealized,
     exitReason:closedInSnapshot?row.closeReason||null:null,
     admissionReason:!historyUnknown&&row.status==='rejected'?row.closeReason||null:null,
     // Persisted LOCAL pre-dispatch reason, never inferred from missing fills.
@@ -205,8 +210,11 @@ export function reconcileLedger(records){
       // A terminal-market LIVE position is still an open, funded ledger
       // position until reconciliation commits its closure. Preserve its
       // count and known partial proceeds; do not turn it into a non-position.
-      if(r.status==='reconciliation_orphaned'){
-        fees+=Number(r.feesCents)||0;a.knownFees+=Number(r.feesCents)||0;
+      if(r.status==='reconciliation_orphaned'||r.status==='closed'){
+        const knownFees=Number(r.recordedFeesCents??r.feesCents)||0;
+        const knownRealized=Number(r.recordedRealizedNetCents)||0;
+        fees+=knownFees;a.knownFees+=knownFees;realized+=knownRealized;a.knownRealized+=knownRealized;
+        contracts+=Number(r.quantity)||0;groups.add(r.cloneGroupId||r.positionId);events.add(`${r.eventTicker}|${r.attack}`);
         continue;
       }
     }
@@ -214,9 +222,11 @@ export function reconcileLedger(records){
     const openStatus=['open','entry_pending','exit_pending','pending_recovery'].includes(r.status);
     const isOpen=openStatus&&(r.executionClass==='CAPITAL'?r.capitalPositionConfirmed===true:Number(r.remainingQuantity??r.quantity)>0);
     if(!isClosed&&!isOpen){nonPositions++;if(r.status==='entry_pending'){pending++;a.pending++;}if(r.status==='unknown_at_cutoff'){unrealizedComplete=false;a.unrealizedComplete=false;}continue;}
-    contracts+=Number(r.quantity)||0;fees+=Number(r.feesCents)||0;a.knownFees+=Number(r.feesCents)||0;if(r.feesCents==null){feesComplete=false;a.feesComplete=false;}
+    contracts+=Number(r.quantity)||0;
+    const knownFees=Number(r.recordedFeesCents??r.feesCents)||0;fees+=knownFees;a.knownFees+=knownFees;if(r.feesCents==null){feesComplete=false;a.feesComplete=false;}
     groups.add(r.cloneGroupId||r.positionId);events.add(`${r.eventTicker}|${r.attack}`);
-    if(r.realizedNetCents==null){realizedComplete=false;a.realizedComplete=false;}
+    if(r.realizedNetCents==null){realizedComplete=false;a.realizedComplete=false;
+      if(r.financialReconciliationRequired===true){realized+=Number(r.recordedRealizedNetCents)||0;a.knownRealized+=Number(r.recordedRealizedNetCents)||0;}}
     else {realized+=Number(r.realizedNetCents);a.knownRealized+=Number(r.realizedNetCents);}
     if(isClosed){closed++;a.closed++;
       if(r.realizedNetCents>0){wins++;a.wins++;gains+=r.realizedNetCents;}

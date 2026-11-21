@@ -4,12 +4,15 @@ import {createLiveFundingStore,LIVE_FUNDING_JOURNAL_SQL} from './liveFundingJour
 import {maximumSettlementNetAdmission,frozenRecoveryEconomicTargetMatches} from './executionEconomics.mjs';
 import {OPS_SCHEMA_SQL} from './operationalSafety.mjs';
 import {authorityHash} from './authority.mjs';
+import {INDEPENDENT_LIFECYCLE_VERSION,INDEPENDENT_LIFECYCLE_SQL,INDEPENDENT_MAX_RETRY_GENERATION,independentCapitalId,independentSeatState} from './independentRecoveryLifecycle.mjs';
 import {loadOrCreateCloneIdentity} from './cloneIdentity.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_SQL} from './athenaStarlightTrigger.mjs';
 import {LP_CONTINUATION_MIGRATION_SQL} from './lightningContinuation.mjs';
-import {LP_CONTINUATION_VERSION,LP_SHADOW_CONTINUATION_SQL,LP_V5_SQL,mapLightningAuthority,lightningParentEligibility,lightningEntryAuroraProof} from './lightningShadowContinuation.mjs';
+import {LP_CONTINUATION_VERSION,LP_SHADOW_CONTINUATION_SQL,LP_V5_SQL,mapLightningAuthority,lightningParentEligibility,lightningEntryAuroraProof,lightningObservationTiming,lightningObservationStartMs} from './lightningShadowContinuation.mjs';
+import {LP_NO_SEND_SQL,LP_SEAT_LIFECYCLE_VERSION,LP_MAX_RETRY_GENERATION,LP_CERTIFIED_NO_SEND_SQL,lightningCapitalId,lightningCapitalSeatPlan,lightningCertifiedLocalNoSend} from './lightningCapitalLifecycle.mjs';
 import {STARLIGHT_SHADOW_SQL,APS2_VERSION} from './shadowStarlight.mjs';
 import {STARLIGHT_CAPITAL_VERSION,STARLIGHT_CAPITAL_SQL,starlightCapitalAdmission,starlightNoSendRetryGeneration,starlightLocalNoSendProof,starlightPreDispatchNoSendReason,starlightNoSendChildrenForRearm} from './starlightCapital.mjs';
+import {SC1_NO_SEND_HISTORY_SQL,prepareSC1NoSendHistory,readSC1UncertifiedChildren,archiveSC1NoSendProof,commitSC1NoSendGeneration} from './starlightNoSendHistory.mjs';
 import {MODEL_CLONE_CAPITAL_VERSION,MODEL_CLONE_CAPITAL_SQL,modelCloneAdmission,modelCloneCertifiedLocalNoSend,modelCloneCapitalId,MODEL_CLONE_MAX_RETRY_GENERATION} from './modelCloneCapital.mjs';
 import {GREAT_HORN_SQL,verifiedLightningLoss,greatHornWatchFromLoss,greatHornObservationStep,greatHornAdmissionDecision,greatHornOperatorBandAllowed,greatHornSpreadAllowed,GH_CONCEPT} from './greatHornRecovery.mjs';
 import {GH_SIM_VERSION,GH_LIVE_VERSION,greatHornSettingsFingerprint} from './greatHornSimCapital.mjs';
@@ -21,7 +24,7 @@ import {PEGASUS_RYU_SEI_KEN_RECOVERY_SQL,verifiedScarletNeedleRecoveryLoss,pegas
 import {PR_SIM_VERSION,PR_LIVE_VERSION,pegasusRyuSeiKenCapitalSettingsFingerprint} from './pegasusRyuSeiKenCapitalSimCapital.mjs';
 import {CRYSTAL_WALL_RECOVERY_SQL,verifiedGreatHornLoss,crystalWallRecoveryWatchFromLoss,crystalWallRecoveryObservationStep,crystalWallRecoveryAdmissionDecision,crystalWallRecoveryOperatorBandAllowed,crystalWallRecoverySpreadAllowed,CW_CONCEPT} from './crystalWallRecovery.mjs';
 import {CW_SIM_VERSION,CW_LIVE_VERSION,crystalWallRecoverySettingsFingerprint} from './crystalWallSimCapital.mjs';
-import {ACTUAL_OPEN_SQL,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
+import {ACTUAL_OPEN_SQL,UNRESOLVED_FUNDED_SQL,unresolvedFundedSql,financialHistoryState,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
 import pg from 'pg';
 import { ShadowStore, SHADOW_SCHEMA_SQL } from './shadowStore.mjs';
 import { SHADOW_PROTOCOL, SHADOW_RUNTIME_LOCK, executionSettingsHashMatches, validateShadowEntryWitness, CAPITAL_SQL, SHADOW_SQL, STARLIGHT_SQL } from './shadowProtocol.mjs';
@@ -147,6 +150,7 @@ const rowEntry = (r) => ({
   researchTrackingComplete:Boolean(r.research_tracking_complete),
   entryConfig:r.entry_config && typeof r.entry_config==='object' ? r.entry_config : {},
   cloneNoSendCertified:r.clone_no_send_certified===true,
+  lpNoSendCertified:r.lp_no_send_certified===true,
   feederState:r.feeder_state && typeof r.feeder_state==='object' ? r.feeder_state : {},
   stopGuardState:r.stop_guard_state && typeof r.stop_guard_state==='object' ? r.stop_guard_state : {},
   profitGuardState:r.profit_guard_state && typeof r.profit_guard_state==='object' ? r.profit_guard_state : {},
@@ -807,11 +811,15 @@ export class Database {
       this.startupStage='athena_starlight_schema';
       await client.query(ATHENA_STARLIGHT_TRIGGER_SQL);
       this.startupStage='starlight_capital_schema';
+      await client.query(SC1_NO_SEND_HISTORY_SQL);
       await client.query(STARLIGHT_CAPITAL_SQL);
       this.startupStage='lightning_capital_v5_schema';
+      await client.query(LP_NO_SEND_SQL);
       await client.query(LP_V5_SQL);
       this.startupStage='starlight_model_clone_schema';
       await client.query(MODEL_CLONE_CAPITAL_SQL);
+      this.startupStage='independent_recovery_lifecycle';
+      await client.query(INDEPENDENT_LIFECYCLE_SQL);
       this.startupStage='execution_reporting_schema';
       await client.query(EXECUTION_REPORT_MIGRATION_SQL);
       this.startupStage='authority_commit';
@@ -1256,6 +1264,15 @@ export class Database {
 
 
   // MEGAWAVE SN2: cloned GH durable watch and verified-parent replay path.
+  async verifyIndependentArrowRecoveryOrigin(parent,settings,client=this.pool){
+    if(parent?.entryConfig?.independentRecovery==null)return {ok:true};
+    // Financial loss/lineage is checked by the caller. Re-read the original
+    // durable Athena proof under the same transaction before any new watch or
+    // seat. A version flag or historical net loss is never enough.
+    const result=await client.query('select sag_r15_independent_arrow_origin(e,$2::bigint) as ok from sag_entries e where e.id=$1',
+      [parent.id,Number(settings.resetTimestampMs||0)]);
+    return result.rows[0]?.ok===true?{ok:true}:{ok:false,reason:'sn2_independent_origin_not_durable'};
+  }
   async armScarletNeedleCapitalWatchFromClosedSagittariusArrow(parentId){
     // A verified loss creates observation only. Seat/BUY authority is separate.
     // Re-read the database under a row lock: callback objects are never authoritative.
@@ -1269,6 +1286,8 @@ export class Database {
       const parent=rows.rows[0]?rowEntry(rows.rows[0]):null;
       const loss=verifiedSagittariusArrowLoss(parent,settings);
       if(!loss.ok){await client.query('ROLLBACK');return loss;}
+      const origin=await this.verifyIndependentArrowRecoveryOrigin(parent,settings,client);
+      if(!origin.ok){await client.query('ROLLBACK');return origin;}
       const built=scarletNeedleCapitalWatchFromLoss(loss,settings);
       if(!built.ok){await client.query('ROLLBACK');return built;}
       const w=built.watch;
@@ -1295,6 +1314,7 @@ export class Database {
         and e.opened_at_ms >= $4 and e.archived=false
         and e.execution_class='CAPITAL' and e.concept_name='Sagittarius Arrow Recovery'
         and (e.entry_config#>>'{sagittariusArrowRecovery,version}' in ('SA1-SIM-CAPITAL-V2','SA1-LIVE-CAPITAL-V1')
+          or e.entry_config#>>'{independentRecovery,version}'='INDEPENDENT-ATHENA-LOSS-V2'
           or e.entry_config->>'starlightModelClone'='true')
         and e.status='closed' and e.pnl_cents<0 and e.remaining_count=0
         and e.closed_at_ms is not null and e.closed_at_ms <= $5
@@ -1369,6 +1389,8 @@ export class Database {
       const parent=await client.query('select * from sag_entries where id=$1 for share',[row.parent_entry_id]);
       const proof=verifiedSagittariusArrowLoss(parent.rows[0]?rowEntry(parent.rows[0]):null,settings);
       if(!proof.ok){await client.query('ROLLBACK');started=false;return {ok:false,reason:`sn2_parent_drift:${proof.reason}`};}
+      const origin=await this.verifyIndependentArrowRecoveryOrigin(parent.rows[0]?rowEntry(parent.rows[0]):null,settings,client);
+      if(!origin.ok){await client.query('ROLLBACK');started=false;return origin;}
       const current={...row.watch,revision:Number(row.revision)};
       if(current.id!==row.id||current.version!==row.version||String(current.parentEntryId)!==String(row.parent_entry_id))
         throw new Error('sn2_corrupted_watch_identity');
@@ -1741,20 +1763,23 @@ export class Database {
     const client=await this.pool.connect();
     const args=[String(systemName),ownerId==null?null:String(ownerId),mode==null?null:String(mode),Math.max(0,Number(resetTimestampMs)||0,Number(reportingStartMs)||0),EXECUTION_ATTACKS];
     const scope=`system_name=$1 and ($2::text is null or owner_id=$2) and ($3::text is null or mode=$3) and not archived and ${CAPITAL_SQL}`;
+    const closedFinancial=`status='closed' and count>0 and not (${UNRESOLVED_FUNDED_SQL})`;
     try{
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       await client.query("set local statement_timeout='5000ms'");
       const groups=await client.query(`select concept_name,
         count(*) filter(where ${ACTUAL_OPEN_SQL})::int as open,
         count(*) filter(where status='entry_pending' and not (${ACTUAL_OPEN_SQL}))::int as pending,
-        count(*) filter(where status='closed' and count>0)::int as closed,
-        count(*) filter(where status='closed' and count>0 and pnl_cents>0)::int as wins,
-        count(*) filter(where status='closed' and count>0 and pnl_cents<0)::int as losses,
-        count(*) filter(where status='closed' and count>0 and pnl_cents=0)::int as scratches,
-        count(*) filter(where (status='closed' and count>0) or (${ACTUAL_OPEN_SQL}))::int as total,
-        coalesce(avg(entry_price_cents) filter(where (status='closed' and count>0) or (${ACTUAL_OPEN_SQL})),0) as avg_entry_cents,
-        coalesce(sum(pnl_cents) filter(where status='closed' and count>0),0) as closed_realized_cents,
-        coalesce(sum(pnl_cents) filter(where ${ACTUAL_OPEN_SQL}),0) as partial_realized_cents
+        count(*) filter(where ${closedFinancial})::int as closed,
+        count(*) filter(where status='closed' and (${UNRESOLVED_FUNDED_SQL}))::int as unresolved_closed,
+        count(*) filter(where ${closedFinancial} and pnl_cents>0)::int as wins,
+        count(*) filter(where ${closedFinancial} and pnl_cents<0)::int as losses,
+        count(*) filter(where ${closedFinancial} and pnl_cents=0)::int as scratches,
+        count(*) filter(where (${closedFinancial}) or (${ACTUAL_OPEN_SQL}))::int as total,
+        coalesce(avg(entry_price_cents) filter(where (${closedFinancial}) or (${ACTUAL_OPEN_SQL})),0) as avg_entry_cents,
+        coalesce(sum(pnl_cents) filter(where ${closedFinancial}),0) as closed_realized_cents,
+        coalesce(sum(pnl_cents) filter(where ${ACTUAL_OPEN_SQL}),0) as partial_realized_cents,
+        coalesce(sum(coalesce(entry_fee_cents,0)+coalesce(exit_fee_cents,0)) filter(where (${closedFinancial}) or (${ACTUAL_OPEN_SQL})),0) as known_fees_cents
         from sag_entries where ${scope} and (opened_at_ms >= $4 or (${ACTUAL_OPEN_SQL}))
           and concept_name=any($5::text[]) group by concept_name`,args);
       const bounds=`with bounds as (select ${['day','week','month','year'].map(k=>`(extract(epoch from (date_trunc('${k}',now() at time zone 'Europe/Madrid') at time zone 'Europe/Madrid'))*1000)::bigint as ${k}_ms`).join(',')})`;
@@ -1765,16 +1790,19 @@ export class Database {
         ${['day','week','month','year'].map(k=>`coalesce(sum(j.amount_cents) filter(where j.earliest_ms>=greatest($4,b.${k}_ms)),0) as ${k}_realized_cents,
         count(*) filter(where j.amount_cents<>0 and j.earliest_ms<greatest($4,b.${k}_ms) and j.latest_ms>=greatest($4,b.${k}_ms))::int as ${k}_unknown`).join(',')}
         from sag_entries e join sag_execution_realizations_v3 j on j.entry_id=e.id cross join bounds b
-        where ${periodScope} group by e.concept_name`,args);
+        where ${periodScope} and not (${unresolvedFundedSql('e')}) group by e.concept_name`,args);
       const integrity=await client.query(`select e.id from sag_entries e left join sag_execution_realizations_v3 j on j.entry_id=e.id
         where ${periodScope} group by e.id,e.pnl_cents having abs(coalesce(sum(j.amount_cents),0)-e.pnl_cents)>0.000001 limit 1`,args);
       if(integrity.rows.length)throw new Error('execution_realization_journal_does_not_reconcile');
       const opens=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and status in ('open','exit_pending','entry_pending','pending_recovery') order by opened_at_ms,id`,args.slice(0,3));
-      const unresolved=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
-        where ${scope} and mode='LIVE' and status='reconciliation_orphaned' and count>0
-          and entry_order_id is not null and coalesce(entry_config#>>'{entryFillProof,authoritative}','false')='true'
-        order by opened_at_ms,id`,args.slice(0,3));
+      // At most seven summary rows, regardless of unresolved historical volume.
+      // Preserve known fees/partial economics separately from an unknown final result.
+      const unresolved=await client.query(`${bounds} select concept_name,count(*)::int as unreconciled,
+        coalesce(sum(pnl_cents),0) as known_realized_cents,
+        coalesce(sum(coalesce(entry_fee_cents,0)+coalesce(exit_fee_cents,0)),0) as known_fees_cents,
+        ${['day','week','month','year'].map(k=>`count(*) filter(where coalesce(closed_at_ms,(extract(epoch from now())*1000)::bigint)>=b.${k}_ms)::int as ${k}_unknown`).join(',')}
+        from sag_entries cross join bounds b where ${scope} and (${UNRESOLVED_FUNDED_SQL}) group by concept_name`,args.slice(0,3));
       const closed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Lightning Plasma'],Math.max(1,Math.min(5000,Number(limit)||150))]);
@@ -1792,13 +1820,16 @@ export class Database {
       const legacyClosed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Crash Recovery Hunter'],Math.max(1,Math.min(5000,Number(limit)||150))]);
-      const account=await client.query(`select coalesce(sum(pnl_cents),0) as realized_cents,
+      const account=await client.query(`select case when count(*) filter(where ${UNRESOLVED_FUNDED_SQL})=0
+          then coalesce(sum(pnl_cents),0) else null end as realized_cents,
+        coalesce(sum(pnl_cents),0) as known_realized_cents,
+        count(*) filter(where ${UNRESOLVED_FUNDED_SQL})::int as unreconciled,
         coalesce(sum(entry_price_cents*greatest(0,remaining_count)+case when count>0
           then (coalesce(entry_fee_cents,$5::double precision*count))*greatest(0,remaining_count)/count else 0 end)
           filter(where status in ('open','entry_pending','exit_pending','pending_recovery')),0) as reserved_cents
         from sag_entries where ${scope} and concept_name=any($4::text[])`,[...args.slice(0,3),PORTFOLIO_CONCEPT_NAMES,Math.max(0,Number(simFeeCents)||0)]);
       await client.query('COMMIT');
-      return {reportingVersion:EXECUTION_REPORT_VERSION,aggregates:groups.rows,periods:periods.rows,openRows:opens.rows.map(rowEntry),unresolvedRows:unresolved.rows.map(rowEntry),
+      return {reportingVersion:EXECUTION_REPORT_VERSION,aggregates:groups.rows,periods:periods.rows,openRows:opens.rows.map(rowEntry),unresolvedAggregates:unresolved.rows,
         closedRows:closed.rows.map(rowEntry),greatHornClosedRows:greatHornClosed.rows.map(rowEntry),crystalWallClosedRows:crystalWallClosed.rows.map(rowEntry),legacyClosedRows:legacyClosed.rows.map(rowEntry),megawaveClosedRows:megawaveClosed.rows.map(rowEntry),account:account.rows[0]||{},asOfMs:Date.now()};
     }catch(error){try{await client.query('ROLLBACK');}catch{}throw error;}
     finally{client.release();}
@@ -2781,6 +2812,8 @@ export class Database {
       const parent=parentResult.rows[0]?rowEntry(parentResult.rows[0]):null;
       const watch={...wRow.watch,id:wRow.id,revision:Number(wRow.revision),status:wRow.status};
       const check=scarletNeedleCapitalAdmissionDecision({watch,seat:Number(stamp.seat),settings,quote,parent});
+      const origin=await this.verifyIndependentArrowRecoveryOrigin(parent,settings,client);
+      if(!origin.ok)throw new Error(origin.reason);
       if(!check.ok||check.positionId!==entry.id||watch.parentEntryId!==entry.sourceTradeId
          ||Number(stamp.watchRevision)!==Number(wRow.revision)
          ||!watch.qualified||!Number.isFinite(Number(watch.lastQuoteAtMs))||Number(watch.lastQuoteAtMs)<=0
@@ -2958,6 +2991,8 @@ export class Database {
     const parent=raw.parent_record?rowEntry(raw.parent_record):null;
     const loss=verifiedSagittariusArrowLoss(parent,settings);
     if(!loss.ok)return {ok:false,reason:'sn_live_parent_drift:'+loss.reason};
+    const origin=await this.verifyIndependentArrowRecoveryOrigin(parent,settings);
+    if(!origin.ok)return origin;
     // Consuming the final seat deliberately makes its watch terminal and
     // clears qualified. That must NOT revoke the SAME already-committed BUY
     // intent; any nonterminal watch retraction must still deny dispatch.
@@ -4169,7 +4204,7 @@ export class Database {
   // advance the durable observation. No order authority is conferred here.
   async persistLightningPlasmaObservation(parent,geometry,settings){
     const v=geometry||{},quoteAt=Number(v.lastQuoteAtMs||0);
-    if(!parent?.id||!(quoteAt>Number(parent.openedAtMs||0))
+    if(!parent?.id||lightningObservationStartMs(parent)===null||!(quoteAt>=lightningObservationStartMs(parent))
       ||!(Number(v.lastBid)>0)||Number(v.crashDepth)<0
       ||Number(v.reboundCents)<0||Number(v.upwardTicks)<0)return null;
     const params=[parent.id,settings.systemName,settings.ownerId,settings.mode,
@@ -4184,6 +4219,8 @@ export class Database {
       where a.parent_entry_id=$1 and a.system_name=$2 and a.owner_id=$3
         and a.mode=$4 and a.reset_epoch=$5 and a.state='OPEN' and p.status='open'
         and p.remaining_count>0 and p.archived=false
+        and $6>=greatest(p.opened_at_ms,a.enrolled_at_ms,
+          case when p.mode='LIVE' then coalesce((p.entry_config#>>'{entryFillProof,observedAtMs}')::bigint,9223372036854775807) else p.opened_at_ms end)
       on conflict(parent_entry_id) do update set quote_at_ms=excluded.quote_at_ms,
         peak_bid=excluded.peak_bid,trough_bid=excluded.trough_bid,
         crash_depth=excluded.crash_depth,rebound_cents=excluded.rebound_cents,
@@ -4201,9 +4238,47 @@ export class Database {
       lastQuoteAtMs:Number(o.quote_at_ms),observations:Number(o.observations)}:null;
   }
 
+  async lightningPlasmaSeatRows(parentId,settings,client=this.pool,{lock=false}={}){
+    // The caller's runtime/parent row locks serialize seat admission. Read
+    // at most one latest row per seat; aggregate history stays in PostgreSQL
+    // instead of growing a JS array or imposing a lifetime retry budget.
+    const r=await client.query(`with classified as (
+      select e.id,coalesce(${LP_CERTIFIED_NO_SEND_SQL},false) as lp_no_send_certified,
+       (e.entry_config#>>'{lightningPlasmaScaleIn,seat}')::int as lp_seat,
+       (e.entry_config#>>'{lightningPlasmaScaleIn,attemptGeneration}')::bigint as lp_generation,
+       coalesce(e.entry_config#>>'{lightningPlasmaScaleIn,lifecycleVersion}'='${LP_SEAT_LIFECYCLE_VERSION}'
+        and (e.entry_config#>>'{lightningPlasmaScaleIn,resetTimestampMs}')::bigint=$5
+        and e.entry_config->>'executionClass'='CAPITAL'
+        and (e.entry_config#>>'{lightningPlasmaScaleIn,attemptGeneration}')::bigint between 0 and ${LP_MAX_RETRY_GENERATION}
+        and (e.entry_config#>>'{lightningPlasmaScaleIn,seat}')::int between 1 and 20,false) as identity_consistent
+      from sag_entries e left join sag_lp_v5_no_send_v1 c on c.entry_id=e.id
+      where e.system_name=$1 and e.owner_id=$2 and e.mode=$3 and e.source_trade_id=$4
+        and e.concept_name='Lightning Plasma' and e.execution_class='CAPITAL'
+    ), summary as (
+      select lp_seat,count(*) as attempt_count,min(lp_generation) as minimum_generation,
+       max(lp_generation) as maximum_generation,count(distinct lp_generation) as distinct_generations,
+       count(*) filter(where lp_no_send_certified) as certified_count,bool_and(identity_consistent) as identity_consistent
+      from classified group by lp_seat
+    ), latest as (
+      select distinct on(lp_seat) * from classified order by lp_seat,lp_generation desc,id desc
+    ) select e.*,latest.lp_no_send_certified,jsonb_build_object('count',summary.attempt_count,
+      'minimumGeneration',summary.minimum_generation,'maximumGeneration',summary.maximum_generation,
+      'distinctGenerations',summary.distinct_generations,
+      'certifiedCount',summary.certified_count,'identityConsistent',summary.identity_consistent) as lp_seat_history
+     from latest join summary on latest.lp_seat is not distinct from summary.lp_seat
+      join sag_entries e on e.id=latest.id
+     order by latest.lp_seat limit 21 ${lock?'for update of e':''}`,
+      [settings.systemName,settings.ownerId,settings.mode,String(parentId),Number(settings.resetTimestampMs||0)]);
+    if(r.rows.length>20)throw new Error('lp_v5_seat_identity_overflow');
+    return r.rows.map(r=>({...rowEntry(r),lpSeatHistory:r.lp_seat_history}));
+  }
+
   async insertLightningPlasmaScaleInEntry(entry,{isCurrent=()=>true}={}){
     const stamp=entry?.entryConfig?.lightningPlasmaScaleIn;
-    if(!stamp || String(entry.sourceTradeId||'')!==String(stamp.parentStarlightId||'') || entry.conceptName!=='Lightning Plasma' || isShadowSaintEntry(entry))
+    if(!stamp || stamp.lifecycleVersion!==LP_SEAT_LIFECYCLE_VERSION
+      ||String(entry.sourceTradeId||'')!==String(stamp.parentStarlightId||'') || entry.conceptName!=='Lightning Plasma' || isShadowSaintEntry(entry)
+      ||entry.id!==lightningCapitalId({systemName:entry.systemName,ownerId:entry.ownerId,mode:entry.mode,
+        resetEpoch:stamp.resetTimestampMs,parentEntryId:entry.sourceTradeId,seat:stamp.seat,attemptGeneration:stamp.attemptGeneration}))
       throw new Error('lp_scalein_capital_required');
     // A genuine capital transaction. Runtime row lock serializes global cash
     // and capacity admission; the parent row serializes its durable seats.
@@ -4220,13 +4295,15 @@ export class Database {
       if(settings.lightningPlasmaEnabled!==true)throw new Error('lp_scalein_disabled_at_commit');
       if(String(settings.mode||'')!==String(entry.mode||'') || String(settings.systemName||'')!==String(entry.systemName||'') || String(settings.ownerId||'')!==String(entry.ownerId||''))
         throw new Error('lp_scalein_scope_changed');
-      if(entry.mode==='LIVE' && settings.liveArmed!==true)throw new Error('lp_scalein_live_not_armed');
+      if(entry.mode==='LIVE' && (settings.liveArmed!==true||settings.liveOwnerAuthorized!==true))throw new Error('lp_scalein_live_not_armed');
       const parentResult=await client.query('select * from sag_entries where id=$1 for update',[entry.sourceTradeId]);
       const parent=parentResult.rows[0]?rowEntry(parentResult.rows[0]):null;
       const authorityResult=await client.query('select * from sag_lp_continuation_v5 where parent_entry_id=$1 for update',[entry.sourceTradeId]);
       if(parent)parent.lpContinuation=mapLightningAuthority(authorityResult.rows[0]);
       const eligibility=lightningParentEligibility(parent,settings,{ticker:entry.ticker});
       if(!eligibility.ok)throw new Error(`lp_scalein_parent_ineligible:${eligibility.reason}`);
+      const timing=lightningObservationTiming(parent,settings,{quoteAtMs:entry.entryConfig?.finalEntryConfirmation?.quoteAtMs});
+      if(!timing.ok)throw new Error(timing.reason);
       if(stamp.version!==LP_CONTINUATION_VERSION || Number(stamp.parentAuthorityRevision)!==eligibility.revision
         || Number(stamp.parentEntryPriceCents)!==Number(parent.entryPriceCents))
         throw new Error('lp_scalein_parent_revision_changed');
@@ -4237,14 +4314,14 @@ export class Database {
       const thr=Number(settings.lightningPlasmaStarlightScaleInCents);
       if(Number(stamp.thresholdCents)!==thr)throw new Error('lp_scalein_trigger_revision_changed');
       if(!(thr>0))throw new Error('lp_scalein_threshold_off');
-      const seats=await client.query(`select count(*)::int as n from sag_entries
-        where system_name=$1 and owner_id=$2 and mode=$3 and concept_name='Lightning Plasma'
-        and source_trade_id=$4 and coalesce(execution_class,'CAPITAL')<>'SHADOW_SAINT'
-        and coalesce(entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT'
-        and not (status='rejected' and coalesce(remaining_count,0)=0)`,
-        [entry.systemName,entry.ownerId,entry.mode,entry.sourceTradeId]);
-      const multiply=Math.max(1,Math.min(20,Math.floor(Number(settings.lightningPlasmaMultiply)||1)));
-      if(Number(seats.rows[0]?.n||0)>=multiply)throw new Error('lp_scalein_multiply_full');
+      const fieldStake=Number(settings.lightningPlasmaFieldStakeCents),quantity=Number(entry.count),price=Number(entry.entryPriceCents);
+      if(!Number.isSafeInteger(quantity)||quantity<1||!Number.isFinite(fieldStake)||fieldStake<=0
+        ||!Number.isFinite(price)||price<=0||price>=100||quantity*price>fieldStake+1e-9)
+        throw new Error('lp_v5_own_field_stake_or_quantity_invalid');
+      const seatRows=await this.lightningPlasmaSeatRows(entry.sourceTradeId,settings,client,{lock:true});
+      const seatPlan=lightningCapitalSeatPlan(seatRows,settings,entry.sourceTradeId);
+      if(!seatPlan.ok||!seatPlan.seats.some(x=>x.seat===Number(stamp.seat)&&x.attemptGeneration===Number(stamp.attemptGeneration)))
+        throw new Error(seatPlan.reason||'lp_scalein_multiply_or_generation_occupied');
       if(!lightningEntryAuroraProof(entry,settings))throw new Error('lp_scalein_own_aurora_required');
       // Independently reject impossible net targets even if a capital entry
       // bypasses the ordinary strategy-level feasibility command.
@@ -4274,8 +4351,9 @@ export class Database {
            realizedSinceMs:Number(settings.resetTimestampMs||0)},client);
         if(Number(settings.startingCapitalCents||0)+cash.realizedCents-cash.reservedCents
           <entry.count*entry.entryPriceCents+entry.entryFeeCents)throw new Error('lp_scalein_sim_cash_at_commit');
-      }
+      }else await this.verifyQ17LivePendingCashAtCommit(entry,client);
       if(!isCurrent())throw new Error('lp_scalein_authority_changed_before_insert');
+      await client.query("select set_config('sagittarius.lp_v5_entry','admitted',true)");
       AUTHORIZED_STARLIGHT_INSERTS.add(client);
       let written;
       try{written=await this.insertEntry(entry,client);}finally{AUTHORIZED_STARLIGHT_INSERTS.delete(client);}
@@ -4477,6 +4555,8 @@ export class Database {
       ||Number(entry.entryFeeCents||0)!==0||Number(raw?.entry_fee_cents||0)!==0)
       return {ok:false,reconcileOnly:true,reason:'lp_scalein_intent_already_receipted_or_reconciled'};
     if(!raw || raw.status!=='entry_pending' || raw.entry_client_order_id!==entry.entryClientOrderId
+      ||stamp.lifecycleVersion!==LP_SEAT_LIFECYCLE_VERSION
+      ||authorityHash(raw.entry_config)!==authorityHash(entry.entryConfig)
       || Number(raw.count)!==Number(entry.count)||Number(raw.entry_price_cents)!==Number(entry.entryPriceCents)
       || persistedConfig.aps2LegacyIntent?.reconcileOnly===true
       || raw.concept_name!=='Lightning Plasma' || raw.ticker!==entry.ticker
@@ -4486,7 +4566,7 @@ export class Database {
       || Number(persistedStamp.thresholdCents)!==Number(stamp.thresholdCents)
       || Number(persistedStamp.resetTimestampMs)!==Number(stamp.resetTimestampMs)
       || raw.owner_id!==entry.ownerId || raw.mode!=='LIVE' || raw.system_name!==entry.systemName
-      || settings?.engineActive!==true || settings?.liveArmed!==true || settings?.mode!=='LIVE'
+      || settings?.engineActive!==true || settings?.liveArmed!==true || settings?.liveOwnerAuthorized!==true || settings?.mode!=='LIVE'
       || settings?.ownerId!==entry.ownerId || settings?.systemName!==entry.systemName
       || settings?.lightningPlasmaEnabled!==true
       || Number(settings?.resetTimestampMs||0)!==Number(stamp.resetTimestampMs||0)
@@ -4508,25 +4588,47 @@ export class Database {
   }
 
   async rejectUndispatchedLightningIntent(entry,reason,entryConfig=entry?.entryConfig){
+    const stamp=entryConfig?.lightningPlasmaScaleIn,p=entryConfig?.dispatchProof;
     if(!entry?.id||entry.mode!=='LIVE'||entry.conceptName!=='Lightning Plasma'
-      ||!entry.entryClientOrderId||entry.entryOrderId||entry.status!=='entry_pending')
+      ||!entry.entryClientOrderId||entry.entryOrderId||entry.status!=='entry_pending'
+      ||stamp?.lifecycleVersion!==LP_SEAT_LIFECYCLE_VERSION
+      ||authorityHash(stamp)!==authorityHash(entry.entryConfig?.lightningPlasmaScaleIn)
+      ||entry.id!==lightningCapitalId({systemName:entry.systemName,ownerId:entry.ownerId,mode:entry.mode,
+        resetEpoch:stamp.resetTimestampMs,parentEntryId:entry.sourceTradeId,seat:stamp.seat,attemptGeneration:stamp.attemptGeneration})
+      ||p?.version!=='HC2-R1-DISPATCH'||p.submitted!==false
+      ||!Number.isSafeInteger(Number(p.atMs))||Number(p.atMs)<Number(entry.openedAtMs)||Number(p.atMs)>Date.now()+1000
+      ||typeof p.reason!=='string'||!p.reason.length||p.reason.length>180)
       return {rejected:false,entry:null};
-    const r=await this.pool.query(`update sag_entries set status='rejected',remaining_count=0,
-      close_reason=$8,entry_config=$9::jsonb,updated_at_ms=$10
-      where id=$1 and system_name=$2 and owner_id=$3 and mode='LIVE'
-       and ticker=$4 and entry_client_order_id=$5 and count=$6 and entry_price_cents=$7
-       and concept_name='Lightning Plasma' and status='entry_pending' and archived=false
-       and execution_class='CAPITAL' and entry_config->>'executionClass'='CAPITAL'
-       and coalesce(entry_order_id,'')='' and remaining_count=count
-       and coalesce(exit_filled_count,0)=0 and coalesce(exit_notional_cents,0)=0
-       and coalesce(entry_fee_cents,0)=0 and entry_config=$11::jsonb
-      returning *`,[entry.id,entry.systemName,entry.ownerId,entry.ticker,entry.entryClientOrderId,
-        Number(entry.count),Number(entry.entryPriceCents),String(reason).slice(0,240),
-        JSON.stringify(entryConfig||{}),Date.now(),JSON.stringify(entry.entryConfig||{})]);
-    // A failed CAS means reconciliation or another writer owns the intent.
-    // Do not release inventory, overwrite its receipt, or report a false reject.
-    return r.rows[0]?{rejected:true,entry:rowEntry(r.rows[0])}
-      :{rejected:false,entry:await this.entryById(entry.id)};
+    const client=await this.pool.connect();let started=false;
+    try{
+      await client.query('BEGIN');started=true;
+      await client.query("set local lock_timeout='1500ms'");
+      await client.query("set local statement_timeout='5000ms'");
+      const r=await client.query(`update sag_entries set status='rejected',remaining_count=0,
+        close_reason=$8,entry_config=$9::jsonb,updated_at_ms=$10
+        where id=$1 and system_name=$2 and owner_id=$3 and mode='LIVE'
+         and ticker=$4 and entry_client_order_id=$5 and count=$6 and entry_price_cents=$7
+         and concept_name='Lightning Plasma' and status='entry_pending' and archived=false
+         and execution_class='CAPITAL' and entry_config->>'executionClass'='CAPITAL'
+         and coalesce(entry_order_id,'')='' and remaining_count=count
+         and coalesce(exit_filled_count,0)=0 and coalesce(exit_notional_cents,0)=0
+         and coalesce(entry_fee_cents,0)=0 and entry_config=$11::jsonb
+        returning *`,[entry.id,entry.systemName,entry.ownerId,entry.ticker,entry.entryClientOrderId,
+          Number(entry.count),Number(entry.entryPriceCents),String(reason).slice(0,240),
+          JSON.stringify(entryConfig),Date.now(),JSON.stringify(entry.entryConfig||{})]);
+      if(!r.rows?.length){await client.query('ROLLBACK');started=false;
+        return {rejected:false,entry:await this.entryById(entry.id)};}
+      const row={...rowEntry(r.rows[0]),lpNoSendCertified:true};
+      if(!lightningCertifiedLocalNoSend(row))throw new Error('lp_v5_no_send_post_cas_invalid');
+      await client.query(`insert into sag_lp_v5_no_send_v1
+        (entry_id,system_name,owner_id,mode,reset_epoch,parent_entry_id,seat,
+         attempt_generation,client_order_id,reason,proven_at_ms)
+        values($1,$2,$3,'LIVE',$4,$5,$6,$7,$8,$9,$10)`,
+        [row.id,row.systemName,row.ownerId,Number(stamp.resetTimestampMs),row.sourceTradeId,
+          Number(stamp.seat),Number(stamp.attemptGeneration),row.entryClientOrderId,String(p.reason),Date.now()]);
+      await client.query('COMMIT');started=false;return {rejected:true,entry:row};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
   }
 
   async rejectUndispatchedModelCloneIntent(entry,reason,entryConfig=entry?.entryConfig){
@@ -4580,16 +4682,16 @@ export class Database {
     finally{client.release();}
   }
 
-  /** IA3: sole capital admission for independently enabled Lightning Plasma
-   * and Sagittarius Arrow after a committed Athena SHADOW hard-stop.
+  /** Sole new independent Arrow admission after a committed Athena SHADOW
+   * hard-stop. Historical independent LP receipts stay reconciliation-owned.
    * The settings lock serializes account-wide SIM capital. The durable watch
-   * lock, unique parent/concept row check, event cap, and scoped INSERT
+   * lock, certified per-seat generation check, event cap, and scoped INSERT
    * capability are held together until COMMIT. No direct broker authority. */
   async insertIndependentRecoveryCapitalEntry(entry,{isCurrent=()=>true}={}){
     const stamp=entry?.entryConfig?.independentRecovery;
     const frozen=entry?.entryConfig?.independentAuthority;
     const c=String(entry?.conceptName||'');
-    if(!['Lightning Plasma','Sagittarius Arrow Recovery'].includes(c)
+    if(c!=='Sagittarius Arrow Recovery'
       ||!['SIMULATION','LIVE'].includes(String(entry?.mode))
       ||stamp?.version!=='INDEPENDENT-ATHENA-LOSS-V2'
       ||frozen?.version!==stamp.version
@@ -4604,6 +4706,11 @@ export class Database {
       ||Number(stamp.signalQuoteAtMs)!==Number(frozen.signalQuoteAtMs)
       ||stamp.signalQuoteEpoch!==frozen.signalQuoteEpoch
       ||Number(stamp.signalQuoteRevision)!==Number(frozen.signalQuoteRevision)
+      ||stamp.lifecycleVersion!==INDEPENDENT_LIFECYCLE_VERSION
+      ||frozen.lifecycleVersion!==INDEPENDENT_LIFECYCLE_VERSION
+      ||Number(stamp.seat)!==Number(frozen.seat)||Number(stamp.maximumSeats)!==Number(frozen.maximumSeats)
+      ||Number(stamp.attemptGeneration)!==Number(frozen.attemptGeneration)
+      ||stamp.positionId!==entry.id
       ||entry?.executionClass!=='CAPITAL'||entry.entryConfig.executionClass!=='CAPITAL'
       ||!entry.id||!entry.ticker||!entry.eventTicker
       ||!Number.isSafeInteger(Number(entry.count))||Number(entry.count)<1
@@ -4613,6 +4720,9 @@ export class Database {
       ||(entry.mode==='SIMULATION' && (entry.status!=='open'||entry.entryClientOrderId))
       ||(entry.mode==='LIVE' && (entry.status!=='entry_pending'||!entry.entryClientOrderId)))
       throw new Error('independent_capital_identity_or_state_invalid');
+    if(entry.id!==independentCapitalId({systemName:entry.systemName,ownerId:entry.ownerId,
+      mode:entry.mode,resetEpoch:stamp.resetEpoch,parentEntryId:entry.sourceTradeId,concept:c,
+      seat:stamp.seat,attemptGeneration:stamp.attemptGeneration}))throw new Error('independent_attempt_id_invalid');
     const client=await this.pool.connect();let started=false;
     try{
       await client.query('BEGIN');started=true;
@@ -4621,6 +4731,10 @@ export class Database {
       const current=await client.query("select value from sag_settings where key='runtime' for update");
       const settings=current.rows?.[0]?.value||{};
       const epoch=Number(settings.resetTimestampMs||0);
+      if(Number(stamp.maximumSeats)!==Number(settings.sagittariusArrowMultiply)
+        ||!Number.isSafeInteger(Number(stamp.maximumSeats))||Number(stamp.maximumSeats)<1||Number(stamp.maximumSeats)>20
+        ||!Number.isSafeInteger(Number(stamp.seat))||Number(stamp.seat)<1||Number(stamp.seat)>Number(stamp.maximumSeats))
+        throw new Error('independent_multiply_card_changed');
       if(settings.engineActive!==true||settings.mode!==entry.mode
         ||settings.systemName!==entry.systemName||settings.ownerId!==entry.ownerId
         ||epoch!==Number(stamp.resetEpoch)||epoch!==Number(frozen.resetEpoch)
@@ -4678,7 +4792,9 @@ export class Database {
         signalQuoteAtMs:Number(stamp.signalQuoteAtMs),signalQuoteEpoch:String(stamp.signalQuoteEpoch),
         signalQuoteRevision:Number(stamp.signalQuoteRevision),
         concept:c,ticker:entry.ticker,eventTicker:entry.eventTicker,
-        systemName:entry.systemName,ownerId:entry.ownerId,mode:entry.mode,resetEpoch:epoch};
+        systemName:entry.systemName,ownerId:entry.ownerId,mode:entry.mode,resetEpoch:epoch,
+        lifecycleVersion:INDEPENDENT_LIFECYCLE_VERSION,seat:Number(stamp.seat),
+        maximumSeats:Number(stamp.maximumSeats),attemptGeneration:Number(stamp.attemptGeneration)};
       if(frozen.authorizationId!==`INDEP-STOP:${authorityHash(id)}`
         ||frozen.systemName!==entry.systemName||frozen.ownerId!==entry.ownerId
         ||frozen.mode!==entry.mode||frozen.ticker!==entry.ticker
@@ -4720,10 +4836,12 @@ export class Database {
       const maxUsed=Math.max(1,Math.floor(Number(settings.maxEntriesPerTrade)||1),
         Math.floor(Number(c==='Lightning Plasma'?settings.lightningPlasmaMultiply:settings.sagittariusArrowMultiply)||1));
       if(Number(used.rows?.[0]?.used||0)>=maxUsed)throw new Error('independent_event_lifetime_cap');
-      const already=await client.query(`select id from sag_entries where system_name=$1 and owner_id=$2
-        and mode=$3 and source_trade_id=$4 and concept_name=$5 for update`,
-        [entry.systemName,entry.ownerId,entry.mode,entry.sourceTradeId,c]);
-      if(already.rows?.length)throw new Error('independent_parent_concept_already_has_capital_intent');
+      const seatRows=await this.independentRecoverySeatRows({...watch.watch,revision:Number(watch.revision),
+        status:watch.status,maximumSeats:Number(stamp.maximumSeats)},client,{lock:true});
+      const seatBook=independentSeatState(seatRows,{...watch.watch,maximumSeats:Number(stamp.maximumSeats)},settings);
+      if(!seatBook.ok||seatBook.pendingIds.length||Number(seatBook.nextSeat)!==Number(stamp.seat)
+        ||Number(seatBook.attemptGeneration)!==Number(stamp.attemptGeneration))
+        throw new Error(seatBook.ok?'independent_seat_or_no_send_generation_unavailable':seatBook.reason);
       const capacity=await client.query(`select count(*)::int as active from sag_entries
         where system_name=$1 and owner_id=$2 and mode=$3 and archived=false
           and ${CAPITAL_SQL} and concept_name=any($4::text[])
@@ -4744,7 +4862,7 @@ export class Database {
         consumedBefore:Number(used.rows?.[0]?.used||0),claimedAtMs:Date.now(),
         ordinaryCi1CooldownUnchanged:true,starlightParentChildExempt:true}};
       if(!isCurrent())throw new Error('independent_signal_changed_before_commit');
-      // The independent LP/Arrow starters reserve collateral through the same
+      // The independent Arrow starter reserves collateral through the same
       // committed pending ledger as their descendants. The runtime settings
       // FOR UPDATE above already serializes these short admission transactions;
       // no additional global owner/mutation lock or wait queue is introduced.
@@ -4764,7 +4882,7 @@ export class Database {
   async verifyIndependentRecoveryLiveIntent(entry){
     const stamp=entry?.entryConfig?.independentRecovery;
     if(entry?.mode!=='LIVE'||entry.status!=='entry_pending'
-      ||!['Lightning Plasma','Sagittarius Arrow Recovery'].includes(entry.conceptName)
+      ||entry.conceptName!=='Sagittarius Arrow Recovery'
       ||stamp?.version!=='INDEPENDENT-ATHENA-LOSS-V2'
       ||!entry.entryClientOrderId||entry.entryOrderId)
       return {ok:false,reconcileOnly:true,reason:'independent_live_intent_identity_invalid'};
@@ -4791,7 +4909,7 @@ export class Database {
       ||Number(stored.exitNotionalCents||0)!==0
       ||authorityHash(cfg)!==authorityHash(JSON.parse(JSON.stringify(entry.entryConfig||{})))
       ||rec?.version!=='INDEPENDENT-ATHENA-LOSS-V2'||rec?.authorizationId!==stamp.authorizationId
-      ||!['ARMED','WATCHING','OPENED'].includes(row.watch_status)
+      ||!['ARMED','WATCHING','PENDING','OPENED'].includes(row.watch_status)
       ||!(Number(row.watch_revision)>=Number(rec.watchRevision))
       ||row.independent_watch?.authorizationId!==rec.watchAuthorizationId
       ||row.independent_watch?.qualified!==true
@@ -4817,29 +4935,61 @@ export class Database {
   }
 
   async rejectUndispatchedIndependentRecoveryIntent(entry,reason,entryConfig=entry?.entryConfig){
-    const proof=entryConfig?.dispatchProof;
+    const proof=entryConfig?.dispatchProof,stamp=entry?.entryConfig?.independentRecovery;
     if(entry?.mode!=='LIVE'||entry.status!=='entry_pending'
       ||!['Lightning Plasma','Sagittarius Arrow Recovery'].includes(entry.conceptName)
       ||entry.entryConfig?.independentRecovery?.version!=='INDEPENDENT-ATHENA-LOSS-V2'
       ||!entry.id||!entry.entryClientOrderId||entry.entryOrderId
+      ||entry.exitOrderId||entry.entryConfig?.entryFillProof?.authoritative===true
+      ||entryConfig?.entryFillProof?.authoritative===true
+      ||entry.entryConfig?.dispatchProof?.submitted===true
+      ||stamp?.parentEntryId!==entry.sourceTradeId||stamp?.concept!==entry.conceptName
+      ||authorityHash(entryConfig?.independentRecovery)!==authorityHash(stamp)
+      ||authorityHash(entryConfig?.independentAuthority)!==authorityHash(entry.entryConfig?.independentAuthority)
       ||proof?.version!=='HC2-R1-DISPATCH'||proof.submitted!==false
-      ||!String(proof.reason||'')||!Number.isFinite(Number(proof.atMs)))
+      ||!String(proof.reason||'')||!Number.isFinite(Number(proof.atMs))
+      ||Number(proof.atMs)<Number(entry.openedAtMs||0)||Number(proof.atMs)>Date.now()+1000
+      ||!Number.isSafeInteger(Number(stamp?.resetEpoch))
+      ||!String(stamp?.watchAuthorizationId||'')
+      ||!Number.isSafeInteger(Number(stamp?.seat??1))||Number(stamp?.seat??1)<1||Number(stamp?.seat??1)>20
+      ||!Number.isSafeInteger(Number(stamp?.attemptGeneration??0))||Number(stamp?.attemptGeneration??0)<0
+      ||Number(stamp?.attemptGeneration??0)>INDEPENDENT_MAX_RETRY_GENERATION)
       return {rejected:false,entry:null};
-    const r=await this.pool.query(`update sag_entries set status='rejected',remaining_count=0,
+    // Updating the row and attesting no transmission is one transaction. An
+    // old rejected JSON flag cannot retroactively manufacture this certificate.
+    const client=await this.pool.connect();let started=false;
+    try{
+    await client.query('BEGIN');started=true;
+    await client.query("set local lock_timeout='1500ms'");
+    await client.query("set local statement_timeout='5000ms'");
+    const r=await client.query(`update sag_entries set status='rejected',remaining_count=0,
        close_reason=$8,entry_config=$9::jsonb,updated_at_ms=$10
        where id=$1 and system_name=$2 and owner_id=$3 and mode='LIVE'
         and ticker=$4 and entry_client_order_id=$5 and count=$6 and entry_price_cents=$7
-        and concept_name=$12 and status='entry_pending' and archived=false
+        and concept_name=$12 and source_trade_id=$13 and status='entry_pending' and archived=false
         and execution_class='CAPITAL' and entry_config->>'executionClass'='CAPITAL'
         and entry_config#>>'{independentRecovery,version}'='INDEPENDENT-ATHENA-LOSS-V2'
-        and coalesce(entry_order_id,'')='' and remaining_count=count
+        and coalesce(entry_order_id,'')='' and coalesce(exit_order_id,'')='' and remaining_count=count
         and coalesce(exit_filled_count,0)=0 and coalesce(exit_notional_cents,0)=0
-        and coalesce(entry_fee_cents,0)=0 and entry_config=$11::jsonb returning *`,
+        and coalesce(entry_fee_cents,0)=0 and coalesce(exit_fee_cents,0)=0 and coalesce(pnl_cents,0)=0
+        and entry_config#>>'{entryFillProof,authoritative}' is distinct from 'true'
+        and entry_config#>>'{dispatchProof,submitted}' is distinct from 'true'
+        and entry_config=$11::jsonb returning *`,
        [entry.id,entry.systemName,entry.ownerId,entry.ticker,entry.entryClientOrderId,
         Number(entry.count),Number(entry.entryPriceCents),String(reason).slice(0,240),
-        JSON.stringify(entryConfig),Date.now(),JSON.stringify(entry.entryConfig||{}),entry.conceptName]);
-    return r.rows?.[0]?{rejected:true,entry:rowEntry(r.rows[0])}
-      :{rejected:false,entry:await this.entryById(entry.id)};
+        JSON.stringify(entryConfig),Date.now(),JSON.stringify(entry.entryConfig||{}),entry.conceptName,entry.sourceTradeId]);
+    if(!r.rows?.[0]){await client.query('ROLLBACK');started=false;return {rejected:false,entry:await this.entryById(entry.id)};}
+    await client.query(`insert into sag_independent_no_send_v1
+      (entry_id,system_name,owner_id,mode,reset_epoch,parent_entry_id,concept_name,watch_authorization_id,
+       seat,attempt_generation,client_order_id,reason,proven_at_ms)
+      values($1,$2,$3,'LIVE',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [entry.id,entry.systemName,entry.ownerId,Number(stamp.resetEpoch),entry.sourceTradeId,entry.conceptName,
+       stamp.watchAuthorizationId,Number(stamp.seat??1),Number(stamp.attemptGeneration??0),
+       entry.entryClientOrderId,String(proof.reason).slice(0,240),Number(proof.atMs)]);
+    await client.query('COMMIT');started=false;
+    return {rejected:true,entry:{...rowEntry(r.rows[0]),independentNoSendCertified:true}};
+    }catch(error){if(started)try{await client.query('ROLLBACK');}catch{}throw error;}
+    finally{client.release();}
   }
 
   async verifyStarlightBrokerIntent(entry){
@@ -5168,6 +5318,12 @@ export class Database {
       'phase',stop_guard_state->'phase'
     ) as stop_guard_state,'{}'::jsonb as profit_guard_state,'{}'::jsonb as apex_profit_guard_state,
     jsonb_build_object(
+      'brokerZeroInventoryClose',case when post_exit_state->'brokerZeroInventoryClose' is null then null
+        else jsonb_build_object('version',post_exit_state#>'{brokerZeroInventoryClose,version}',
+          'economicClosure',post_exit_state#>'{brokerZeroInventoryClose,economicClosure}',
+          'closedAtMs',post_exit_state#>'{brokerZeroInventoryClose,closedAtMs}',
+          'pnlInferred',post_exit_state#>'{brokerZeroInventoryClose,pnlInferred}',
+          'exitPriceInferred',post_exit_state#>'{brokerZeroInventoryClose,exitPriceInferred}') end,
       'latestMarketPriceCents',post_exit_state->'latestMarketPriceCents',
       'deltaFromExitCents',post_exit_state->'deltaFromExitCents',
       'bestExecutableBidCents',post_exit_state->'bestExecutableBidCents',
@@ -5236,7 +5392,7 @@ export class Database {
         and ($5::bigint is null or (${orderAt} < $5 or (${orderAt} = $5 and id < $6)))
         order by ${orderAt} desc,id desc limit $8`,values);
       await client.query('COMMIT');
-      const hasMore=result.rows.length>lim,rows=result.rows.slice(0,lim).map(rowEntry),last=rows.at(-1);
+      const hasMore=result.rows.length>lim,rows=result.rows.slice(0,lim).map(rowEntry).map(e=>({...e,...financialHistoryState(e)})),last=rows.at(-1);
       return {version:'CAPITAL-TRADE-HISTORY-V1',status,
         scope:{systemName:String(systemName),ownerId:String(ownerId),mode:String(mode),resetTimestampMs:Number(resetTimestampMs),dashboardStartMs:Number(dashboardStartMs)},
         snapshotCutoffMs:cutoff,rows,hasMore,nextCursor:hasMore&&last
@@ -5394,8 +5550,13 @@ export class Database {
       day_realized_cents:0,week_realized_cents:0,month_realized_cents:0,year_realized_cents:0};
     for(const r of snapshot.aggregates){out.closed_hunters+=Number(r.closed||0);out.open_hunters+=Number(r.open||0);
       for(const k of ['wins','losses','scratches','closed_realized_cents','partial_realized_cents'])out[k]+=Number(r[k]||0);}
+    out.unreconciled=(snapshot.unresolvedAggregates||[]).reduce((sum,r)=>sum+Number(r.unreconciled||0),0);
+    out.financial_complete=out.unreconciled===0;
+    out.known_realized_cents=out.closed_realized_cents+out.partial_realized_cents
+      +(snapshot.unresolvedAggregates||[]).reduce((sum,r)=>sum+Number(r.known_realized_cents||0),0);
+    out.realized_cents=out.financial_complete?out.known_realized_cents:null;
     for(const p of ['day','week','month','year']){const key=`${p}_realized_cents`;
-      out[key]=snapshot.periods.some(r=>Number(r[`${p}_unknown`])>0)?null:snapshot.periods.reduce((sum,r)=>sum+Number(r[key]||0),0);}
+      out[key]=[...snapshot.periods,...(snapshot.unresolvedAggregates||[])].some(r=>Number(r[`${p}_unknown`])>0)?null:snapshot.periods.reduce((sum,r)=>sum+Number(r[key]||0),0);}
     return out;
   }
   async recentClosedHunters(systemName,{limit=150,resetTimestampMs=0,mode=null}={}){
@@ -5592,8 +5753,51 @@ export class Database {
     const r=await this.pool.query(`select watch,revision,status from sag_independent_recovery_v1
       where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
       and status not in ('CONSUMED','BLOCKED','EXPIRED')`,
-      this.starlightScope(scope));
+      this.starlightScope(scope).slice(0,4));
     return r.rows.map(row=>({...row.watch,revision:Number(row.revision),status:row.status}));
+  }
+  async independentRecoverySeatRows(watch,queryClient=this.pool,{lock=false}={}){
+    // Audit history is durable and never truncated to release a seat. Return
+    // only the latest attempt per seat, with native aggregates proving that
+    // every preceding generation exists exactly once and is certified unsent.
+    const r=await queryClient.query(`with scoped as (
+      select e.id,coalesce((e.entry_config#>>'{independentRecovery,seat}')::int,1) as seat_n,
+       coalesce((e.entry_config#>>'{independentRecovery,attemptGeneration}')::bigint,0) as generation,
+       (e.mode='LIVE' and e.status='rejected' and e.execution_class='CAPITAL'
+        and e.entry_config->>'executionClass'='CAPITAL'
+        and e.entry_config#>>'{independentRecovery,version}'='INDEPENDENT-ATHENA-LOSS-V2'
+        and coalesce(e.entry_client_order_id,'')<>'' and e.entry_order_id is null and e.exit_order_id is null
+        and e.remaining_count=0 and coalesce(e.entry_fee_cents,0)=0 and coalesce(e.exit_fee_cents,0)=0
+        and coalesce(e.exit_filled_count,0)=0 and coalesce(e.exit_notional_cents,0)=0 and coalesce(e.pnl_cents,0)=0
+        and e.entry_config#>>'{dispatchProof,version}'='HC2-R1-DISPATCH'
+        and e.entry_config#>>'{dispatchProof,submitted}'='false'
+        and length(e.entry_config#>>'{dispatchProof,reason}')>0
+        and (e.entry_config#>>'{dispatchProof,atMs}')::bigint>=e.opened_at_ms
+        and e.entry_config#>>'{entryFillProof,authoritative}' is distinct from 'true'
+        and exists(select 1 from sag_independent_no_send_v1 c
+         where c.entry_id=e.id and c.system_name=e.system_name and c.owner_id=e.owner_id and c.mode=e.mode
+          and c.reset_epoch=$4 and c.parent_entry_id=e.source_trade_id and c.concept_name=e.concept_name
+          and c.watch_authorization_id=$7 and c.client_order_id=e.entry_client_order_id
+          and c.seat=coalesce((e.entry_config#>>'{independentRecovery,seat}')::int,1)
+          and c.attempt_generation=coalesce((e.entry_config#>>'{independentRecovery,attemptGeneration}')::bigint,0))) as certified
+       from sag_entries e where e.system_name=$1 and e.owner_id=$2 and e.mode=$3
+        and e.source_trade_id=$5 and e.concept_name=$6
+        and coalesce((e.entry_config#>>'{independentRecovery,resetEpoch}')::bigint,
+          (e.entry_config->>'resetTimestampMs')::bigint,-1)=$4
+      ), history as (
+       select seat_n,count(*) as attempts,min(generation) as minimum_generation,max(generation) as maximum_generation,
+        count(distinct generation) as distinct_generations,count(*) filter(where certified) as certified_no_sends
+       from scoped group by seat_n
+      ) select e.*,latest.certified as independent_no_send_certified,
+       h.attempts,h.minimum_generation,h.maximum_generation,h.distinct_generations,h.certified_no_sends
+      from history h join scoped latest on latest.seat_n=h.seat_n and latest.generation=h.maximum_generation
+      join sag_entries e on e.id=latest.id order by h.seat_n,e.id limit 21 ${lock?'for update of e':''}`,
+       [String(watch.systemName),String(watch.ownerId),String(watch.mode),Number(watch.resetEpoch||0),
+        String(watch.parentEntryId),String(watch.concept),String(watch.authorizationId)]);
+    return r.rows.map(row=>({...rowEntry(row),independentNoSendCertified:row.independent_no_send_certified===true,
+      independentAttemptHistory:{version:'R15-INDEPENDENT-HISTORY-V1',attempts:Number(row.attempts),
+        minGeneration:Number(row.minimum_generation),maxGeneration:Number(row.maximum_generation),
+        distinctGenerations:Number(row.distinct_generations),certifiedNoSends:Number(row.certified_no_sends)}}));
   }
   async updateStarlightWatch(w,expectedRevision){
     const version=Number(expectedRevision);
@@ -5680,24 +5884,16 @@ export class Database {
         ||starlightNoSendRetryGeneration(persisted)===null){
         await client.query('ROLLBACK');started=false;return null;
       }
-      // Native watch lock serializes with SC1 capital entry INSERT. Query ALL
-      // children, including other clones, archived, rejected, and ambiguous.
-      // A single unknown child invalidates proof; absence is NOT used alone.
-      const linked=await client.query(`select id,system_name,owner_id,mode,ticker,
-          event_ticker,execution_class,status,close_reason,count,remaining_count,
-          entry_client_order_id,entry_order_id,exit_order_id,exit_client_order_id,entry_fee_cents,
-          exit_fee_cents,exit_filled_count,exit_notional_cents,entry_config,
-          archived,opened_at_ms
-        from sag_entries where concept_name='Crash Recovery Hunter'
-          and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
-        [String(watch.parentEntryId)]);
-      const childProof=starlightNoSendChildrenForRearm(persisted,linked.rows||[]);
+      const history=await prepareSC1NoSendHistory(client,{...persisted,revision:Number(row.revision)});
+      if(!history){await client.query('ROLLBACK');started=false;return null;}
+      const children=await readSC1UncertifiedChildren(client,persisted);
+      const childProof=starlightNoSendChildrenForRearm(persisted,children);
       if(!childProof.ok){await client.query('ROLLBACK');started=false;return null;}
       const proofs=Array.isArray(persisted.preDispatchRefusals)?persisted.preDispatchRefusals:[];
       const same=proofs.find(p=>p.source?.attemptId===source.attemptId);
       if(same){await client.query('ROLLBACK');started=false;return null;}
-      const generation=proofs.length;
-      if(generation>=64){await client.query('ROLLBACK');started=false;return null;}
+      const generation=history.generation;
+      if(generation>=Number.MAX_SAFE_INTEGER){await client.query('ROLLBACK');started=false;return null;}
       const now=Date.now();
       const proof={generation,reason,atMs:now,submitted:false,
         version:'HC2-R1-DISPATCH',ticker:String(quote.ticker),
@@ -5708,7 +5904,11 @@ export class Database {
         claimRevision:Number(row.revision),committedRevision:Number(row.revision)+1,
         authorizationId:String(watch.authorizationId),parentEntryId:String(watch.parentEntryId),
         id:`proof:${watch.authorizationId}:${row.revision}:${generation}`};
-      const next={...persisted,preDispatchRefusals:[...proofs,proof],
+      const archived=await archiveSC1NoSendProof(client,persisted,proof);
+      if(!archived?.inserted){await client.query('ROLLBACK');started=false;return null;}
+      const next={...persisted,preDispatchRefusals:[proof],
+        preDispatchRefusalCount:Number(persisted.preDispatchRefusalCount??proofs.length)+1,
+        ...(history.marker?{noSendRetryHistory:history.marker}:{}),
         lastPreDispatchRefusal:proof,lastAttemptReason:reason,
         lastAttemptStage:source.stage,lastAttemptAtMs:now};
       const updated=await client.query(`update sag_starlight_recovery_v1
@@ -5765,21 +5965,12 @@ export class Database {
         await client.query('ROLLBACK');started=false;return null;
       }
       const priorGen=starlightNoSendRetryGeneration(persisted);
-      if(priorGen===null||priorGen>=64){
+      if(priorGen===null||priorGen>=Number.MAX_SAFE_INTEGER){
         await client.query('ROLLBACK');started=false;return null;
       }
-      // Read every linked child in the watch-locked transaction, including
-      // rejected and archived records excluded by the worker's funded seats.
-      // Any unknown, cross-clone or potentially submitted child denies rearm.
-      const linked=await client.query(`select id,system_name,owner_id,mode,ticker,
-          event_ticker,execution_class,status,close_reason,count,remaining_count,
-          entry_client_order_id,entry_order_id,exit_order_id,exit_client_order_id,entry_fee_cents,
-          exit_fee_cents,exit_filled_count,exit_notional_cents,entry_config,
-          archived,opened_at_ms
-        from sag_entries where concept_name='Crash Recovery Hunter'
-          and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
-        [String(w.parentEntryId)]);
-      const children=linked.rows||[];
+      const history=await prepareSC1NoSendHistory(client,{...persisted,revision:Number(row.revision)});
+      if(!history){await client.query('ROLLBACK');started=false;return null;}
+      const children=await readSC1UncertifiedChildren(client,persisted);
       const childProof=starlightNoSendChildrenForRearm(persisted,children);
       if(!childProof.ok){await client.query('ROLLBACK');started=false;return null;}
       const now=Date.now();
@@ -5791,12 +5982,17 @@ export class Database {
         committedRevision:Number(row.revision)+1,atMs:now,
         id:`pre:${w.authorizationId}:${row.revision}:${priorGen+1}`};
       const proofs=Array.isArray(persisted.preDispatchRefusals)?[...persisted.preDispatchRefusals]:[];
-      // The generation is bounded and every new proof remains referentially
-      // stable after later quote, dashboard and restart state updates.
+      // Full immutable history lives in SQL. Only the newest proof remains
+      // in the executable watch so transient denials cannot grow its buffer.
       if(proofs.some(p=>String(p?.id)===refusal.id)){
         await client.query('ROLLBACK');started=false;return null;
       }
-      const nextWatch={...persisted,preDispatchRefusals:[...proofs,refusal],
+      const marker=await commitSC1NoSendGeneration(client,{...persisted,revision:Number(row.revision)},history,
+        {children,proof:refusal,proofIds:[refusal.id],reason});
+      if(!marker){await client.query('ROLLBACK');started=false;return null;}
+      const nextWatch={...persisted,preDispatchRefusals:[refusal],
+        preDispatchRefusalCount:Number(persisted.preDispatchRefusalCount??proofs.length)+1,
+        noSendRetryHistory:marker,
         lastPreDispatchRefusal:refusal,
         status:'WATCHING',claimAtMs:0,consumePending:false,
         noSendRetryGeneration:priorGen+1,
@@ -5859,18 +6055,9 @@ export class Database {
         ||Number(persisted.resetEpoch)!==Number(w.resetEpoch)){
         await client.query('ROLLBACK');started=false;return null;
       }
-      // Read ALL linked capital/shadow children, including archived, not just
-      // the latest/accepted seats. A different owner or any active, funded,
-      // or unknown row defeats the proof rather than creating a duplicate BUY.
-      const linked=await client.query(`select id,system_name,owner_id,mode,ticker,
-          event_ticker,execution_class,status,close_reason,count,remaining_count,
-          entry_client_order_id,entry_order_id,exit_order_id,exit_client_order_id,entry_fee_cents,
-          exit_fee_cents,exit_filled_count,exit_notional_cents,entry_config,
-          archived,opened_at_ms
-        from sag_entries where concept_name='Crash Recovery Hunter'
-          and source_trade_id=$1 order by opened_at_ms asc,id asc for share`,
-        [String(w.parentEntryId)]);
-      const children=linked.rows||[];
+      const history=await prepareSC1NoSendHistory(client,{...persisted,revision:Number(row.revision)});
+      if(!history){await client.query('ROLLBACK');started=false;return null;}
+      const children=await readSC1UncertifiedChildren(client,persisted);
       const proofs=Array.isArray(persisted.preDispatchRefusals)?persisted.preDispatchRefusals:[];
       const latest=proofs.at(-1);
       const watchProof=latest&&latest.submitted===false&&latest.version==='HC2-R1-DISPATCH'
@@ -5893,11 +6080,16 @@ export class Database {
         await client.query('ROLLBACK');started=false;return null;
       }
       const priorGeneration=starlightNoSendRetryGeneration(persisted);
-      if(priorGeneration===null||priorGeneration>=64){
+      if(priorGeneration===null||priorGeneration>=Number.MAX_SAFE_INTEGER){
         await client.query('ROLLBACK');started=false;return null;
       }
       const now=Date.now();
+      const proofIds=watchProof?[String(latest.id)]:children.map(child=>String(child.id));
+      const marker=await commitSC1NoSendGeneration(client,{...persisted,revision:Number(row.revision)},history,
+        {children,proof:watchProof?latest:null,proofIds,reason:'sc1_verified_pre_dispatch_rejection_rearmed'});
+      if(!marker){await client.query('ROLLBACK');started=false;return null;}
       const watch={...persisted,status:'WATCHING',claimAtMs:0,consumePending:false,
+        noSendRetryHistory:marker,preDispatchRefusals:proofs.slice(-1),
         noSendRetryGeneration:priorGeneration+1,
         recoveredChildId:null,retryNotBeforeMs:now+20_000,
         // Retain a persistent proof for precisely THESE historical rejected
@@ -5905,7 +6097,7 @@ export class Database {
         // reason while WATCHING; they must not silently revoke the proof or
         // allow a new, unverified child to be treated as safely rejected.
         rearmedNoSubmitChildIds:children.map(child=>String(child.id)),
-        rearmedNoSubmitProofIds:watchProof?[String(latest.id)]:children.map(child=>String(child.id)),
+        rearmedNoSubmitProofIds:proofIds,
         rearmedNoSubmitAtMs:now,
         lastAttemptReason:'sc1_verified_pre_dispatch_rejection_rearmed',lastAttemptAtMs:now};
       const updated=await client.query(`update sag_starlight_recovery_v1

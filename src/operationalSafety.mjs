@@ -97,9 +97,11 @@ export class BoundedCoalescingQueue {
     this.maxConcurrency=Math.max(1,Math.min(32,Math.floor(Number(maxConcurrency)||1)));
     this.maxPending=Number.isFinite(Number(maxPending))?Math.max(1,Math.floor(Number(maxPending))):OPS_LIMITS.queuePending;
     this.budget=budget;this.onError=onError;this.onDeferred=onDeferred;
-    this.pending=new Map();this.active=new Set();this.rerun=new Map();this.started=new Map();
+    this.pending=new Map();this.active=new Set();this.rerun=new Map();this.started=new Map();this.queuedAt=new Map();
     this.activeCount=0;this.totalStarted=0;this.totalCompleted=0;this.totalCoalesced=0;this.totalDeferred=0;this.totalFailed=0;this.errorHandlerFailures=0;
     this.maxObservedActive=0;this.maxObservedPending=0;this.lastDeferredAtMs=0;this.closed=false;
+    this.errorHandlerPromise=null;this.pendingError=null;this.errorHandlerCoalesced=0;
+    this.lastAttemptMs=0;this.lastSuccessMs=0;this.lastFailureMs=0;this.lastCompletedMs=0;
   }
   enqueue(key,task){
     const k=String(key||'');if(!k||typeof task!=='function')return false;
@@ -107,23 +109,39 @@ export class BoundedCoalescingQueue {
     if(this.active.has(k)){this.rerun.set(k,task);this.totalCoalesced++;return true;}
     if(this.pending.has(k)){this.pending.set(k,task);this.totalCoalesced++;return true;}
     if(this.pending.size>=this.maxPending||this.budget&&!this.budget.acquire())return this.defer(k);
-    this.pending.set(k,task);this.maxObservedPending=Math.max(this.maxObservedPending,this.pending.size);this.pump();return true;
+    this.pending.set(k,task);this.queuedAt.set(k,performance.now());this.maxObservedPending=Math.max(this.maxObservedPending,this.pending.size);this.pump();return true;
   }
   defer(key){this.totalDeferred++;this.lastDeferredAtMs=Date.now();try{this.onDeferred?.(key);}catch{}return false;}
   pump(){
     while(this.activeCount<this.maxConcurrency&&this.pending.size){
-      const [key,task]=this.pending.entries().next().value;this.pending.delete(key);this.active.add(key);this.started.set(key,performance.now());
+      const [key,task]=this.pending.entries().next().value;this.pending.delete(key);this.queuedAt.delete(key);this.active.add(key);this.started.set(key,performance.now());
       this.activeCount++;this.totalStarted++;this.maxObservedActive=Math.max(this.maxObservedActive,this.activeCount);
-      void Promise.resolve().then(task).catch(async error=>{
+      this.lastAttemptMs=Date.now();
+      void Promise.resolve().then(task).then(()=>{this.lastSuccessMs=Date.now();}).catch(error=>{
         this.totalFailed++;
-        try{await this.onError?.(error,key);}catch{this.errorHandlerFailures++;}
+        this.lastFailureMs=Date.now();
+        this.reportError(error,key);
       }).finally(()=>{
         this.active.delete(key);this.started.delete(key);this.activeCount--;this.totalCompleted++;
+        this.lastCompletedMs=Date.now();
         const rerun=this.rerun.get(key);this.rerun.delete(key);
-        if(rerun)this.pending.set(key,rerun);else this.budget?.release();
+        if(rerun){this.pending.set(key,rerun);this.queuedAt.set(key,performance.now());}else this.budget?.release();
         this.pump();
       });
     }
+  }
+  // R15: the actual task has already rejected. Optional error logging cannot
+  // retain its execution slot or block protection/entry work. Keep ONE real
+  // diagnostic callback plus ONE latest replacement; a slow audit cannot
+  // become an unbounded detached promise chain. Unresolved tasks above retain
+  // their original ownership and are never canceled or retried here.
+  reportError(error,key){
+    if(typeof this.onError!=='function')return;
+    if(this.errorHandlerPromise){this.pendingError={error,key};this.errorHandlerCoalesced++;return;}
+    const run=Promise.resolve().then(()=>this.onError(error,key))
+      .catch(()=>{this.errorHandlerFailures++;})
+      .finally(()=>{this.errorHandlerPromise=null;const next=this.pendingError;this.pendingError=null;if(next)this.reportError(next.error,next.key);});
+    this.errorHandlerPromise=run;
   }
   // Entry shutdown invalidates *waiting* work only. Active tasks and broker
   // mutations are never cancelled or made to appear completed; their existing
@@ -132,15 +150,22 @@ export class BoundedCoalescingQueue {
   clear(){
     const pending=this.pending.size,rerun=this.rerun.size;
     for(const key of this.pending.keys())this.budget?.release();
-    this.pending.clear();this.rerun.clear();
+    this.pending.clear();this.queuedAt.clear();this.rerun.clear();
     return {pendingCancelled:pending,rerunsCancelled:rerun,activeUnaffected:this.activeCount};
   }
   isIdle(){return this.activeCount===0&&this.pending.size===0&&this.rerun.size===0;}
   closeAdmission(){this.closed=true;}
-  snapshot(){return{maxConcurrency:this.maxConcurrency,maxPending:this.maxPending,active:this.activeCount,pending:this.pending.size,rerun:this.rerun.size,
+  snapshot(){
+    const now=performance.now();let oldestActiveKey=null,activeAt=now,oldestPendingKey=null,pendingAt=now;
+    for(const [key,at] of this.started)if(oldestActiveKey===null||at<activeAt){oldestActiveKey=key;activeAt=at;}
+    for(const [key,at] of this.queuedAt)if(oldestPendingKey===null||at<pendingAt){oldestPendingKey=key;pendingAt=at;}
+    return{maxConcurrency:this.maxConcurrency,maxPending:this.maxPending,active:this.activeCount,pending:this.pending.size,rerun:this.rerun.size,
     totalStarted:this.totalStarted,totalCompleted:this.totalCompleted,totalCoalesced:this.totalCoalesced,totalDeferred:this.totalDeferred,totalFailed:this.totalFailed,
+    lastAttemptMs:this.lastAttemptMs,lastSuccessMs:this.lastSuccessMs,lastFailureMs:this.lastFailureMs,lastCompletedMs:this.lastCompletedMs,
     errorHandlerFailures:this.errorHandlerFailures,maxObservedActive:this.maxObservedActive,maxObservedPending:this.maxObservedPending,lastDeferredAtMs:this.lastDeferredAtMs,
-    oldestActiveMs:this.started.size?Math.max(0,performance.now()-Math.min(...this.started.values())):0,closed:this.closed};}
+    oldestActiveMs:oldestActiveKey===null?0:Math.max(0,now-activeAt),oldestActiveKey,
+    oldestPendingMs:oldestPendingKey===null?0:Math.max(0,now-pendingAt),oldestPendingKey,
+    errorHandlerActive:!!this.errorHandlerPromise,errorHandlerPending:!!this.pendingError,errorHandlerCoalesced:this.errorHandlerCoalesced,closed:this.closed};}
 }
 
 // Bounded waiting with explicit rejection. A timed-out queued request never starts
@@ -154,15 +179,17 @@ export class RequestLane {
     this.reservedPending=Math.max(0,Math.min(pending-1,reservedPending));
     this.active=0;this.activeNormal=0;this.queue=[];this.rejected=0;this.completed=0;
     this.peakActive=0;this.peakPending=0;
+    this.activeJobs=new Map();this.sequence=0;this.queueWaitTotalMs=0;this.queueWaitMaxMs=0;
   }
-  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false}={}){
+  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false,owner='request'}={}){
     if(!Number.isFinite(deadline)||performance.now()>=deadline){this.rejected++;return Promise.reject(new Error('broker_request_queue_expired'));}
     const normalPending=this.queue.reduce((n,j)=>n+(j.critical?0:1),0);
     if(this.queue.length>=this.maximumPending||(!critical&&normalPending>=this.maximumPending-this.reservedPending)){
       this.rejected++;return Promise.reject(new Error('broker_request_backpressure'));
     }
     return new Promise((resolve,reject)=>{
-      const job={fn,resolve,reject,deadline,timer:null,critical:critical===true};
+      const job={fn,resolve,reject,deadline,timer:null,critical:critical===true,
+        id:++this.sequence,owner:String(owner).slice(0,160),queuedAt:performance.now()};
       // Expiring WAITING work never cancels a dispatched broker mutation.
       job.timer=setTimeout(()=>{
         const at=this.queue.indexOf(job);if(at<0)return;
@@ -186,13 +213,19 @@ export class RequestLane {
       const [job]=this.queue.splice(index,1);clearTimeout(job.timer);job.timer=null;
       if(performance.now()>=job.deadline){this.rejected++;job.reject(new Error('broker_request_queue_expired'));continue;}
       this.active++;if(!job.critical)this.activeNormal++;
+      job.startedAt=performance.now();this.activeJobs.set(job.id,job);
+      const waited=Math.max(0,job.startedAt-job.queuedAt);this.queueWaitTotalMs+=waited;this.queueWaitMaxMs=Math.max(this.queueWaitMaxMs,waited);
       this.peakActive=Math.max(this.peakActive,this.active);
       void Promise.resolve().then(job.fn).then(job.resolve,job.reject).finally(()=>{
-        this.active--;if(!job.critical)this.activeNormal--;this.completed++;this.pump();
+        this.activeJobs.delete(job.id);this.active--;if(!job.critical)this.activeNormal--;this.completed++;this.pump();
       });
     }
   }
-  snapshot(){return{active:this.active,pending:this.queue.length,maximumPending:this.maximumPending,concurrency:this.concurrency,
+  snapshot(){const now=performance.now();let oldest=null;for(const job of this.activeJobs.values())if(!oldest||job.startedAt<oldest.startedAt)oldest=job;
+    const pending=this.queue[0];return{active:this.active,pending:this.queue.length,maximumPending:this.maximumPending,concurrency:this.concurrency,
+    oldestActiveMs:oldest?Math.max(0,now-oldest.startedAt):0,oldestActiveKey:oldest?.owner||null,
+    oldestPendingMs:pending?Math.max(0,now-pending.queuedAt):0,oldestPendingKey:pending?.owner||null,
+    queueWaitTotalMs:this.queueWaitTotalMs,queueWaitMaxMs:this.queueWaitMaxMs,
     activeCritical:this.active-this.activeNormal,activeNormal:this.activeNormal,
     pendingCritical:this.queue.filter(j=>j.critical).length,pendingNormal:this.queue.filter(j=>!j.critical).length,
     reservedConcurrency:this.reservedConcurrency,reservedPending:this.reservedPending,
@@ -268,7 +301,7 @@ export class OperationalMonitor {
         && (s.lastSuccess==null||now<s.lastSuccess||now-s.lastSuccess>10_000);
       const stalled=s.required!==false&&(protectionEvidenceStale
         ||(!s.active&&elapsed>limits.idleMs)
-        ||(s.name==='protection'&&s.active&&elapsed>limits.durationMs));
+        ||(s.active&&elapsed>limits.durationMs));
       return{name:s.name,required:s.required!==false,active:s.active,attempts:s.attempts,lastAttemptMs:s.lastAttemptMs,lastSuccessMs:s.lastSuccessMs,lastDurationMs:s.lastDurationMs??0,
         runningMs:s.active?Math.max(0,elapsed):0,stalled,consecutiveFailures:s.consecutiveFailures,lastError:s.lastError};
     });

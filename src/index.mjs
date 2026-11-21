@@ -2,7 +2,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {assertQ17IsolatedDatabase} from './q17Profile.mjs';
 import {fileURLToPath} from 'node:url';
 import {dirname,resolve} from 'node:path';
-import {env} from './config.mjs';
+import {env,RELEASE} from './config.mjs';
 import {SagittariusEngine} from './engine.mjs';
 import {startServer} from './server.mjs';
 import {ProcessSentinel} from './operationalWatchdog.mjs';
@@ -13,7 +13,7 @@ const runtime={engine:null,bootCandidate:null,sentinel:new ProcessSentinel(),
   boot:{status:'starting',startedAtMs:Date.now(),lastAttemptMs:0,attempts:0,lastError:null,lastErrorStage:null,lastErrorMessage:null}};
 let stopping=false,stopPromise=null;
 const server=startServer(runtime,env.port,root);
-console.log(`Q-17 R9 HTTP listening on port ${env.port}; liveTransportPolicy=${env.allowLiveTrading?'ENABLED':'DISABLED'}`);
+console.log(`${RELEASE} HTTP listening on port ${env.port}; liveTransportPolicy=${env.allowLiveTrading?'ENABLED':'DISABLED'}`);
 
 async function bootLoop(){
   while(!stopping&&!runtime.engine){
