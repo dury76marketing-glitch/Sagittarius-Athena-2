@@ -1,3 +1,4 @@
+import {ClockPriority} from './clockPriority.mjs';
 // Sporting knowledge is durable; entry permission belongs to a fresh runtime
 // observation. Provider work and persistence do not manufacture authority.
 import {isEntryAuthorizedGameClockState,normalizeGameClockState,GAME_CLOCK_AUTHORITY,
@@ -98,7 +99,7 @@ export class EventClockRuntime{
       Promise.resolve().then(async()=>{
         if(entry.generation!==this.generation)return null;
         this.stats.resolutions++;
-        const state=await entry.work(this.current(entry.key));
+        const state=await entry.work(this.current(entry.key),entry.clockPriority);
         return entry.generation===this.generation?this.adopt(entry.key,state):null;
       }).then(entry.finish,entry.fail).finally(()=>{
         entry.settled=true;this.active--;
@@ -112,7 +113,16 @@ export class EventClockRuntime{
     const key=String(event),generation=this.generation,existing=this.pending.get(key);
     if(existing){
       this.stats.shared++;
-      if(priority==='entry'&&!existing.started){existing.priority='entry';this.drain();}
+      if(priority==='entry'){
+        existing.clockPriority.promote();
+        if(!existing.started){
+          // Replace only if the stronger callback subsumes all original requirements.
+          if(typeof work==='function'&&((forceFresh&&!existing.forceFresh)||(allowGameStats&&!existing.allowGameStats))&&(forceFresh||!existing.forceFresh)&&(allowGameStats||!existing.allowGameStats)){
+            existing.work=work;existing.forceFresh=forceFresh;existing.allowGameStats=allowGameStats;
+          }
+          existing.priority='entry';this.drain();
+        }
+      }
       const state=await existing.promise;
       if(generation!==this.generation)return null;
       const stronger=(forceFresh&&!existing.forceFresh)||(allowGameStats&&!existing.allowGameStats);
@@ -132,7 +142,7 @@ export class EventClockRuntime{
       else{this.stats.queueRejected++;return null;}
     }
     const entry={key,generation,forceFresh,allowGameStats,priority:priority==='entry'?'entry':'scan',
-      work,promise:null,started:false,settled:false,finish:null,fail:null,timer:null};
+      clockPriority:new ClockPriority(priority==='entry'),work,promise:null,started:false,settled:false,finish:null,fail:null,timer:null};
     entry.promise=new Promise((resolve,reject)=>{entry.finish=resolve;entry.fail=reject;});
     entry.timer=setTimeout(()=>this.cancelQueued(entry,'expired'),CLOCK_RUNTIME_POLICY.maximumQueueWaitMs);
     this.pending.set(key,entry);this.waiters.push(entry);

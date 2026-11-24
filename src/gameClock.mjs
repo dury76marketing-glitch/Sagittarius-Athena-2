@@ -1,3 +1,4 @@
+import {ClockPriority,inheritClockPriority,joinClockWork} from './clockPriority.mjs';
 // R33: Kalshi GET /markets can omit series_ticker even when an exact
 // event_ticker is present. This strict decomposition of the event identity
 // is ONLY a discovery/enrichment key, never official sporting-time proof,
@@ -201,6 +202,19 @@ function boundedObservation(liveRecord,liveClass,kind,now) {
     ||received-requested>GAME_CLOCK_AUTHORITY.boundedProviderRequestMaximumMs
     ||age< -2000||age>GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs)return 0;
   return kind==='pregame'?requested:received;
+}
+
+function unusableScanLive(record,id){
+  if(!record||record.entryQuality===true)return false;
+  if(record.error||!record.value)return true;
+  const requested=Number(record.requestedAtMs||0),received=Number(record.observedAtMs||0);
+  const raw=record.value?.live_data||record.value,details=raw?.details;
+  const slow=!Number.isSafeInteger(requested)||!Number.isSafeInteger(received)||requested<=0||received<requested||received-requested>GAME_CLOCK_AUTHORITY.boundedProviderRequestMaximumMs;
+  const delayed=details?.live_data_delayed===true||String(details?.live_data_delayed).toLowerCase()==='true';
+  if(!slow&&!delayed)return false;
+  const cls=classifyLiveData(raw);
+  if(cls.classification==='final'||cls.classification==='conflict'||(cls.milestoneId&&cls.milestoneId!==String(id)))return false;
+  return true;
 }
 
 function explicitActualStart(value){
@@ -873,54 +887,67 @@ export class GameClockAuthority {
     };
   }
 
-  async cached(cache, key, ttlMs, fn, { forceFresh = false, inFlight = null, forceRefreshMinAgeMs = ttlMs } = {}) {
+  async cached(cache, key, ttlMs, fn, { forceFresh = false, inFlight = null, forceRefreshMinAgeMs = ttlMs, clockPriority=null, retryUnusable=null } = {}) {
     const checkAtMs = Number(this.now());
     const hit = cache.get(key);
     if (hit && checkAtMs - hit.observedAtMs >= -2000 && checkAtMs - hit.observedAtMs <= ttlMs
-      && (!forceFresh || checkAtMs - hit.observedAtMs <= forceRefreshMinAgeMs)) {
+      && (!forceFresh || checkAtMs - hit.observedAtMs <= forceRefreshMinAgeMs)
+      && !(forceFresh&&retryUnusable?.(hit,key))) {
       return { ...hit, fromCache: true };
     }
-    if (inFlight?.has(key)) return inFlight.get(key);
+    if (inFlight?.has(key)) {
+      const shared=await joinClockWork(inFlight.get(key),clockPriority,forceFresh);
+      if(forceFresh&&retryUnusable?.(shared,key))return this.cached(cache,key,ttlMs,fn,{forceFresh,inFlight,forceRefreshMinAgeMs,clockPriority,retryUnusable});
+      return shared;
+    }
+    const signal=new ClockPriority(forceFresh),detach=inheritClockPriority(clockPriority,signal);
     const promise = (async () => {
       let value = null;
       let error = null;
-      try { value = await fn(); } catch (e) { error = cleanString(e?.message || e, 240); }
+      try { value = await fn(signal); } catch (e) { error = cleanString(e?.message || e, 240); }
       const observedAtMs = Number(this.now());
-      const record = { value, error, requestedAtMs:checkAtMs, observedAtMs, fromCache: false };
+      const record = { value, error, requestedAtMs:checkAtMs, observedAtMs, fromCache: false,entryQuality:forceFresh===true };
       this.setBoundedCache(cache, key, record);
       return record;
-    })().finally(() => inFlight?.delete(key));
+    })().finally(() => {detach();inFlight?.delete(key);});
+    promise.clockPriority=signal;
     if (inFlight) inFlight.set(key, promise);
     return promise;
   }
 
-  async seriesMilestonesForSeries(seriesTicker, { forceFresh = false } = {}) {
+  async seriesMilestonesForSeries(seriesTicker, { forceFresh = false, entryIntent = forceFresh, clockPriority=null } = {}) {
     const series = String(seriesTicker || '');
     if (!series || typeof this.kalshi?.getMilestonesForSeries !== 'function') return { rows: [], error: null, observedAtMs: Number(this.now()) };
     const now = Number(this.now());
     const hit = this.seriesMilestoneCache.get(series);
     const forceAllowed = !hit || now - Number(hit.observedAtMs || 0) >= GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs;
     if (hit && (!forceFresh || !forceAllowed) && now - Number(hit.observedAtMs || 0) <= GAME_CLOCK_AUTHORITY.seriesMilestoneCacheMs) return hit;
-    if (this.seriesMilestonePromises.has(series)) return this.seriesMilestonePromises.get(series);
+    if (this.seriesMilestonePromises.has(series)) return joinClockWork(this.seriesMilestonePromises.get(series),clockPriority,entryIntent);
+    const signal=new ClockPriority(entryIntent),detach=inheritClockPriority(clockPriority,signal);
     const promise = (async () => {
       let rows = [];
       let error = null;
-      try { rows = await this.kalshi.getMilestonesForSeries(series) || []; }
+      try { rows = await this.kalshi.getMilestonesForSeries(series,200,{entryIntent,clockPriority:signal}) || []; }
       catch (e) { error = cleanString(e?.message || e, 240); }
       const record = { rows, error, observedAtMs: Number(this.now()) };
       this.setBoundedCache(this.seriesMilestoneCache, series, record);
       return record;
-    })().finally(() => this.seriesMilestonePromises.delete(series));
+    })().finally(() => {detach();this.seriesMilestonePromises.delete(series);});
+    promise.clockPriority=signal;
     this.seriesMilestonePromises.set(series, promise);
     return promise;
   }
 
-  async milestoneForEvent(eventTicker, { seriesTicker = '', forceFresh = false, directOnSeriesMiss = false } = {}) {
+  async milestoneForEvent(eventTicker, { seriesTicker = '', forceFresh = false, directOnSeriesMiss = false, clockPriority=null } = {}) {
     const event = String(eventTicker || '');
     const series = String(seriesTicker || '');
     const cacheKey = `${event}|${series}`;
     const now = Number(this.now());
+    const scanOnlyMiss=value=>Boolean(value&&!value.milestone
+      &&value.discoverySource==='series_events_with_milestones'
+      &&value.directReason==null&&value.reason==='no_atomic_event_milestone');
     const hit = this.milestoneCache.get(cacheKey);
+    const entryEscalation=forceFresh&&scanOnlyMiss(hit?.value);
     if (hit) {
       let ttl = GAME_CLOCK_AUTHORITY.missingMilestoneCacheMs;
       if (hit.value?.milestone) ttl = GAME_CLOCK_AUTHORITY.milestoneCacheMs;
@@ -941,18 +968,25 @@ export class GameClockAuthority {
         &&hit.value?.directReason==null
         &&hit.value?.reason!=='ambiguous_atomic_milestone'
         &&age>=GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs);
-      if (age <= ttl && !eligibleScoutEscalation
+      if (age <= ttl && !eligibleScoutEscalation && !entryEscalation
         &&(!forceFresh || hit.value?.milestone || age < GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs))
         return hit.value;
       this.milestoneCache.delete(cacheKey);
     }
-    if (this.milestonePromises.has(cacheKey)) return this.milestonePromises.get(cacheKey);
+    if (this.milestonePromises.has(cacheKey)) {
+      const shared=await joinClockWork(this.milestonePromises.get(cacheKey),clockPriority,forceFresh);
+      // A scan-only result did not perform the exact-event lookup. Promote
+      // once after joining that weaker request, never bypass an ambiguity.
+      if(forceFresh&&scanOnlyMiss(shared))return this.milestoneForEvent(event,{seriesTicker:series,forceFresh,directOnSeriesMiss,clockPriority});
+      return shared;
+    }
 
+    const signal=new ClockPriority(forceFresh),detach=inheritClockPriority(clockPriority,signal);
     const promise = (async () => {
       let seriesRows = [];
       let seriesError = null;
       if (series && typeof this.kalshi?.getMilestonesForSeries === 'function') {
-        const seriesRecord = await this.seriesMilestonesForSeries(series, { forceFresh });
+        const seriesRecord = await this.seriesMilestonesForSeries(series, { forceFresh:forceFresh&&!entryEscalation, entryIntent:forceFresh,clockPriority:signal });
         seriesRows = seriesRecord.rows || [];
         seriesError = seriesRecord.error || null;
         const seriesSelection = selectEventMilestone(seriesRows, event);
@@ -983,7 +1017,7 @@ export class GameClockAuthority {
 
       let direct = [];
       let directError = null;
-      try { direct = await this.kalshi?.getMilestonesForEvent?.(event) || []; }
+      try { direct = await this.kalshi?.getMilestonesForEvent?.(event,500,{entryIntent:forceFresh,clockPriority:signal}) || []; }
       catch (e) { directError = cleanString(e?.message || e, 240); }
       const directSelection = selectEventMilestone(direct, event);
       if (directSelection.milestone) {
@@ -1016,37 +1050,50 @@ export class GameClockAuthority {
       }
       this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
       return value;
-    })().finally(() => this.milestonePromises.delete(cacheKey));
+    })().finally(() => {detach();this.milestonePromises.delete(cacheKey);});
+    promise.clockPriority=signal;
     this.milestonePromises.set(cacheKey, promise);
     return promise;
   }
 
-  async liveForMilestone(id, { forceFresh = false } = {}) {
+  async liveForMilestone(id, { forceFresh = false,clockPriority=null } = {}) {
     return this.cached(
       this.liveCache,
       String(id),
       GAME_CLOCK_AUTHORITY.liveDataCacheMs,
-      async () => this.kalshi?.getLiveData?.(id,{entryIntent:forceFresh}),
-      { forceFresh, inFlight: this.livePromises,
+      async signal => this.kalshi?.getLiveData?.(id,{entryIntent:forceFresh,clockPriority:signal}),
+      { forceFresh, inFlight: this.livePromises,clockPriority,retryUnusable:unusableScanLive,
         forceRefreshMinAgeMs: GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs },
     );
   }
 
-  async statsForMilestone(id, { forceFresh = false } = {}) {
+  async statsForMilestone(id, { forceFresh = false,clockPriority=null } = {}) {
     return this.cached(
       this.statsCache,
       String(id),
       GAME_CLOCK_AUTHORITY.gameStatsCacheMs,
-      async () => this.kalshi?.getGameStats?.(id,{entryIntent:forceFresh}),
-      { forceFresh, inFlight: this.statsPromises },
+      async signal => this.kalshi?.getGameStats?.(id,{entryIntent:forceFresh,clockPriority:signal}),
+      { forceFresh, inFlight: this.statsPromises,clockPriority },
     );
   }
 
   async resolveEvent(options={}){
-    const state=await this.resolveEventEvidence(options);
+    let optionalStatsExpiredLive=false;
+    let state=await this.resolveEventEvidence({...options,
+      onOptionalStatsExpiry:()=>{optionalStatsExpiredLive=true;}});
     const event=String(options.eventTicker||options.quotes?.[0]?.eventTicker
       ||options.quotes?.[0]?.ticker||'');
-    const now=Math.max(Number(options.now)||0,Number(this.now())||0);
+    let now=Math.max(Number(options.now)||0,Number(this.now())||0);
+    // Optional stats may consume a previously accepted LIVE observation's
+    // complete freshness budget. One entry-intent re-resolution is allowed,
+    // using the cached stats and genuinely new LIVE evidence; no restamping.
+    if(options.forceFresh===true&&optionalStatsExpiredLive
+      &&!['FINAL','CONFLICT'].includes(state.phase)
+      &&!isEntryAuthorizedGameClockState(state,event,now)){
+      state=await this.resolveEventEvidence({...options,now,
+        priorState:latestSameEventClockState(event,options.priorState,state)});
+      now=Math.max(now,Number(this.now())||0);
+    }
     // Optional stats, lookup queues and later work may consume the original
     // freshness budget. Resolve permissions at completion, not request start.
     return expireGameClockAuthorization(state?{...state,lastCheckedAtMs:now}:state,event,now);
@@ -1061,6 +1108,8 @@ export class GameClockAuthority {
     forceFresh = false,
     allowObservedActivityClock = false,
     minimumElapsedMs = 0,
+    onOptionalStatsExpiry = null,
+    clockPriority=null,
   } = {}) {
     const event = String(eventTicker || quotes[0]?.eventTicker || quotes[0]?.ticker || '');
     // Market payloads often omit series_ticker. Recover a strictly shaped
@@ -1105,7 +1154,7 @@ export class GameClockAuthority {
     let pbpCount = 0;
     let statsError = null;
     try {
-      milestoneSelection = await this.milestoneForEvent(event, { seriesTicker, forceFresh, directOnSeriesMiss });
+      milestoneSelection = await this.milestoneForEvent(event, { seriesTicker, forceFresh, directOnSeriesMiss,clockPriority });
       milestone = milestoneSelection?.milestone || null;
     } catch {
       milestoneSelection = { milestone: null, reason: 'milestone_lookup_failed', candidates: 0 };
@@ -1138,7 +1187,7 @@ export class GameClockAuthority {
         &&String(prior.milestoneId)!==String(milestone.id))
         return makeConflict(event,decisionNow(),prior,'provider_milestone_changed',{
           ...milestoneMeta,occurrenceTimeMs,entryAuthorized:false});
-      const liveRecord = await this.liveForMilestone(milestone.id, { forceFresh });
+      const liveRecord = await this.liveForMilestone(milestone.id, { forceFresh,clockPriority });
       liveError = liveRecord.error || null;
       const rawLive = liveRecord.value;
       const liveData = rawLive?.live_data || rawLive;
@@ -1257,8 +1306,11 @@ export class GameClockAuthority {
             lateGame:direct.lateGame,remainingMs:direct.remainingMs,
           });
         }
-        const statsRecord=allowGameStats?await this.statsForMilestone(milestone.id,{forceFresh}):null;
+        const statsRecord=allowGameStats?await this.statsForMilestone(milestone.id,{forceFresh,clockPriority}):null;
         statsError=statsRecord?.error||null;
+        if(statsRecord&&liveFresh
+          &&decisionNow()-liveObservedAtMs>GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs)
+          onOptionalStatsExpiry?.();
         const proof=extractOfficialSportingEvidence(liveRecord?.value,statsRecord?.value,milestone);
         const statsIdentity=String(statsRecord?.value?.milestone_id||statsRecord?.value?.game_stats?.milestone_id||'');
         if(statsIdentity && statsIdentity!==expectedMilestoneId)
@@ -1389,7 +1441,7 @@ export class GameClockAuthority {
           reason:'proven_start_retained_without_fresh_positive_live_status'};
       }
       const statsRecord = allowGameStats
-        ? await this.statsForMilestone(milestone.id, { forceFresh })
+        ? await this.statsForMilestone(milestone.id, { forceFresh,clockPriority })
         : null;
       statsError = statsRecord?.error || null;
       pbpCount = countPbpEvents(statsRecord?.value);

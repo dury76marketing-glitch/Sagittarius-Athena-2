@@ -6683,7 +6683,7 @@ export class SagittariusEngine {
     const runtime=this.clockRuntime(),systemName=this.settings.systemName,generation=runtime.generation;
     const currentScope=()=>{runtime.useScope(this.settings);return generation===runtime.generation;};
     const exact=raw=>{const state=normalizeGameClockState(raw,eventTicker);return state?.eventTicker===String(eventTicker)?state:null;};
-    let state=await runtime.resolve(eventTicker,{forceFresh,allowGameStats},async memory=>{
+    let state=await runtime.resolve(eventTicker,{forceFresh,allowGameStats},async (memory,clockPriority)=>{
       let prior=latestSameEventClockState(eventTicker,memory,priorState,
         ...(quotes||[]).map(q=>q?.gameClockState));
       if(!prior&&typeof this.db?.gameClockStates==='function'){
@@ -6692,7 +6692,7 @@ export class SagittariusEngine {
         prior=exact(rows.get(eventTicker));
       }
       const next=exact(await this.gameClock.resolveEvent({eventTicker,quotes,priorState:prior,
-        now:Date.now(),allowGameStats,forceFresh,allowObservedActivityClock:false,
+        now:Date.now(),allowGameStats,forceFresh,clockPriority,allowObservedActivityClock:false,
         minimumElapsedMs:Math.max(0,Number(this.settings.minGameMinutes||0))*60000}));
       if(!currentScope()||!next)return null;
       // A same-event FINAL is sticky; a late older result cannot be persisted

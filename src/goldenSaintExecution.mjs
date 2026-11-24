@@ -88,6 +88,7 @@ export class GoldenSaintRuntime {
     // owns one bounded retry record, independent of the number of Saints.
     this.clockWaits=new Map();this.clockRefreshRunning=0;
     this.clockWakeTimer=null;this.clockWakeAtMs=0;this.clockEvidenceVersions=new Map();
+    this.clockWaitEvidence=new Map();
     this.scopeKey=JSON.stringify(this.scope());
     this.tickerCohortStart=null;this.tickerCohortNext=null;
     this.tickerCohortAtMs=0;this.tickerCohortDirty=true;this.tickerCardSignature='';
@@ -386,7 +387,7 @@ export class GoldenSaintRuntime {
     this.pageCursor=null;this.recoveryCursor=null;this.forceFullPage=true;
     this.lastFullPageAtMs=0;this.lastRecoverySweepAtMs=0;this.lastNoSeatSweepAtMs=0;
     this.clockRefreshPromises.clear();this.clockRefreshMemo.clear();
-    this.clockWaits.clear();this.clockEvidenceVersions.clear();
+    this.clockWaits.clear();this.clockEvidenceVersions.clear();this.clockWaitEvidence.clear();
     this.tickerCohortStart=null;this.tickerCohortNext=null;
     this.tickerCohortAtMs=0;this.tickerCohortDirty=true;this.tickerCardSignature='';
     this.cardRevalidationCursor=null;this.cardRevalidationScope='';this.cardRevalidationComplete=false;
@@ -444,6 +445,35 @@ export class GoldenSaintRuntime {
       &&Number(raw.yesBid)===Number(saved.yesBid)
       &&Number(raw.yesAsk)===Number(saved.yesAsk));
   }
+  sampleClockWait(event,quote,reason){
+    // Bounded, read-only observation. One sample per event/reason/30s, not
+    // per Saint or quote. No provider requests, SQL, or admission changes.
+    try{
+      const now=Date.now(),previous=this.clockWaitEvidence.get(event);
+      if(previous?.verdict===reason&&now-previous.atMs<30000)return;
+      const state=this.regularClockQuote(quote).gameClockState;
+      const evidence=state?.evidence||{},live=evidence.liveData||evidence.currentLiveData||{};
+      const str=v=>v==null?null:String(v).slice(0,160);
+      this.clockWaitEvidence.delete(event);
+      this.clockWaitEvidence.set(event,{atMs:now,eventTicker:event,ticker:str(quote?.ticker),
+        verdict:reason,phase:str(state?.phase),cause:str(state?.reason),
+        milestoneId:str(state?.milestoneId),discoverySource:str(state?.milestoneDiscoverySource),
+        milestoneReason:str(evidence.milestoneReason),liveClassification:str(live.classification||state?.liveStatus),
+        providerDelayed:live.delayed===true||state?.liveDataDelayed===true,
+        providerError:Boolean(evidence.liveError||evidence.statsError||evidence.milestoneError),
+        pregameAccepted:state?.pregameObservationAccepted===true,
+        pregameAtMs:Number(state?.pregameObservedAtMs)||null,
+        sourceObservedAtMs:Number(state?.sourceObservationAtMs)||null,
+        evidenceObservedAtMs:Number(state?.evidenceObservedAtMs)||null,
+        occurrenceAtMs:Number(state?.occurrenceTimeMs)||null,
+        scheduledAtMs:Number(state?.scheduledStartMs||state?.milestoneStartMs)||null,
+        boundedLowerMs:Number(state?.boundedStartLowerMs)||null,
+        boundedUpperMs:Number(state?.boundedStartUpperMs)||null,
+        minGameMinutes:Number(this.settings().minGameMinutes||0),
+        maxGameMinutes:Number(this.settings().maxGameMinutes||0)});
+      while(this.clockWaitEvidence.size>64)this.clockWaitEvidence.delete(this.clockWaitEvidence.keys().next().value);
+    }catch{/* diagnostic only */}
+  }
   deferRegularClockCandidate(watch,quote,scope){
     if(saintRole(watch?.saint)?.role!=='REGULAR')return false;
     const decision=this.regularClockDecision(quote);
@@ -456,6 +486,7 @@ export class GoldenSaintRuntime {
     this.stats.clockDeferred++;
     this.noteDecision('clock_wait',decision.reason,watch,quote);
     if(!event||!validScope(scope,this.scope()))return true;
+    this.sampleClockWait(event,quote,decision.reason);
     const retryable=['live_start_unknown','sporting_evidence_stale_or_unverified',
       'minimum_game_time_wait'].includes(decision.reason);
     if(!retryable){
@@ -497,15 +528,21 @@ export class GoldenSaintRuntime {
     return true;
   }
   scheduleClockWait(){
+    let next=Infinity;
+    if(this.started&&!this.engine.shuttingDown&&this.engine.running&&this.settings().engineActive===true
+      &&this.clockRefreshRunning<R17_FEED_POLICY.clockRefreshConcurrency){
+      for(const wait of this.clockWaits.values())if(!wait.running)next=Math.min(next,wait.dueAtMs);
+    }
+    const now=Date.now();
+    const delay=Number.isFinite(next)?Math.max(0,Math.min(2_147_483_647,Math.ceil(next-now))):null;
+    const due=delay===null?0:now+delay;
+    // Repeated identical refusals must not cancel/reallocate the same wake.
+    // A changed earliest deadline, scope reset or stop still cancels it.
+    if(this.clockWakeTimer&&delay!==null&&this.clockWakeAtMs===due)return;
     if(this.clockWakeTimer)clearTimeout(this.clockWakeTimer);
     this.clockWakeTimer=null;this.clockWakeAtMs=0;
-    if(!this.started||this.engine.shuttingDown||!this.engine.running||this.settings().engineActive!==true
-      ||this.clockRefreshRunning>=R17_FEED_POLICY.clockRefreshConcurrency)return;
-    let next=Infinity;
-    for(const wait of this.clockWaits.values())if(!wait.running)next=Math.min(next,wait.dueAtMs);
-    if(!Number.isFinite(next))return;
-    const delay=Math.max(0,Math.min(2_147_483_647,Math.ceil(next-Date.now())));
-    this.clockWakeAtMs=Date.now()+delay;
+    if(delay===null)return;
+    this.clockWakeAtMs=due;
     this.clockWakeTimer=setTimeout(()=>{
       this.clockWakeTimer=null;this.clockWakeAtMs=0;this.drainClockWaits();
     },delay);
@@ -524,11 +561,18 @@ export class GoldenSaintRuntime {
       void Promise.resolve().then(async()=>{
         if(!this.started||wait.generation!==this.executionGeneration
           ||!validScope(wait.scope,this.scope()))return;
-        const quote=this.engine.market?.getQuote?.(wait.ticker)
-          ||this.quoteSamples.get(wait.ticker)?.at(-1)||{ticker:wait.ticker,eventTicker:event};
-        // A reused ticker may not transport another event's authority.
-        if(String(quote.eventTicker||quote.ticker||'')!==event)
-          return {decision:{action:'BLOCK',reason:'clock_event_identity_mismatch'}};
+        const targets=[wait.ticker,...wait.tickers];let quote=null,fallback=null;
+        for(const ticker of targets){
+          const current=this.engine.market?.getQuote?.(ticker);
+          if(current&&String(current.eventTicker||current.ticker||'')!==event)continue;
+          const candidate=current||this.quoteSamples.get(ticker)?.at(-1);
+          if(candidate&&String(candidate.eventTicker||candidate.ticker||'')===event){quote=candidate;break;}
+          if(!candidate&&!fallback)fallback={ticker,eventTicker:event};
+        }
+        quote=quote||fallback;
+        // A reused ticker may not transport another event's authority; a
+        // valid sibling may still own this event's pending refresh.
+        if(!quote)return {decision:{action:'BLOCK',reason:'clock_event_identity_mismatch'}};
         return this.regularClockPreflight({...quote});
       }).then(result=>{
         if(!result||!this.started||wait.generation!==this.executionGeneration

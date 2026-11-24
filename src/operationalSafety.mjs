@@ -184,7 +184,8 @@ export class RequestLane {
     this.peakActive=0;this.peakPending=0;
     this.activeJobs=new Map();this.sequence=0;this.queueWaitTotalMs=0;this.queueWaitMaxMs=0;
   }
-  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false,owner='request',priority='normal'}={}){
+  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false,owner='request',priority='normal',clockPriority=null}={}){
+    if(!critical&&clockPriority?.entry===true)priority='clock';
     if(!Number.isFinite(deadline)||performance.now()>=deadline){this.rejected++;return Promise.reject(new Error('broker_request_queue_expired'));}
     const normalPending=this.queue.reduce((n,j)=>n+(j.critical?0:1),0);
     const backgroundPending=this.queue.reduce((n,j)=>n+(!j.critical&&j.priority!=='clock'?1:0),0);
@@ -197,15 +198,22 @@ export class RequestLane {
     return new Promise((resolve,reject)=>{
       const job={fn,resolve,reject,deadline,timer:null,critical:critical===true,
         priority:priority==='clock'||priority==='book'?priority:'normal',
-        id:++this.sequence,owner:String(owner).slice(0,160),queuedAt:performance.now()};
+        id:++this.sequence,owner:String(owner).slice(0,160),queuedAt:performance.now(),detachPriority:null};
       // Expiring WAITING work never cancels a dispatched broker mutation.
       job.timer=setTimeout(()=>{
         const at=this.queue.indexOf(job);if(at<0)return;
-        this.queue.splice(at,1);job.timer=null;this.rejected++;
+        this.queue.splice(at,1);job.timer=null;job.detachPriority?.();this.rejected++;
         reject(new Error('broker_request_queue_expired'));this.pump();
       },Math.max(1,Math.ceil(deadline-performance.now())));
       job.timer.unref?.();
-      this.queue.push(job);this.peakPending=Math.max(this.peakPending,this.queue.length);this.pump();
+      this.queue.push(job);this.peakPending=Math.max(this.peakPending,this.queue.length);
+      if(!critical&&job.priority!=='clock'&&clockPriority){
+        job.detachPriority=clockPriority.subscribe(()=>{
+          if(!this.queue.includes(job)||performance.now()>=job.deadline)return;
+          job.priority='clock';this.pump();
+        });
+      }
+      this.pump();
     });
   }
   pump(){
@@ -231,7 +239,7 @@ export class RequestLane {
       const index=normal>=0&&this.activeNormal===0&&this.active>=this.concurrency-1
         ?normal:critical>=0?critical:normal;
       if(index<0)return;
-      const [job]=this.queue.splice(index,1);clearTimeout(job.timer);job.timer=null;
+      const [job]=this.queue.splice(index,1);clearTimeout(job.timer);job.timer=null;job.detachPriority?.();
       if(performance.now()>=job.deadline){this.rejected++;job.reject(new Error('broker_request_queue_expired'));continue;}
       this.active++;if(!job.critical){this.activeNormal++;if(job.priority!=='clock')this.activeBackground++;this.normalTurn=nextTurn;}
       job.startedAt=performance.now();this.activeJobs.set(job.id,job);

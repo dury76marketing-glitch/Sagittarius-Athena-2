@@ -523,8 +523,11 @@ export class KalshiClient {
     const mutation=method.toUpperCase()!=='GET'||options.mutation===true;
     const critical=!mutation&&(this.accountReadPath(apiPath)
       ||options.protectiveRead===true&&/^\/markets\/[^/]+(?:\/orderbook)?(?:\?|$)/.test(apiPath));
+    const sportingRead=!mutation&&(/^\/live_data\/milestone\//.test(apiPath)
+        ||/^\/milestones\?/.test(apiPath)||(/^\/events\?/.test(apiPath)&&apiPath.includes('with_milestones=true')));
+    const clockPriority=sportingRead?options.clockPriority:null;
     const priority=!mutation&&/\/orderbook(?:\?|$)/.test(apiPath)?'book'
-      :!mutation&&options.entryIntent===true&&/^\/live_data\/milestone\//.test(apiPath)?'clock':'normal';
+      :sportingRead&&(options.entryIntent===true||clockPriority?.entry===true)?'clock':'normal';
     const deadline=Math.min(performance.now()+OPS_LIMITS.requestBudgetMs,
       Number.isFinite(options.deadline)?options.deadline:Infinity);
     const lane=mutation?this.mutationLane:this.readLane;
@@ -544,7 +547,7 @@ export class KalshiClient {
         return dispatch();
       }
       return dispatch();
-    },deadline,{critical,priority,owner:`${method}:${this.readCategory(apiPath)}:${String(body?.client_order_id||'').slice(0,100)}`});}
+    },deadline,{critical,priority,clockPriority,owner:`${method}:${this.readCategory(apiPath)}:${String(body?.client_order_id||'').slice(0,100)}`});}
     catch(error){result={ok:false,status:0,...(!started?{notSubmitted:true}:{}),data:{error:String(error?.message||'broker_request_failed')},transportCode:transportCodeOf(error)};}
     finally{if(mutation&&result?.notSubmitted!==true){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'finished'});}}
     if(!result.ok&&!mutation){
@@ -883,7 +886,7 @@ export class KalshiClient {
   // bounded to a small number of attempts so an unavailable enrichment API can
   // never stall the main scanner. Callers fail closed if the evidence is not
   // available.
-  async getMilestonesForEvent(eventTicker, limit = 500) {
+  async getMilestonesForEvent(eventTicker, limit = 500, {entryIntent=false,clockPriority=null}={}) {
     const event = String(eventTicker || '');
     if (!event) return [];
     const cap = Math.max(1, Math.min(500, Math.floor(Number(limit) || 500)));
@@ -898,7 +901,7 @@ export class KalshiClient {
         'GET',
         `/milestones?limit=${cap}&related_event_ticker=${encodeURIComponent(event)}${suffix}`,
         null,
-        { timeoutMs: 1800, maxAttempts: 2, authenticated: false, preferFallbackHost: true },
+        { timeoutMs: 1800, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent,clockPriority },
       );
       if (!r.ok) throw new Error(`milestones ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
       out.push(...(Array.isArray(r.data?.milestones) ? r.data.milestones : []));
@@ -914,7 +917,7 @@ export class KalshiClient {
   // `events?with_milestones=true` pages once per event caused a provider request
   // storm and 429s. This primitive returns the bounded deduplicated series set;
   // GameClockAuthority performs the exact-event membership selection locally.
-  async getMilestonesForSeries(seriesTicker = '', limit = 200) {
+  async getMilestonesForSeries(seriesTicker = '', limit = 200, {entryIntent=false,clockPriority=null}={}) {
     const series = String(seriesTicker || '');
     if (!series) return [];
     const cap = Math.max(1, Math.min(200, Math.floor(Number(limit) || 200)));
@@ -926,7 +929,7 @@ export class KalshiClient {
         'GET',
         `/events?limit=${cap}&series_ticker=${encodeURIComponent(series)}&with_milestones=true&status=open${suffix}`,
         null,
-        { timeoutMs: 1800, maxAttempts: 2, authenticated: false, preferFallbackHost: true },
+        { timeoutMs: 1800, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent,clockPriority },
       );
       if (!r.ok) throw new Error(`events_with_milestones ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
       for (const m of Array.isArray(r.data?.milestones) ? r.data.milestones : []) {
@@ -964,27 +967,27 @@ export class KalshiClient {
     });
   }
 
-  async getLiveData(milestoneId,{entryIntent=false}={}) {
+  async getLiveData(milestoneId,{entryIntent=false,clockPriority=null}={}) {
     const id = String(milestoneId || '');
     if (!id) return null;
     const r = await this.request(
       'GET',
       `/live_data/milestone/${encodeURIComponent(id)}`,
       null,
-      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent },
+      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent,clockPriority },
     );
     if (!r.ok) throw new Error(`live_data ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
     return r.data?.live_data || r.data || null;
   }
 
-  async getGameStats(milestoneId,{entryIntent=false}={}) {
+  async getGameStats(milestoneId,{entryIntent=false,clockPriority=null}={}) {
     const id = String(milestoneId || '');
     if (!id) return null;
     const r = await this.request(
       'GET',
       `/live_data/milestone/${encodeURIComponent(id)}/game_stats`,
       null,
-      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent },
+      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent,clockPriority },
     );
     if (!r.ok) throw new Error(`game_stats ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
     return r.data || null;
