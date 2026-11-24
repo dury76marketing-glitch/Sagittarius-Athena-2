@@ -1,5 +1,6 @@
+import {GOLDEN_SAINTS_REGULAR} from './goldenSaintCards.mjs';
 import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
-import {proveSingleLiveSettlement, proveExactLiveSellClose, proveLiveSettlementSeats, isLegacyFundedQuarantine, isBrokerFlatEconomicUnknown} from './liveSettlementReconciliation.mjs';
+import {proveSingleLiveSettlement, proveExactLiveSellClose, proveLiveSettlementSeats, isLegacyFundedQuarantine, isBrokerFlatEconomicUnknown, attributeVerifiedSettlementToBrokerFlat} from './liveSettlementReconciliation.mjs';
 import {deadline,profitLearningEntry} from './runtimeMemory.mjs';
 import { randomUUID } from 'node:crypto';
 import {clientCloneTag,classifyCloneRestingOrders} from './cloneIdentity.mjs';
@@ -13,6 +14,17 @@ import { assessAthenaBrain } from './athena.mjs';
 import { classifyDeterministic } from './learning.mjs';
 
 // The capability is module-private and is used ONLY by the hermetic virtual journal below.
+// A fully reconciled losing Aries-Capricorn position may authorize Aquarius;
+// a losing Aquarius may authorize Pisces. Pisces is terminal. This is only a
+// wake notification: native PostgreSQL independently re-verifies the entry,
+// exit/fill proof, scope, economics and unique recovery lineage.
+const R17_RECOVERY_PARENT_CONCEPTS=new Set([
+  ...GOLDEN_SAINTS_REGULAR.map(name=>`R17:${name}`),'R17:Aquarius']);
+const isR17ClosedNetLoss=(entry)=>Boolean(entry?.status==='closed'
+  &&Number(entry?.remainingCount)===0&&Number(entry?.pnlCents)<0
+  &&entry?.executionClass==='CAPITAL'
+  &&R17_RECOVERY_PARENT_CONCEPTS.has(entry?.conceptName));
+
 const SHADOW_EVALUATION = Symbol('shadow-only-evaluation');
 const SHADOW_GUARD_PROCESS = randomUUID();
 const SHADOW_RECEIPTS = new WeakMap();
@@ -38,7 +50,7 @@ const AMBIGUOUS_ORDER_GRACE_MS = 10_000;
 // authoritative broker has repeatedly reported exactly zero inventory and the
 // complete Sagittarius client-prefix history proves this row has no own SELL
 // receipt. The row is quarantined, never economically closed.
-const BROKER_ORPHAN_ZERO_CONFIRMATIONS = 3;
+const BROKER_ORPHAN_ZERO_CONFIRMATIONS = 1;
 const BROKER_ORPHAN_ZERO_MIN_SPAN_MS = 5_000;
 const BROKER_ORPHAN_HISTORY_RECHECK_MS = 2_000;
 const BROKER_ORPHAN_STATUS = 'reconciliation_orphaned';
@@ -65,7 +77,8 @@ function isFrozenAuroraEntry(entry) {
 }
 
 function starlightOwnsIndependentAurora(entry){
-  return String(entry?.conceptName)==='Crash Recovery Hunter';
+  return String(entry?.conceptName)==='Crash Recovery Hunter'
+    ||String(entry?.conceptName||'').startsWith('R17:');
 }
 
 function plasmaScaleInOwnsAurora(entry){
@@ -75,7 +88,7 @@ function plasmaScaleInOwnsAurora(entry){
 // GH1 recovery children always use their own immutable Aurora, never a legacy
 // Freezing Coffin overlay, including after settings changes or disablement.
 function greatHornOwnsIndependentAurora(entry){
-  return (String(entry?.conceptName)==='Great Horn Recovery'||String(entry?.conceptName)==='Crystal Wall Recovery'||String(entry?.conceptName)==='Sagittarius Arrow Recovery'||String(entry?.conceptName)==='Scarlet Needle Recovery'||String(entry?.conceptName)==='Pegasus Ryu Sei Ken Recovery') && entry?.entryConfig?.executionClass==='CAPITAL' && isFrozenAuroraEntry(entry);
+  return (String(entry?.conceptName)==='Great Horn Recovery'||String(entry?.conceptName)==='Crystal Wall Recovery'||String(entry?.conceptName)==='Sagittarius Arrow Recovery'||String(entry?.conceptName)==='Scarlet Needle Recovery'||String(entry?.conceptName)==='Pegasus Ryu Sei Ken Recovery'||String(entry?.conceptName||'').startsWith('R17:')) && entry?.entryConfig?.executionClass==='CAPITAL' && isFrozenAuroraEntry(entry);
 }
 function recoveryOwnsIndependentAurora(entry){
   return starlightOwnsIndependentAurora(entry)||plasmaScaleInOwnsAurora(entry)||greatHornOwnsIndependentAurora(entry);
@@ -782,6 +795,7 @@ export class ProfitGuard {
           brokerCount:0,originalStatus:String(fresh.status||''),originalCount:Number(fresh.count),
           confirmations:n(state.confirmations),firstObservedAtMs:n(state.firstObservedAtMs),
           closedAtMs:n(nowMs),economicClosure:false,pnlInferred:false,exitPriceInferred:false,
+          financialStatus:'BROKER_FLAT_FINANCIAL_RECONCILIATION_PENDING',
         }},
       };
       if(!await this.persistLiveExitSnapshot(fresh,closePatch))
@@ -882,6 +896,62 @@ export class ProfitGuard {
       for(const x of candidates)this.brokerOrphanCandidates.delete(x.id);
     }
     return{recovered:false,recoveredEntries:0,quarantined:quarantined>0,quarantinedEntries:quarantined,candidates:candidates.length};
+  }
+
+
+  // Lane C. Does not gate entries. Attributes a proven account settlement to
+  // this clone's broker-flat rows only when quantity conservation holds.
+  async reconcileBrokerFlatSettlements(){
+    if(typeof this.db.liveUnresolvedBrokerFlatEntries!=='function')return {ok:false,reason:'reader_unavailable'};
+    if(typeof this.db.liveAccountSettlementProofs!=='function')return {ok:false,reason:'proof_reader_unavailable'};
+    const s=this.getSettings();
+    const flat=await this.db.liveUnresolvedBrokerFlatEntries(s.ownerId,s.systemName,{limit:200}).catch(()=>[]);
+    if(!flat.length)return {ok:true,attributed:0};
+    const proofs=await this.db.liveAccountSettlementProofs(s.ownerId,{limit:100}).catch(()=>[]);
+    const byTicker=new Map();
+    const proofQty=new Map();
+    for(const p of proofs){
+      const proof=p.proof||{};
+      const qty=Number(proof.quantity||proof.ownedBuyQuantity||1);
+      proofQty.set(p.ticker,(proofQty.get(p.ticker)||0)+qty);
+      if(!byTicker.has(p.ticker))byTicker.set(p.ticker,proof);
+    }
+    let attributed=0;
+    const grouped=new Map();
+    for(const e of flat){
+      if(!grouped.has(e.ticker))grouped.set(e.ticker,[]);
+      grouped.get(e.ticker).push(e);
+    }
+    for(const [ticker,rows] of grouped){
+      const proof=byTicker.get(ticker);
+      if(!proof)continue;
+      const decision=attributeVerifiedSettlementToBrokerFlat({
+        marketResult:proof.marketResult,accountNetQuantity:proof.accountNetQuantity,
+        payoutCents:proof.marketResult==='no'?0:100,settledAtMs:proof.settledAtMs,
+        ticker,alreadySettledSameSide:Math.max(0,(proofQty.get(ticker)||0)),
+        brokerFlatRows:rows,
+      });
+      if(!decision.ok)continue;
+      for(const alloc of decision.allocations){
+        const entry=rows.find(r=>r.id===alloc.entryId);
+        if(!entry)continue;
+        const commit=await this.db.finalizeBrokerFlatEconomics(entry,{
+          type:'settlement',receiptAtMs:Number(alloc.settledAtMs),
+          grossProceedsCents:alloc.proceedsCents,exitFeeCents:0,provenance:{
+            version:'LIVE-BROKER-FLAT-ECONOMIC-REPLAY-V1',ticker,marketResult:alloc.marketResult,
+            quantity:alloc.quantity,soldCount:0,soldProceedsCents:0,soldFeeCents:0,
+            revenueCents:alloc.proceedsCents,settledAtMs:alloc.settledAtMs,
+            entryOrderId:entry.entryOrderId,entryClientOrderId:entry.entryClientOrderId,
+            source:'account_settlement_sibling_attribution',
+          },
+        }).catch((error)=>{
+          this.audit?.('live_broker_flat_attribution_rejected',{id:entry.id,ticker,reason:String(error?.message||error)},'warning').catch(()=>{});
+          return null;
+        });
+        if(commit?.applied)attributed++;
+      }
+    }
+    return {ok:true,attributed};
   }
 
   setState(entry, state) {
@@ -3462,6 +3532,7 @@ export class ProfitGuard {
       ||(closedEntry.conceptName==='Great Horn Recovery'&&pnl<0)
       ||(closedEntry.conceptName==='Sagittarius Arrow Recovery'&&pnl<0)
       ||(closedEntry.conceptName==='Scarlet Needle Recovery'&&pnl<0)
+      ||isR17ClosedNetLoss(closedEntry)
     ))this.notifyPositionClosed(closedEntry);
     return { closed: isClosed, remaining, filled, fillPriceCents: px, pnlCents: pnl, patch };
   }
@@ -3669,7 +3740,7 @@ export class ProfitGuard {
       // Contradictory exact-order evidence is never replaced by an inferred
       // ticker payout. Retain its actual reason in future diagnostic exports.
       if(conflicts.length)return outcome('settlement_exit_order_broker_conflict',{conflicts});
-      if(active.some(e=>!['open','exit_pending'].includes(e.status)))return outcome('settlement_entry_still_pending');
+      if(active.some(e=>!['open','exit_pending'].includes(e.status)&&!isBrokerFlatEconomicUnknown(e)))return outcome('settlement_entry_still_pending');
       const [positions,orders]=await Promise.all([this.kalshi.getPositions(),this.kalshi.getOpenOrders()]);
       if(!Array.isArray(positions)||!Array.isArray(orders))return outcome('settlement_broker_snapshot_invalid');
       if(positions.some(p=>String(p?.ticker??p?.market_ticker??'')===ticker
@@ -3996,7 +4067,8 @@ export class ProfitGuard {
       const closedEntry={...entry,...patch};
       await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
       if((closedEntry.conceptName==='Lightning Plasma'||closedEntry.conceptName==='Great Horn Recovery'
-        ||closedEntry.conceptName==='Sagittarius Arrow Recovery'||closedEntry.conceptName==='Scarlet Needle Recovery')
+        ||closedEntry.conceptName==='Sagittarius Arrow Recovery'||closedEntry.conceptName==='Scarlet Needle Recovery'
+        ||isR17ClosedNetLoss(closedEntry))
         &&Number(closedEntry.pnlCents)<0)
         this.notifyPositionClosed(closedEntry);
       if(profitLearningTrade){
@@ -4031,7 +4103,8 @@ export class ProfitGuard {
     const closedEntry={...entry,...patch};
     await this.completeOpportunityEpisode(closedEntry,{closedAtMs}).catch(()=>{});
     if((closedEntry.conceptName==='Lightning Plasma'||closedEntry.conceptName==='Great Horn Recovery'
-      ||closedEntry.conceptName==='Sagittarius Arrow Recovery'||closedEntry.conceptName==='Scarlet Needle Recovery')
+      ||closedEntry.conceptName==='Sagittarius Arrow Recovery'||closedEntry.conceptName==='Scarlet Needle Recovery'
+      ||isR17ClosedNetLoss(closedEntry))
       &&pnl<0)
       this.notifyPositionClosed(closedEntry);
     if(profitLearningTrade){

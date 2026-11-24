@@ -537,3 +537,36 @@ export function proveLiveSettlementSeats(entries, settlements, fills, market,
     allocatedRevenueCents,previouslyAllocatedRevenueCents,
     inventoryRepresentation,revenueRepresentation,evidence};
 }
+
+
+// Account-level settlement receipt describes the whole ticker. Sibling clones
+// that closed broker-flat without a receipt must receive the same market
+// result when quantity conservation holds. Never invent a result that does
+// not match the authenticated account net.
+export function attributeVerifiedSettlementToBrokerFlat({
+  marketResult,accountNetQuantity,payoutCents,settledAtMs,ticker,
+  alreadySettledSameSide=0,brokerFlatRows=[],
+}={}){
+  const result=String(marketResult||'').toLowerCase();
+  if(result!=='yes'&&result!=='no')return {ok:false,reason:'settlement_result_unproven'};
+  const net=Number(accountNetQuantity);
+  const payout=Number(payoutCents);
+  if(!Number.isFinite(net)||net<0||!Number.isFinite(payout)||(payout!==0&&payout!==100))
+    return {ok:false,reason:'settlement_account_economics_unproven'};
+  const rows=(brokerFlatRows||[]).filter(r=>r&&r.ticker===ticker&&Number(r.count)>0
+    &&r.closeReason==='broker_zero_inventory_closed'&&!r.exitOrderId&&!r.brokerSettlementProof);
+  const same=rows.filter(r=>String(r.side||'YES').toUpperCase()===(result==='yes'?'YES':'YES')
+    || (result==='no'&&String(r.side||'YES').toUpperCase()==='YES'));
+  // Binary YES positions lose when result is no (payout 0) and win when result is yes (payout 100).
+  const yesRows=rows.filter(r=>String(r.side||'YES').toUpperCase()!=='NO');
+  const already=Number(alreadySettledSameSide);
+  const flatQty=yesRows.reduce((sum,r)=>sum+Number(r.count),0);
+  const expected=already+flatQty;
+  if(Math.abs(expected-net)>1e-7)return {ok:false,reason:'settlement_sibling_conservation_failed',expected,net,already,flatQty};
+  const allocations=yesRows.map(r=>({
+    entryId:r.id,ticker,quantity:Number(r.count),payoutCents:payout,settledAtMs,
+    marketResult:result,proceedsCents:payout*Number(r.count),
+    entryOrderId:r.entryOrderId||null,entryClientOrderId:r.entryClientOrderId||null,
+  }));
+  return {ok:true,allocations,reason:null};
+}

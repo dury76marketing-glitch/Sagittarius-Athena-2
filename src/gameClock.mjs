@@ -1,13 +1,29 @@
+// R33: Kalshi GET /markets can omit series_ticker even when an exact
+// event_ticker is present. This strict decomposition of the event identity
+// is ONLY a discovery/enrichment key, never official sporting-time proof,
+// never a market rewrite and never an order/account permission.
+export function researchSeriesForMarket(q){
+  const explicit=String(q?.seriesTicker||'').trim();
+  if(explicit)return explicit;
+  const event=String(q?.eventTicker||'').trim().toUpperCase();
+  const match=/^(KX[A-Z0-9]{3,48})-[A-Z0-9][A-Z0-9-]*$/.exec(event);
+  return match&&/(GAME|MATCH)/.test(match[1])?match[1]:'';
+}
+
+
 export const GAME_CLOCK_AUTHORITY = Object.freeze({
-  version: 'GCA2',
-  legacyVersions: Object.freeze(['GCA1']),
+  version: 'GCA2-R5',
+  legacyVersions: Object.freeze(['GCA1','GCA2','GCA2-R4']),
   milestoneCacheMs: 30 * 60 * 1000,
   ambiguousMilestoneCacheMs: 30 * 1000,
   missingMilestoneCacheMs: 5 * 60 * 1000,
   seriesMilestoneCacheMs: 60 * 1000,
   milestoneForceRefreshMinIntervalMs: 30 * 1000,
   milestoneFailureBackoffMs: 30 * 1000,
-  policyRevision: 'GCA2-R3-SHARED-OBSERVED-ACTIVITY-LIVE-SIM-PARITY',
+  policyRevision: 'GCA2-R5-R36-OFFICIAL-SCHEDULE-REFERENCE-WITH-FRESH-LIVE',
+  scheduleReferenceMaximumAgeMs: 6 * 60 * 60 * 1000,
+  boundedStartMaximumSpanMs: 12 * 60 * 1000,
+  boundedProviderRequestMaximumMs: 2500,
   observedActivityMaxGapMs: 10 * 60 * 1000,
   observedActivityMinimumObservations: 2,
   liveDataCacheMs: 20 * 1000,
@@ -24,6 +40,12 @@ const POSITIVE_STATUS = new Set([
 const NEGATIVE_STATUS = new Set([
   'scheduled', 'pregame', 'prestart', 'notstarted', 'upcoming',
   'delayed', 'postponed', 'pending', 'warmup', 'paused', 'suspended',
+]);
+// Only unambiguously pre-kickoff statuses may serve as the lower bound.
+// 'paused', 'suspended', 'intermission' and 'delayed' are not proof that
+// sporting play has NEVER commenced, even when classified non-live.
+const PRESTART_BOUND_STATUS = new Set([
+  'scheduled','pregame','prestart','notstarted','upcoming','warmup',
 ]);
 const FINAL_STATUS = new Set([
   'final', 'finished', 'complete', 'completed', 'ended', 'settled',
@@ -47,11 +69,19 @@ const TERMINAL_MARKET_STATUSES = new Set([
   'closed', 'determined', 'disputed', 'finalized', 'settled', 'amended',
 ]);
 
+// Provider epochs may be Unix seconds or milliseconds. Never let Date.parse
+// reinterpret numeric strings as years, dates or relative sporting clock values.
 function ms(value) {
-  if (value == null || value === '') return 0;
-  if (Number.isFinite(Number(value)) && Number(value) > 100000000000) return Number(value);
-  const parsed = Date.parse(String(value));
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (value == null || value === '' || typeof value === 'boolean') return 0;
+  if (typeof value === 'number' || /^[+-]?\d+(?:\.\d+)?$/.test(String(value).trim())) {
+    const n=Number(value);
+    if(!Number.isFinite(n))return 0;
+    if(n>=946684800000&&n<=7258118400000)return Math.round(n);
+    if(n>=946684800&&n<=7258118400)return Math.round(n*1000);
+    return 0;
+  }
+  const parsed=Date.parse(String(value));
+  return Number.isFinite(parsed)&&parsed>=946684800000&&parsed<=7258118400000?parsed:0;
 }
 
 function token(value) {
@@ -92,33 +122,232 @@ function stateBase(eventTicker, now) {
     observedActivityStartMs: null,
     observedActivityLastEvidenceMs: null,
     observedActivityEvidenceCount: 0,
+    // R29: these are observed-status bounds, NEVER an asserted kickoff.
+    pregameObservedAtMs: null,
+    pregameMilestoneId: null,
+    boundedStartLowerMs: null,
+    boundedStartUpperMs: null,
+    boundedStartEvidenceSource: null,
+    // Reference for strategy's estimated scheduled-time window only. This is
+    // never a verified actual kickoff or a mathematically bounded start.
+    scheduleReferenceMilestoneId: null,
     reason: 'no_authoritative_evidence',
     evidence: {},
   };
 }
 
+
+const LEGACY_ESTIMATED_SOURCES = new Set([
+  'kalshi_live_data','kalshi_game_stats','observed_market_activity',
+  'occurrence_passed','simulation_observed_activity',
+]);
+
+/** Demote every legacy estimated start. Provenance is kept. Nothing is promoted. */
+
+/** Read actual provider fields only; a published record timestamp is NOT the
+ * time play began. Whole-game starts must be identified explicitly and, for
+ * PBP events, anchored in the opening sporting period. No scheduled start,
+ * first score, generic period `start`, or trading activity can prove kickoff.
+ */
+function openingSportingPeriod(period,index){
+  const ordinal=period?.number ?? period?.period_number ?? period?.periodNumber
+    ?? period?.sequence ?? period?.quarter ?? period?.half;
+  if(ordinal!=null&&ordinal!==''){
+    const n=Number(ordinal);
+    if(Number.isFinite(n))return n===1;
+    const t=token(ordinal);
+    if(['first','firsthalf','firstquarter','periodone','period1','quarter1','q1','h1','half1','1st'].includes(t))return true;
+    if(t&&/^(?:[2-9]|q[2-9]|h[2-9]|period[2-9]|quarter[2-9]|half[2-9]|second|third|fourth|overtime)/.test(t))return false;
+    return false;
+  }
+  const label=token(period?.type || period?.name || period?.label || '');
+  if(label){
+    if(['first','firsthalf','firstquarter','period1','quarter1','q1','h1','half1','1st'].includes(label))return true;
+    if(/^(?:[2-9]|q[2-9]|h[2-9]|period[2-9]|quarter[2-9]|half[2-9]|second|third|fourth|overtime)/.test(label))return false;
+    return false;
+  }
+  // Unlabeled first PBP period is the only permissible positional fallback.
+  return index===0;
+}
+
+function directWholeGameStatus(liveData) {
+  const details=(liveData?.live_data||liveData)?.details;
+  if(!details||typeof details!=='object'||Array.isArray(details))return null;
+  // Child period/player/scoreboard statuses cannot bracket the whole game.
+  const raw=details.status ?? details.game_status ?? details.match_status ?? details.event_status;
+  const t=token(raw);
+  if(POSITIVE_STATUS.has(t))return 'live';
+  if(PRESTART_BOUND_STATUS.has(t))return 'pregame';
+  if(FINAL_STATUS.has(t))return 'final';
+  return null;
+}
+
+function boundedObservation(liveRecord,liveClass,kind,now) {
+  if(!liveRecord||liveRecord.error||liveClass?.delayed===true||liveClass?.classification!==kind
+    ||directWholeGameStatus(liveRecord.value)!==kind)return 0;
+  // Use the start of the actual provider request for pregame's lower bound,
+  // and the end of the request for LIVE's upper bound. Cache hits NEVER
+  // mint a new provider observation time. Network latency is bounded.
+  const requested=Number(liveRecord.requestedAtMs||0);
+  const received=Number(liveRecord.observedAtMs||0);
+  const age=Number(now)-received;
+  if(!Number.isSafeInteger(requested)||!Number.isSafeInteger(received)
+    ||requested<=0||received<requested
+    ||received-requested>GAME_CLOCK_AUTHORITY.boundedProviderRequestMaximumMs
+    ||age< -2000||age>GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs)return 0;
+  return kind==='pregame'?requested:received;
+}
+
+function explicitActualStart(value){
+  if(!value||typeof value!=='object')return null;
+  // These names assert *actual* start. Do not accept start_date,
+  // scheduled_start, generic started_at, created_at or updated_at.
+  for(const key of ['actual_start_time','actual_start_at','actual_started_at',
+    'actual_kickoff_time','actual_tipoff_time','actual_start_timestamp']){
+    const t=ms(value[key]);if(t>0)return {atMs:t,source:`explicit_${key}`};
+  }
+  return null;
+}
+
+export function extractOfficialSportingEvidence(liveData, gameStats, milestone){
+  const rawLive=liveData?.live_data || liveData;
+  const details=rawLive?.details && typeof rawLive.details==='object' ? rawLive.details : {};
+  const scheduled=ms(milestone?.start_date)||null;
+  const periods=gameStats?.pbp?.periods || gameStats?.game_stats?.pbp?.periods || [];
+  let firstActionAtMs=null,actualStartMs=null,actualSource=null;
+  let periodCount=0,eventCount=0,remainingMs=null,clockLabel=null;
+  const direct=explicitActualStart(details) || explicitActualStart(gameStats);
+  if(direct){actualStartMs=direct.atMs;actualSource=direct.source;}
+  const WHOLE_START_TYPES=new Set(['gamestart','matchstart','openingkickoff','openingtipoff']);
+  if(Array.isArray(periods)){
+    periodCount=periods.length;
+    for(const [index,period] of periods.slice(0,64).entries()){
+      const events=Array.isArray(period?.events)?period.events:[];
+      const opening=openingSportingPeriod(period,index);
+      for(const e of events){
+        if(!e||typeof e!=='object')continue;
+        eventCount++;
+        // A game-clock value like "12:00", publication `created_at`, or a
+        // period-relative `time` is not a wall-clock action timestamp.
+        const at=ms(e.event_timestamp ?? e.occurred_at ?? e.timestamp);
+        if(at&&(firstActionAtMs==null||at<firstActionAtMs))firstActionAtMs=at;
+        const type=token(e.type || e.event_type || e.play_type || '');
+        if(!actualStartMs&&opening&&at&&WHOLE_START_TYPES.has(type)){
+          actualStartMs=at;actualSource='pbp_explicit_opening_game_start';
+        }
+      }
+    }
+  }
+  const remaining=Number(details.remaining_ms ?? details.time_remaining_ms ?? details.clock_remaining_ms);
+  if((details.remaining_ms!=null || details.time_remaining_ms!=null || details.clock_remaining_ms!=null)
+    &&Number.isFinite(remaining)&&remaining>=0)remainingMs=remaining;
+  if(typeof details.clock==='string')clockLabel=details.clock;
+  return {scheduledStartMs:scheduled,actualStartMs,actualStartEvidenceSource:actualSource,
+    actualStartConfidence:actualStartMs?'proven':'unknown',firstActionAtMs,
+    liveStatus:cleanString(details.status||''),periodCount,pbpEventCount:eventCount,
+    remainingMs,clockLabel,
+    lateGame:remainingMs===0||(typeof clockLabel==='string'&&/^(0:00|00:00)$/.test(clockLabel))};
+}
+
+export function migrateLegacyClockState(raw){
+  if(!raw||typeof raw!=='object')return raw;
+  const version=String(raw.version||'');
+  if(version===GAME_CLOCK_AUTHORITY.version)return raw;
+  if(version==='GCA2-R4'){
+    // R26 admitted a generic second-period `start` as a proven match start.
+    // Its unvalidated PBP proof cannot be trusted after this correction.
+    const oldPbp=raw.actualStartConfidence==='proven'
+      && raw.actualStartEvidenceSource==='pbp_explicit_start_event';
+    return {...raw,version:GAME_CLOCK_AUTHORITY.version,
+      ...(oldPbp?{
+        legacyObservedStartMs:Number(raw.actualStartMs||raw.startTimeMs||0)||null,
+        legacyObservedSource:'r26_unverified_pbp_start',
+        phase:raw.phase==='FINAL'?'FINAL':raw.phase==='CONFLICT'?'CONFLICT':'LIVE_START_UNKNOWN',
+        confirmed:false,startTimeMs:null,actualStartMs:null,
+        actualStartEvidenceSource:null,actualStartConfidence:'unknown',
+        actualStartLastVerifiedMs:null,reason:'r26_unverified_start_demoted',
+      }:{}),
+      entryAuthorized:false,evidenceObservedAtMs:null,
+      authorizationReason:null,authorizationSource:null};
+  }
+  const source=String(raw.source||'');
+  const estimated=LEGACY_ESTIMATED_SOURCES.has(source)||source==='simulation_observed_activity';
+  if(!estimated)return {...raw,version:GAME_CLOCK_AUTHORITY.version};
+  return {
+    ...raw,
+    version:GAME_CLOCK_AUTHORITY.version,
+    phase:raw.phase==='FINAL'?'FINAL':raw.phase==='CONFLICT'?'CONFLICT':'LIVE_START_UNKNOWN',
+    confirmed:false,
+    actualStartMs:null,
+    actualStartEvidenceSource:null,
+    actualStartConfidence:'unknown',
+    scheduledStartMs:Number(raw.milestoneStartMs||raw.occurrenceTimeMs||0)||null,
+    legacyObservedStartMs:Number(raw.startTimeMs||0)||null,
+    legacyObservedSource:source||null,
+    startTimeMs:null,
+    entryAuthorized:false,
+    authorizationReason:null,
+    authorizationSource:null,
+    reason:'legacy_estimated_start_demoted',
+  };
+}
+
 export function normalizeGameClockState(raw, eventTicker = '') {
+  raw = migrateLegacyClockState(raw);
   const version = String(raw?.version || '');
   if (!raw || typeof raw !== 'object' || (version !== GAME_CLOCK_AUTHORITY.version && !GAME_CLOCK_AUTHORITY.legacyVersions.includes(version))) return null;
-  const phase = ['UNKNOWN', 'CONFIRMED', 'FINAL', 'CONFLICT'].includes(String(raw.phase)) ? String(raw.phase) : 'UNKNOWN';
+  const phase = ['UNKNOWN', 'CONFIRMED', 'BOUNDED', 'SCHEDULE_LIVE', 'FINAL', 'CONFLICT', 'LIVE_START_UNKNOWN'].includes(String(raw.phase)) ? String(raw.phase) : 'UNKNOWN';
   const start = Number(raw.startTimeMs || 0);
-  const confirmed = phase === 'CONFIRMED' && raw.confirmed === true && Number.isFinite(start) && start > 0;
+  const actual = Number(raw.actualStartMs || 0);
+  const proven = raw.actualStartConfidence === 'proven' && Number.isFinite(actual) && actual > 0;
+  const confirmed = phase === 'CONFIRMED' && raw.confirmed === true && proven;
+  const lower=Number(raw.boundedStartLowerMs||0),upper=Number(raw.boundedStartUpperMs||0);
+  const bounded=phase==='BOUNDED' && raw.confirmed===false
+    &&raw.actualStartConfidence==='bounded'&&raw.source==='kalshi_live_data_status_transition'
+    &&raw.boundedStartEvidenceSource==='matched_milestone_pregame_to_live'
+    &&String(raw.pregameMilestoneId||'')!==''
+    &&String(raw.pregameMilestoneId)===String(raw.milestoneId||'')
+    &&Number.isSafeInteger(lower)&&Number.isSafeInteger(upper)
+    &&lower>=946684800000&&upper>lower
+    &&upper-lower<=GAME_CLOCK_AUTHORITY.boundedStartMaximumSpanMs
+    &&Number(raw.actualStartMs||0)===0&&Number(raw.startTimeMs||0)===0
+    &&Number.isSafeInteger(Number(raw.evidenceObservedAtMs))
+    &&Number(raw.evidenceObservedAtMs)>=upper
+    &&Number(raw.lastCheckedAtMs)>=upper;
+  const officialSchedule=Number(raw.scheduledStartMs||0);
+  const scheduleLive=phase==='SCHEDULE_LIVE'&&raw.confirmed===false
+    &&raw.actualStartConfidence==='scheduled_estimate'
+    &&raw.source==='kalshi_milestone_schedule_fresh_live_reference'
+    &&String(raw.scheduleReferenceMilestoneId||'')!==''
+    &&String(raw.scheduleReferenceMilestoneId)===String(raw.milestoneId||'')
+    &&Number.isSafeInteger(officialSchedule)&&officialSchedule>=946684800000
+    &&officialSchedule===Number(raw.milestoneStartMs||0)
+    &&Number(raw.actualStartMs||0)===0&&Number(raw.startTimeMs||0)===0
+    &&Number(raw.boundedStartLowerMs||0)===0&&Number(raw.boundedStartUpperMs||0)===0;
   const evidenceObservedAtMs = Number(raw.evidenceObservedAtMs || 0) || null;
   return {
     ...stateBase(raw.eventTicker || eventTicker, Number(raw.lastCheckedAtMs || Date.now())),
     ...raw,
     policyRevision: GAME_CLOCK_AUTHORITY.policyRevision,
+    version: GAME_CLOCK_AUTHORITY.version,
     eventTicker: String(raw.eventTicker || eventTicker || ''),
-    phase,
+    phase: (phase==='BOUNDED'&&!bounded)||(phase==='SCHEDULE_LIVE'&&!scheduleLive)?'LIVE_START_UNKNOWN':phase,
     confirmed,
-    startTimeMs: Number.isFinite(start) && start > 0 ? start : null,
+    startTimeMs: Number.isFinite(start) && start > 0 && confirmed ? start : null,
+    boundedStartLowerMs: bounded ? lower : null,
+    boundedStartUpperMs: bounded ? upper : null,
+    boundedStartEvidenceSource: bounded ? 'matched_milestone_pregame_to_live' : null,
+    scheduledStartMs: scheduleLive?officialSchedule:(Number(raw.scheduledStartMs||0)||null),
+    scheduleReferenceMilestoneId: scheduleLive?String(raw.scheduleReferenceMilestoneId):null,
+    pregameObservedAtMs: Number.isSafeInteger(Number(raw.pregameObservedAtMs))&&Number(raw.pregameObservedAtMs)>0 ? Number(raw.pregameObservedAtMs) : null,
+    pregameMilestoneId: raw.pregameMilestoneId?cleanString(raw.pregameMilestoneId):null,
     observedAtMs: Number(raw.observedAtMs || 0) || null,
     source: String(raw.source || '') === 'simulation_observed_activity' ? 'observed_market_activity' : (raw.source || null),
     sourceStrength: String(raw.source || '') === 'simulation_observed_activity' ? 'bounded_observed_activity' : (raw.sourceStrength || null),
     observedActivityStartMs: Number(raw.observedActivityStartMs || raw.simulationActivityStartMs || 0) || null,
     observedActivityLastEvidenceMs: Number(raw.observedActivityLastEvidenceMs || raw.simulationActivityLastEvidenceMs || 0) || null,
     observedActivityEvidenceCount: Math.max(0, Number(raw.observedActivityEvidenceCount || raw.simulationActivityEvidenceCount || 0) || 0),
-    entryAuthorized: Boolean(confirmed && raw.entryAuthorized === true && evidenceObservedAtMs),
+    entryAuthorized: Boolean((confirmed||bounded||scheduleLive) && raw.entryAuthorized === true && evidenceObservedAtMs),
     evidenceObservedAtMs,
     authorizationReason: raw.authorizationReason ? cleanString(raw.authorizationReason) : null,
     authorizationSource: raw.authorizationSource ? cleanString(raw.authorizationSource) : null,
@@ -144,7 +373,17 @@ export function isEntryAuthorizedGameClockState(
   maxAgeMs = GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs,
 ) {
   const s = normalizeGameClockState(raw, expectedEventTicker);
-  if (!isConfirmedGameClockState(s, expectedEventTicker) || s.entryAuthorized !== true) return false;
+  const approved=s&&(isConfirmedGameClockState(s,expectedEventTicker)
+    ||(s.phase==='BOUNDED'&&s.confirmed===false
+      &&Number(s.boundedStartLowerMs)>0&&Number(s.boundedStartUpperMs)>Number(s.boundedStartLowerMs)
+      &&String(s.milestoneId||'')!==''&&s.milestoneId===s.pregameMilestoneId
+      &&(!expectedEventTicker||s.eventTicker===String(expectedEventTicker)))
+    ||(s.phase==='SCHEDULE_LIVE'&&s.actualStartConfidence==='scheduled_estimate'
+      &&s.scheduleReferenceMilestoneId===s.milestoneId
+      &&Number(s.scheduledStartMs)>0
+      &&(!expectedEventTicker||s.eventTicker===String(expectedEventTicker))));
+  if (!approved || s.entryAuthorized !== true || s.liveStatus !== 'live'
+    || s.liveDataDelayed === true || s.occurrenceConflict===true) return false;
   const observed = Number(s.evidenceObservedAtMs || 0);
   const t = Number(now);
   const maxAge = Math.max(0, Number(maxAgeMs) || 0);
@@ -221,6 +460,7 @@ export function classifyLiveData(liveData) {
     classification,
     type: cleanString(liveData?.type || ''),
     milestoneId: cleanString(liveData?.milestone_id || ''),
+    delayed: details.live_data_delayed === true || String(details.live_data_delayed).toLowerCase()==='true',
     signals: signals.slice(0, 12),
   };
 }
@@ -328,8 +568,55 @@ function makeUnknown(eventTicker, now, reason, extra = {}) {
   };
 }
 
+
+function makeLiveUnknown(eventTicker, now, reason, extra = {}) {
+  return {
+    ...stateBase(eventTicker, now),
+    ...extra,
+    phase: 'LIVE_START_UNKNOWN',
+    confirmed: false,
+    startTimeMs: null,
+    actualStartMs: null,
+    actualStartConfidence: 'unknown',
+    scheduledStartMs: Number(extra.milestoneStartMs || extra.occurrenceTimeMs || 0) || null,
+    entryAuthorized: false,
+    authorizationReason: null,
+    authorizationSource: null,
+    reason,
+  };
+}
+
+// R36 owner-authorized strategy policy: a *scheduled reference* is not an
+// actual kickoff. Keep its provenance explicit and separate from the true
+// pregame->LIVE BOUNDED and actual-start CONFIRMED authorities.
+function makeScheduledLiveReference(eventTicker,now,scheduledAt,milestoneId,extra={}){
+  return {...stateBase(eventTicker,now),...extra,
+    phase:'SCHEDULE_LIVE',confirmed:false,startTimeMs:null,actualStartMs:null,
+    actualStartConfidence:'scheduled_estimate',actualStartEvidenceSource:null,
+    source:'kalshi_milestone_schedule_fresh_live_reference',
+    sourceStrength:'official_schedule_plus_matched_fresh_live_not_kickoff_proof',
+    scheduledStartMs:Number(scheduledAt),scheduleReferenceMilestoneId:String(milestoneId),
+    boundedStartLowerMs:null,boundedStartUpperMs:null,boundedStartEvidenceSource:null,
+    entryAuthorized:extra.entryAuthorized===true,
+    reason:extra.reason||'scheduled_reference_fresh_live_kickoff_unproven',
+    lastCheckedAtMs:Number(now)};
+}
+
+function makeBounded(eventTicker,now,lower,upper,milestoneId,extra={}){
+  return {...stateBase(eventTicker,now),...extra,
+    phase:'BOUNDED',confirmed:false,startTimeMs:null,actualStartMs:null,
+    actualStartConfidence:'bounded',actualStartEvidenceSource:null,
+    source:'kalshi_live_data_status_transition',sourceStrength:'bounded_observed_live_status',
+    boundedStartLowerMs:Number(lower),boundedStartUpperMs:Number(upper),
+    boundedStartEvidenceSource:'matched_milestone_pregame_to_live',
+    pregameObservedAtMs:Number(lower),pregameMilestoneId:String(milestoneId),
+    entryAuthorized:extra.entryAuthorized===true,
+    reason:extra.reason||'bounded_start_from_matching_provider_status_transition',
+    lastCheckedAtMs:Number(now)};
+}
+
 function makeConfirmed(eventTicker, now, startTimeMs, source, extra = {}) {
-  const evidenceObservedAtMs = Number(extra.evidenceObservedAtMs || now);
+  const evidenceObservedAtMs = Number(extra.evidenceObservedAtMs || 0);
   return {
     ...stateBase(eventTicker, now),
     ...extra,
@@ -342,11 +629,11 @@ function makeConfirmed(eventTicker, now, startTimeMs, source, extra = {}) {
       : source === 'observed_market_activity'
         ? 'bounded_observed_activity'
         : 'strong',
-    observedAtMs: Number(extra.observedAtMs || now),
-    entryAuthorized: extra.entryAuthorized !== false,
-    evidenceObservedAtMs: extra.entryAuthorized === false ? null : (Number.isFinite(evidenceObservedAtMs) && evidenceObservedAtMs > 0 ? evidenceObservedAtMs : null),
-    authorizationReason: extra.entryAuthorized === false ? null : (extra.authorizationReason || `fresh_${source}`),
-    authorizationSource: extra.entryAuthorized === false ? null : (extra.authorizationSource || source),
+    observedAtMs: Number(extra.observedAtMs || 0) || null,
+    entryAuthorized: extra.entryAuthorized === true,
+    evidenceObservedAtMs: Number.isFinite(evidenceObservedAtMs) && evidenceObservedAtMs > 0 ? evidenceObservedAtMs : null,
+    authorizationReason: extra.entryAuthorized !== true ? null : (extra.authorizationReason || `fresh_${source}`),
+    authorizationSource: extra.entryAuthorized !== true ? null : (extra.authorizationSource || source),
     lastCheckedAtMs: Number(now),
     reason: extra.reason || source,
   };
@@ -359,6 +646,16 @@ function makeTerminal(eventTicker, now, prior, reason, extra = {}) {
     phase: 'FINAL',
     confirmed: false,
     startTimeMs: Number(prior?.startTimeMs || 0) || null,
+    actualStartMs: Number(prior?.actualStartMs || 0) || null,
+    actualStartConfidence: prior?.actualStartConfidence || 'unknown',
+    actualStartEvidenceSource: prior?.actualStartEvidenceSource || null,
+    actualStartLastVerifiedMs: Number(prior?.actualStartLastVerifiedMs || 0) || null,
+    boundedStartLowerMs: Number(prior?.boundedStartLowerMs||0)||null,
+    boundedStartUpperMs: Number(prior?.boundedStartUpperMs||0)||null,
+    boundedStartEvidenceSource: prior?.boundedStartEvidenceSource||null,
+    pregameObservedAtMs: Number(prior?.pregameObservedAtMs||0)||null,
+    pregameMilestoneId: prior?.pregameMilestoneId||null,
+    scheduledStartMs: Number(prior?.scheduledStartMs || extra.milestoneStartMs || 0) || null,
     source: prior?.source || extra.source || null,
     sourceStrength: prior?.sourceStrength || extra.sourceStrength || null,
     observedAtMs: prior?.observedAtMs || null,
@@ -377,6 +674,16 @@ function makeConflict(eventTicker, now, prior, reason, extra = {}) {
     phase: 'CONFLICT',
     confirmed: false,
     startTimeMs: Number(prior?.startTimeMs || 0) || null,
+    actualStartMs: Number(prior?.actualStartMs || 0) || null,
+    actualStartConfidence: prior?.actualStartConfidence || 'unknown',
+    actualStartEvidenceSource: prior?.actualStartEvidenceSource || null,
+    actualStartLastVerifiedMs: Number(prior?.actualStartLastVerifiedMs || 0) || null,
+    boundedStartLowerMs: Number(prior?.boundedStartLowerMs||0)||null,
+    boundedStartUpperMs: Number(prior?.boundedStartUpperMs||0)||null,
+    boundedStartEvidenceSource: prior?.boundedStartEvidenceSource||null,
+    pregameObservedAtMs: Number(prior?.pregameObservedAtMs||0)||null,
+    pregameMilestoneId: prior?.pregameMilestoneId||null,
+    scheduledStartMs: Number(prior?.scheduledStartMs || extra.milestoneStartMs || 0) || null,
     source: prior?.source || extra.source || null,
     sourceStrength: prior?.sourceStrength || extra.sourceStrength || null,
     observedAtMs: prior?.observedAtMs || null,
@@ -446,10 +753,11 @@ export class GameClockAuthority {
     };
   }
 
-  async cached(cache, key, ttlMs, fn, { forceFresh = false, inFlight = null } = {}) {
+  async cached(cache, key, ttlMs, fn, { forceFresh = false, inFlight = null, forceRefreshMinAgeMs = ttlMs } = {}) {
     const checkAtMs = Number(this.now());
     const hit = cache.get(key);
-    if (!forceFresh && hit && checkAtMs - hit.observedAtMs <= ttlMs) {
+    if (hit && checkAtMs - hit.observedAtMs <= ttlMs
+      && (!forceFresh || checkAtMs - hit.observedAtMs <= forceRefreshMinAgeMs)) {
       return { ...hit, fromCache: true };
     }
     if (inFlight?.has(key)) return inFlight.get(key);
@@ -458,7 +766,7 @@ export class GameClockAuthority {
       let error = null;
       try { value = await fn(); } catch (e) { error = cleanString(e?.message || e, 240); }
       const observedAtMs = Number(this.now());
-      const record = { value, error, observedAtMs, fromCache: false };
+      const record = { value, error, requestedAtMs:checkAtMs, observedAtMs, fromCache: false };
       this.setBoundedCache(cache, key, record);
       return record;
     })().finally(() => inFlight?.delete(key));
@@ -487,7 +795,7 @@ export class GameClockAuthority {
     return promise;
   }
 
-  async milestoneForEvent(eventTicker, { seriesTicker = '', forceFresh = false } = {}) {
+  async milestoneForEvent(eventTicker, { seriesTicker = '', forceFresh = false, directOnSeriesMiss = false } = {}) {
     const event = String(eventTicker || '');
     const series = String(seriesTicker || '');
     const cacheKey = `${event}|${series}`;
@@ -503,7 +811,19 @@ export class GameClockAuthority {
       // immutable milestone identity metadata. A force-fresh entry may retry a
       // negative selection after a short bounded interval, but it may never
       // hammer the provider once per candidate/attack.
-      if (age <= ttl && (!forceFresh || hit.value?.milestone || age < GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs)) return hit.value;
+      // R35: a negative SERIES-ONLY cache belongs to the old observation role.
+      // When an exact-event pregame scout is later selected, a 5-minute
+      // negative cache must not suppress the single fallback to official
+      // related-event evidence. A 30-second minimum prevents retry storms.
+      const eligibleScoutEscalation=Boolean(directOnSeriesMiss
+        &&!hit.value?.milestone
+        &&hit.value?.discoverySource==='series_events_with_milestones'
+        &&hit.value?.directReason==null
+        &&hit.value?.reason!=='ambiguous_atomic_milestone'
+        &&age>=GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs);
+      if (age <= ttl && !eligibleScoutEscalation
+        &&(!forceFresh || hit.value?.milestone || age < GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs))
+        return hit.value;
       this.milestoneCache.delete(cacheKey);
     }
     if (this.milestonePromises.has(cacheKey)) return this.milestonePromises.get(cacheKey);
@@ -516,6 +836,15 @@ export class GameClockAuthority {
         seriesRows = seriesRecord.rows || [];
         seriesError = seriesRecord.error || null;
         const seriesSelection = selectEventMilestone(seriesRows, event);
+        // A multi-milestone identity is a real safety conflict. A narrower
+        // second provider query must not silently pick a winner or overwrite
+        // the ambiguous evidence, even under a force-fresh entry request.
+        if(seriesSelection.reason==='ambiguous_atomic_milestone'){
+          const value={...seriesSelection,discoverySource:'series_events_with_milestones',
+            directReason:null,directError:null,seriesError};
+          this.setBoundedCache(this.milestoneCache,cacheKey,{atMs:Number(this.now()),value});
+          return value;
+        }
         if (seriesSelection.milestone) {
           const value = { ...seriesSelection, discoverySource:'series_events_with_milestones', directReason:null, directError:null, seriesError };
           this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
@@ -525,7 +854,7 @@ export class GameClockAuthority {
         // series page has no exact atomic milestone, stop here; the mandatory
         // force-fresh pre-entry boundary may perform one exact related-event
         // lookup after the negative-cache interval.
-        if (!forceFresh && !seriesError) {
+        if (!forceFresh && !seriesError && !directOnSeriesMiss) {
           const value = { ...seriesSelection, discoverySource:'series_events_with_milestones', directReason:null, directError:null, seriesError:null };
           this.setBoundedCache(this.milestoneCache, cacheKey, { atMs:Number(this.now()), value });
           return value;
@@ -578,7 +907,8 @@ export class GameClockAuthority {
       String(id),
       GAME_CLOCK_AUTHORITY.liveDataCacheMs,
       async () => this.kalshi?.getLiveData?.(id),
-      { forceFresh, inFlight: this.livePromises },
+      { forceFresh, inFlight: this.livePromises,
+        forceRefreshMinAgeMs: GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs },
     );
   }
 
@@ -603,7 +933,16 @@ export class GameClockAuthority {
     minimumElapsedMs = 0,
   } = {}) {
     const event = String(eventTicker || quotes[0]?.eventTicker || quotes[0]?.ticker || '');
-    const seriesTicker = String(quotes.find((q) => q?.seriesTicker)?.seriesTicker || '');
+    // Market payloads often omit series_ticker. Recover a strictly shaped
+    // research series from the SAME event identity, without rewriting a quote
+    // or treating the inferred series as sporting start evidence. The official
+    // milestone must independently name the exact event to be accepted.
+    const candidateSeries=[...new Set(quotes.map(researchSeriesForMarket).filter(Boolean))];
+    const seriesTicker=candidateSeries.length===1?candidateSeries[0]:'';
+    // If the bulk series endpoint excludes a scout event, its EXACT related-
+    // event endpoint gets one cached fallback. The six-scout cap bounds this
+    // lookup and protects broker/protection REST from unbounded fanout.
+    const directOnSeriesMiss=quotes.some(q=>q?.clockProbeOnly===true);
     const prior = normalizeGameClockState(priorState, event);
     const occurrence = coherentOccurrence(quotes);
     const occurrenceTimeMs = occurrence.value || null;
@@ -635,7 +974,7 @@ export class GameClockAuthority {
     let pbpCount = 0;
     let statsError = null;
     try {
-      milestoneSelection = await this.milestoneForEvent(event, { seriesTicker, forceFresh });
+      milestoneSelection = await this.milestoneForEvent(event, { seriesTicker, forceFresh, directOnSeriesMiss });
       milestone = milestoneSelection?.milestone || null;
     } catch {
       milestoneSelection = { milestone: null, reason: 'milestone_lookup_failed', candidates: 0 };
@@ -651,12 +990,18 @@ export class GameClockAuthority {
     } : { milestoneDiscoverySource: milestoneSelection?.discoverySource || null };
 
     if (milestone) {
+      // Restart-safe event identity: an old proven or bounded game cannot
+      // silently migrate to a different provider game milestone.
+      if((prior?.confirmed||prior?.phase==='BOUNDED'||prior?.phase==='SCHEDULE_LIVE')&&prior?.milestoneId
+        &&String(prior.milestoneId)!==String(milestone.id))
+        return makeConflict(event,decisionNow(),prior,'provider_milestone_changed',{
+          ...milestoneMeta,occurrenceTimeMs,entryAuthorized:false});
       const liveRecord = await this.liveForMilestone(milestone.id, { forceFresh });
       liveError = liveRecord.error || null;
       const rawLive = liveRecord.value;
       const liveData = rawLive?.live_data || rawLive;
       liveClass = classifyLiveData(liveData);
-      const liveObservedAtMs = Number(liveRecord.observedAtMs || decisionNow());
+      const liveObservedAtMs = Number(liveRecord.observedAtMs || 0);
       const expectedMilestoneId = String(milestone.id);
       if (liveClass.milestoneId && liveClass.milestoneId !== expectedMilestoneId) {
         return makeConflict(event, decisionNow(), prior, 'official_live_data_milestone_mismatch', {
@@ -684,7 +1029,7 @@ export class GameClockAuthority {
         });
       }
       if (liveIdentityValid && liveClass.classification === 'pregame') {
-        if (prior?.confirmed) {
+        if (prior?.confirmed||prior?.phase==='BOUNDED'||prior?.phase==='SCHEDULE_LIVE') {
           return makeConflict(event, decisionNow(), prior, 'official_pregame_after_confirmed_start', {
             ...milestoneMeta,
             occurrenceTimeMs,
@@ -692,11 +1037,14 @@ export class GameClockAuthority {
             evidence: { liveData: liveClass },
           });
         }
-        return makeUnknown(event, decisionNow(), 'official_live_data_pregame', {
-          ...milestoneMeta,
-          occurrenceTimeMs,
-          evidenceObservedAtMs: liveObservedAtMs,
-          evidence: { liveData: liveClass },
+        const pregameAt=boundedObservation(liveRecord,liveClass,'pregame',decisionNow());
+        const preceding=String(prior?.pregameMilestoneId||'')===expectedMilestoneId
+          ?Number(prior?.pregameObservedAtMs||0):0;
+        return makeUnknown(event,decisionNow(),'official_live_data_pregame',{
+          ...milestoneMeta,occurrenceTimeMs,evidenceObservedAtMs:liveObservedAtMs,
+          pregameObservedAtMs:Math.max(pregameAt,preceding)||null,
+          pregameMilestoneId:pregameAt||preceding?expectedMilestoneId:null,
+          evidence:{liveData:liveClass,pregameProviderObservationAccepted:Boolean(pregameAt)},
         });
       }
       if (liveIdentityValid && liveClass.classification === 'conflict') {
@@ -708,68 +1056,184 @@ export class GameClockAuthority {
         });
       }
       if (liveIdentityValid && liveClass.classification === 'live') {
-        const observedNow = Math.max(liveObservedAtMs, decisionNow());
-        const start = prior?.confirmed ? prior.startTimeMs : observedNow;
-        return makeConfirmed(event, observedNow, start, 'kalshi_live_data', {
-          ...milestoneMeta,
-          occurrenceTimeMs,
-          occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > observedNow)),
-          observedAtMs: prior?.confirmed ? prior.observedAtMs : observedNow,
-          evidenceObservedAtMs: observedNow,
-          authorizationReason: 'fresh_exact_milestone_live_data',
-          authorizationSource: 'kalshi_live_data',
-          reason: occurrenceTimeMs && occurrenceTimeMs > observedNow
-            ? 'official_live_overrides_future_occurrence'
-            : 'official_live_in_progress',
-          evidence: { liveData: liveClass, forceFresh: Boolean(forceFresh) },
+        const decisionAtMs=decisionNow();
+        const liveFresh=liveError==null && liveClass.delayed!==true
+          && liveObservedAtMs>0 && decisionAtMs-liveObservedAtMs>=-2000
+          && decisionAtMs-liveObservedAtMs<=GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs;
+        const liveInfo={liveStatus:'live',liveDataDelayed:Boolean(liveClass.delayed),
+          liveStatusObservedAtMs:liveObservedAtMs,observedAtMs:liveObservedAtMs,
+          evidenceObservedAtMs:liveObservedAtMs,entryAuthorized:liveFresh};
+        const direct=extractOfficialSportingEvidence(liveRecord?.value,null,milestone);
+        if (prior?.confirmed && Number(prior.actualStartMs)>0 && prior.actualStartConfidence==='proven') {
+          // A new explicit contradicting start is not a silent correction.
+          if(direct.actualStartMs && Math.abs(direct.actualStartMs-prior.actualStartMs)>1000)
+            return makeConflict(event,decisionAtMs,prior,'conflicting_official_actual_starts',{
+              ...milestoneMeta,occurrenceTimeMs,...liveInfo,entryAuthorized:false});
+          return makeConfirmed(event,decisionAtMs,prior.actualStartMs,
+            prior.source||'kalshi_game_stats',{
+              ...milestoneMeta,occurrenceTimeMs,...liveInfo,
+              actualStartMs:prior.actualStartMs,actualStartConfidence:'proven',
+              actualStartEvidenceSource:prior.actualStartEvidenceSource,
+              actualStartLastVerifiedMs:prior.actualStartLastVerifiedMs,
+              scheduledStartMs:direct.scheduledStartMs||prior.scheduledStartMs,
+              reason:liveFresh?'persisted_proven_start_plus_fresh_live':'persisted_start_live_status_stale',
+            });
+        }
+        if(direct.actualStartMs && direct.actualStartConfidence==='proven'
+          && direct.actualStartMs<=decisionAtMs+2000){
+          if(prior?.phase==='BOUNDED'&&
+            (direct.actualStartMs<Number(prior.boundedStartLowerMs)
+              ||direct.actualStartMs>Number(prior.boundedStartUpperMs)))
+            return makeConflict(event,decisionAtMs,prior,'actual_start_conflicts_with_status_bounds',{
+              ...milestoneMeta,occurrenceTimeMs,...liveInfo,entryAuthorized:false});
+          return makeConfirmed(event,decisionAtMs,direct.actualStartMs,direct.actualStartEvidenceSource,{
+            ...milestoneMeta,occurrenceTimeMs,...liveInfo,
+            actualStartMs:direct.actualStartMs,actualStartConfidence:'proven',
+            actualStartEvidenceSource:direct.actualStartEvidenceSource,
+            actualStartLastVerifiedMs:liveObservedAtMs,
+            scheduledStartMs:direct.scheduledStartMs,firstActionAtMs:direct.firstActionAtMs,
+            lateGame:direct.lateGame,remainingMs:direct.remainingMs,
+          });
+        }
+        const statsRecord=allowGameStats?await this.statsForMilestone(milestone.id,{forceFresh}):null;
+        statsError=statsRecord?.error||null;
+        const proof=extractOfficialSportingEvidence(liveRecord?.value,statsRecord?.value,milestone);
+        const statsIdentity=String(statsRecord?.value?.milestone_id||statsRecord?.value?.game_stats?.milestone_id||'');
+        if(statsIdentity && statsIdentity!==expectedMilestoneId)
+          return makeConflict(event,decisionAtMs,prior,'official_game_stats_milestone_mismatch',{
+            ...milestoneMeta,occurrenceTimeMs,expectedMilestoneId,statsIdentity,
+            ...liveInfo,entryAuthorized:false});
+        if(!statsError && proof.actualStartMs && proof.actualStartConfidence==='proven'
+          && proof.actualStartMs<=decisionAtMs+2000){
+          if(prior?.phase==='BOUNDED'&&
+            (proof.actualStartMs<Number(prior.boundedStartLowerMs)
+              ||proof.actualStartMs>Number(prior.boundedStartUpperMs)))
+            return makeConflict(event,decisionAtMs,prior,'actual_start_conflicts_with_status_bounds',{
+              ...milestoneMeta,occurrenceTimeMs,...liveInfo,entryAuthorized:false});
+          return makeConfirmed(event,decisionAtMs,proof.actualStartMs,proof.actualStartEvidenceSource,{
+            ...milestoneMeta,occurrenceTimeMs,...liveInfo,
+            actualStartMs:proof.actualStartMs,actualStartConfidence:'proven',
+            actualStartEvidenceSource:proof.actualStartEvidenceSource,
+            actualStartLastVerifiedMs:Number(statsRecord.observedAtMs||0)||null,
+            scheduledStartMs:proof.scheduledStartMs,firstActionAtMs:proof.firstActionAtMs,
+            lateGame:proof.lateGame,remainingMs:proof.remainingMs,
+          });
+        }
+        // A previous CONFLICT cannot be cleared by weaker status alone. A
+        // later authenticated explicit actual start (above) may resolve it.
+        if(prior?.phase==='CONFLICT')return {...prior,entryAuthorized:false,
+          evidenceObservedAtMs:null,authorizationReason:null,authorizationSource:null,
+          lastCheckedAtMs:decisionAtMs,reason:'persisted_conflict_requires_proven_start'};
+        // Only a positive whole-game provider lifecycle transition for the SAME
+        // identified milestone may bound an unknown kickoff. An already-LIVE
+        // observation with no earlier verified pregame is NOT sufficient.
+        const lower=String(prior?.pregameMilestoneId||'')===expectedMilestoneId
+          ?Number(prior?.boundedStartLowerMs||prior?.pregameObservedAtMs||0):0;
+        const upper=prior?.phase==='BOUNDED'&&String(prior?.milestoneId||'')===expectedMilestoneId
+          ?Number(prior.boundedStartUpperMs||0)
+          :boundedObservation(liveRecord,liveClass,'live',decisionAtMs);
+        const interval=lower>0&&upper>lower
+          &&upper-lower<=GAME_CLOCK_AUTHORITY.boundedStartMaximumSpanMs
+          &&(!prior?.boundedStartUpperMs||prior.phase==='BOUNDED');
+        if(interval){
+          return makeBounded(event,decisionAtMs,lower,upper,expectedMilestoneId,{
+            ...milestoneMeta,occurrenceTimeMs,...liveInfo,
+            entryAuthorized:liveFresh,actualStartMs:null,actualStartConfidence:'bounded',
+            evidence:{liveData:liveClass,statusIntervalMs:upper-lower,
+              source:'two_whole_game_provider_lifecycle_observations',
+              gameStatsError:statsError,forceFresh:Boolean(forceFresh)},
+            reason:liveFresh?'bounded_start_plus_fresh_live':'bounded_start_live_status_stale'});
+        }
+        // R36: the existing 12-minute pregame-status bracket is preferred,
+        // as is a PROVEN actual start above. The provider's start_date is a
+        // *scheduled* reference and is NOT mathematically the first possible
+        // kickoff; trading age here is an explicitly estimated policy window.
+        // Exact-event milestone identity plus FRESH whole-game LIVE status are
+        // mandatory. No trades, publication timestamps or generic period start
+        // are accepted as current sporting-status evidence.
+        const scheduledAt=Number(proof.scheduledStartMs||0);
+        // Same latency/age standard as the verified pregame->LIVE bracket.
+        // A delayed provider response must not mint a fresh schedule authority.
+        const liveObservationAccepted=Boolean(boundedObservation(
+          liveRecord,liveClass,'live',decisionAtMs));
+        const officialWholeGameLive=directWholeGameStatus(liveRecord.value)==='live';
+        const withinReferenceAge=Number.isSafeInteger(scheduledAt)
+          &&scheduledAt>=946684800000&&scheduledAt<=decisionAtMs
+          &&decisionAtMs-scheduledAt<=GAME_CLOCK_AUTHORITY.scheduleReferenceMaximumAgeMs;
+        if(prior?.phase==='SCHEDULE_LIVE'&&Number(prior.scheduledStartMs||0)>0
+          &&scheduledAt>0&&Number(prior.scheduledStartMs)!==scheduledAt)
+          return makeConflict(event,decisionAtMs,prior,'official_schedule_reference_changed',{
+            ...milestoneMeta,occurrenceTimeMs,...liveInfo,entryAuthorized:false});
+        // A previously OBSERVED invalid negative sporting-status sample or
+        // a known >12-minute pregame->LIVE gap must not be silently promoted
+        // by the weaker schedule-based estimate. New late-joining matches
+        // without an earlier provider observation remain eligible under the
+        // explicitly named scheduled-reference policy.
+        const priorInvalidPrestart=prior?.reason==='official_live_data_pregame'
+          &&prior?.evidence?.pregameProviderObservationAccepted===false;
+        const priorWidePregame=Number(prior?.pregameObservedAtMs||0)>0
+          &&decisionAtMs-Number(prior.pregameObservedAtMs)>GAME_CLOCK_AUTHORITY.boundedStartMaximumSpanMs;
+        const priorUntrustedNegative=prior?.phase==='UNKNOWN'
+          &&!['official_live_data_pregame','no_authoritative_evidence'].includes(String(prior.reason||''));
+        if(liveFresh&&liveObservationAccepted&&officialWholeGameLive&&withinReferenceAge
+          &&liveIdentityValid&&!statsIdentity /* optional stats do not grant start */
+          &&!priorInvalidPrestart&&!priorWidePregame&&!priorUntrustedNegative
+          &&prior?.phase!=='CONFLICT'){
+          return makeScheduledLiveReference(event,decisionAtMs,scheduledAt,expectedMilestoneId,{
+            ...milestoneMeta,occurrenceTimeMs,occurrenceConflict:false,...liveInfo,
+            entryAuthorized:true,
+            evidence:{liveData:liveClass,
+              referenceTimeBasis:'official_milestone_start_date_not_actual_start',
+              source:'matched_milestone_schedule_plus_fresh_whole_game_live',
+              actualKickoffProven:false,gameStatsError:statsError},
+            reason:'scheduled_reference_fresh_live_kickoff_unproven'});
+        }
+        return makeLiveUnknown(event,decisionAtMs,'official_live_without_actual_start',{
+          ...milestoneMeta,occurrenceTimeMs,...liveInfo,
+          pregameObservedAtMs:lower||null,
+          pregameMilestoneId:lower?expectedMilestoneId:null,
+          entryAuthorized:false,actualStartMs:null,actualStartConfidence:'unknown',
+          firstActionAtMs:proof.firstActionAtMs,statsError,
+          occurrenceConflict:Boolean(!occurrence.coherent||(occurrenceTimeMs&&occurrenceTimeMs>decisionAtMs)),
+          evidence:{liveData:liveClass,forceFresh:Boolean(forceFresh)},
         });
       }
 
+      if(prior?.phase==='SCHEDULE_LIVE'){
+        return {...prior,entryAuthorized:false,evidenceObservedAtMs:null,
+          authorizationReason:null,authorizationSource:null,
+          liveStatus:liveClass?.classification||'unknown',liveDataDelayed:Boolean(liveClass?.delayed),
+          liveStatusObservedAtMs:liveObservedAtMs||null,lastCheckedAtMs:decisionNow(),
+          reason:'scheduled_reference_retained_without_fresh_positive_live_status'};
+      }
+      if(prior?.phase==='BOUNDED'){
+        return {...prior,entryAuthorized:false,evidenceObservedAtMs:null,
+          authorizationReason:null,authorizationSource:null,
+          liveStatus:liveClass?.classification||'unknown',liveDataDelayed:Boolean(liveClass?.delayed),
+          liveStatusObservedAtMs:liveObservedAtMs||null,lastCheckedAtMs:decisionNow(),
+          reason:'bounded_start_retained_without_fresh_positive_live_status'};
+      }
+      if(prior?.confirmed && prior.actualStartConfidence==='proven' && Number(prior.actualStartMs)>0){
+        return {...prior,entryAuthorized:false,evidenceObservedAtMs:null,
+          authorizationReason:null,authorizationSource:null,
+          liveStatus:liveClass?.classification||'unknown',liveDataDelayed:Boolean(liveClass?.delayed),
+          liveStatusObservedAtMs:liveObservedAtMs||null,lastCheckedAtMs:decisionNow(),
+          reason:'proven_start_retained_without_fresh_positive_live_status'};
+      }
       const statsRecord = allowGameStats
         ? await this.statsForMilestone(milestone.id, { forceFresh })
         : null;
       statsError = statsRecord?.error || null;
       pbpCount = countPbpEvents(statsRecord?.value);
       if (pbpCount > 0 && prior?.phase !== 'CONFLICT') {
-        const observedNow = Math.max(Number(statsRecord?.observedAtMs || 0), decisionNow());
-        const start = prior?.confirmed ? prior.startTimeMs : observedNow;
-        const freshExactTrade = freshTradeActivity(quotes, observedNow);
-        const occurrenceWindowCurrent = Boolean(occurrence.coherent && occurrenceTimeMs && occurrenceTimeMs <= observedNow);
-        const milestoneStartMs = Number(milestoneMeta.milestoneStartMs || 0);
-        const milestoneEndMs = Number(milestoneMeta.milestoneEndMs || 0);
-        const officialMilestoneWindowCurrent = Boolean(
-          milestoneStartMs > 0 && milestoneStartMs <= observedNow
-          && milestoneEndMs > observedNow,
-        );
-        const fallbackAuthorized = Boolean(freshExactTrade && (occurrenceWindowCurrent || officialMilestoneWindowCurrent));
-        // PBP proves that play has occurred, but historical PBP may remain after
-        // a game ends. GCA2 therefore authorizes new exposure only when PBP is
-        // paired with a CURRENT exact-ticker trade probe and an official current
-        // event window (milestone start/end) or the legacy occurrence-passed
-        // window. A future/session-like occurrence can no longer veto a current
-        // official milestone window, while PBP alone still never authorizes.
-        const authorizationSource = fallbackAuthorized
-          ? (officialMilestoneWindowCurrent ? 'kalshi_game_stats_plus_exact_trade' : 'occurrence_passed_fresh_trade_activity')
-          : null;
-        return makeConfirmed(event, observedNow, start, prior?.source || 'kalshi_game_stats', {
-          ...milestoneMeta,
-          occurrenceTimeMs,
-          occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > observedNow)),
-          observedAtMs: prior?.confirmed ? prior.observedAtMs : observedNow,
-          entryAuthorized: fallbackAuthorized,
-          evidenceObservedAtMs: fallbackAuthorized ? observedNow : null,
-          authorizationReason: fallbackAuthorized
-            ? (officialMilestoneWindowCurrent ? 'official_pbp_plus_fresh_exact_trade_in_milestone_window' : 'fresh_occurrence_passed_plus_trade_activity_after_pbp')
-            : null,
-          authorizationSource,
-          reason: fallbackAuthorized
-            ? (officialMilestoneWindowCurrent ? 'official_pbp_current_window_authorized' : 'official_pbp_start_with_fresh_fallback_authorization')
-            : 'official_pbp_start_provenance_only',
-          evidence: {
-            liveData: liveClass, pbpEventCount: pbpCount, forceFresh: Boolean(forceFresh),
-            freshExactTrade, occurrenceWindowCurrent, officialMilestoneWindowCurrent,
-          },
-        });
+        const observedNow=Number(statsRecord?.observedAtMs||0)||decisionNow();
+        // PBP activity is evidence that play occurred, not its actual start or
+        // current LIVE permission. Never describe trade activity as authority.
+        return makeLiveUnknown(event,decisionNow(),'pbp_count_not_an_actual_start',{
+          ...milestoneMeta,occurrenceTimeMs,observedAtMs:observedNow,
+          evidenceObservedAtMs:null,
+          evidence:{liveData:liveClass,pbpEventCount:pbpCount,forceFresh:Boolean(forceFresh),
+            gameStatsObservedAtMs:observedNow,actualStartProven:false}});
       }
     }
 
@@ -822,13 +1286,21 @@ export class GameClockAuthority {
       };
     }
 
+    if(prior?.phase==='BOUNDED'){
+      // An unassociated provider outage cannot clear a valid historical
+      // transition, but also cannot authorize fresh capital. FINAL and
+      // CONFLICT were already handled above.
+      return {...prior,entryAuthorized:false,evidenceObservedAtMs:null,
+        authorizationReason:null,authorizationSource:null,lastCheckedAtMs:currentNow,
+        reason:'bounded_start_evidence_retained_pending_live_refresh'};
+    }
     if (prior?.confirmed) {
       if (prior.source === 'observed_market_activity') {
         const freshObservedActivity = Boolean(allowObservedActivityClock && broadLive(quotes) && freshTradeActivity(quotes, currentNow));
         const minimumAge = Math.max(0, Number(minimumElapsedMs) || 0);
         const age = currentNow - Number(prior.startTimeMs || 0);
         if (freshObservedActivity && age >= minimumAge) {
-          return makeConfirmed(event, currentNow, prior.startTimeMs, 'observed_market_activity', {
+          return makeLiveUnknown(event, currentNow, 'observed_market_activity_not_a_start', {
             ...milestoneMeta,
             occurrenceTimeMs,
             occurrenceConflict: Boolean(!occurrence.coherent || (occurrenceTimeMs && occurrenceTimeMs > currentNow)),
@@ -944,7 +1416,7 @@ export class GameClockAuthority {
       const observedAge = start > 0 ? Math.max(0, currentNow - start) : 0;
       const aged = start > 0 && observedAge >= minimumAge && observations >= GAME_CLOCK_AUTHORITY.observedActivityMinimumObservations;
       if (freshActivity && aged) {
-        return makeConfirmed(event, currentNow, start, 'observed_market_activity', {
+        return makeLiveUnknown(event, currentNow, 'observed_market_activity_not_a_start', {
           ...milestoneMeta,
           occurrenceTimeMs,
           occurrenceConflict:Boolean(occurrenceTimeMs && occurrenceTimeMs > currentNow),
@@ -970,25 +1442,11 @@ export class GameClockAuthority {
     }
 
     if (occurrenceTimeMs && occurrenceTimeMs <= currentNow && broadLive(quotes)) {
-      const fallbackAuthorized = freshTradeActivity(quotes, currentNow);
-      return makeConfirmed(event, currentNow, currentNow, 'occurrence_passed', {
-        ...milestoneMeta,
-        occurrenceTimeMs,
-        entryAuthorized: fallbackAuthorized,
-        evidenceObservedAtMs: fallbackAuthorized ? currentNow : null,
-        authorizationReason: fallbackAuthorized ? 'fresh_occurrence_passed_plus_trade_activity' : null,
-        authorizationSource: fallbackAuthorized ? 'occurrence_passed_fresh_trade_activity' : null,
-        reason: fallbackAuthorized ? 'occurrence_passed_plus_fresh_trade_activity' : 'occurrence_passed_broad_live_provenance_only',
-        evidence: {
-          liveData: liveClass,
-          liveError,
-          liveIdentityProblem,
-          statsError,
-          milestoneReason: milestoneSelection?.reason || null,
-          broadLive: true,
-          freshTradeActivity: fallbackAuthorized,
-        },
-      });
+      return makeLiveUnknown(event,currentNow,'occurrence_passed_not_a_start',{
+        ...milestoneMeta,occurrenceTimeMs,evidenceObservedAtMs:null,
+        evidence:{liveData:liveClass,liveError,liveIdentityProblem,statsError,
+          milestoneReason:milestoneSelection?.reason||null,broadLive:true,
+          actualStartProven:false,marketActivityAuthorizesEntry:false}});
     }
 
     let reason = !occurrenceTimeMs
@@ -1051,6 +1509,8 @@ export class GameClockAuthority {
       source: next.source,
       reason: next.reason,
       startTimeMs: next.startTimeMs,
+      boundedStartLowerMs:next.boundedStartLowerMs||null,
+      boundedStartUpperMs:next.boundedStartUpperMs||null,
       entryAuthorized: Boolean(next.entryAuthorized),
       evidenceObservedAtMs: next.evidenceObservedAtMs || null,
       occurrenceTimeMs: next.occurrenceTimeMs,
@@ -1063,7 +1523,8 @@ export class GameClockAuthority {
       authorizationReason: next.authorizationReason || null,
       authorizationSource: next.authorizationSource || null,
     };
-    if (next.phase === 'CONFIRMED') await this.audit('game_clock_authority_confirmed', data);
+    if(next.phase==='BOUNDED')await this.audit('game_clock_authority_bounded',data);
+    else if (next.phase === 'CONFIRMED') await this.audit('game_clock_authority_confirmed', data);
     else if (next.phase === 'CONFLICT') await this.audit('game_clock_authority_conflict', data);
     else if (next.phase === 'FINAL') await this.audit('game_clock_authority_final', data);
     else if (next.reason === 'activity_only_future_occurrence_blocked') await this.audit('game_clock_activity_only_blocked', data);

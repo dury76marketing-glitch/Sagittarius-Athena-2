@@ -3,6 +3,7 @@ import {EXECUTION_REPORT_VERSION,EXECUTION_ATTACKS,actualOpenExposure,unresolved
 import http from 'node:http';
 import { BUILD_INFO } from './authority.mjs';
 import { fullTradingDiagnosticFiles, FULL_TRADING_DIAGNOSTIC_MAX_BYTES } from './fullTradingDiagnostic.mjs';
+import {collectNativeTradingDiagnostics} from './nativeTradingDiagnostics.mjs';
 import { OPERATOR_ACCESS_VERSION } from './operatorAccess.mjs';
 import { FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, PORTFOLIO_CONCEPTS, isShadowSaintEntry } from './doctrine.mjs';
 import { createHash } from 'node:crypto';
@@ -138,6 +139,19 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
   gaps.push('exit_quote_age_not_recorded');
   if(exitQuoteObservedAtMs==null)gaps.push('exit_quote_observation_timestamp_unavailable');
   if(!Array.isArray(config.peakObservations))gaps.push('peak_path_not_retained');
+  // R17: copy only the bounded, transaction-validated strategy-eligibility
+  // witness. An R17 position without this evidence is historical/uncertified:
+  // never manufacture a rebound value from the later entry price.
+  const r17Concept=String(row.conceptName||'').startsWith('R17:');
+  const qualified=config.goldenSaintR17?.signalEligibility;
+  const r17Qualification=r17Concept&&qualified?.version==='R17-STORED-SIGNAL-QUALIFICATION-1'&&!historyUnknown
+    ?Object.fromEntries(['version','saint','role','cardFingerprint','linkEnabled','reason',
+      'quoteAtMs','quoteReceivedAtMs','quoteEpoch','quoteRevision','bidCents','askCents',
+      'stopPriceCents','troughSinceArmCents','reboundCents','minimumReboundCents',
+      'upwardTicks','minimumUpwardTicks','crashDepthCents','minimumCrashCents',
+      'parentOriginalEntryCents','minimumParentRiseCents','observationReleaseAtMs']
+      .filter(k=>Object.hasOwn(qualified,k)).map(k=>[k,qualified[k]])):null;
+  if(r17Concept&&!r17Qualification)gaps.push('r17_entry_strategy_qualification_not_recorded');
   return {
     positionId:String(row.id),
     executionIds:{entryOrderId:historyUnknown?null:row.entryOrderId||null,entryClientOrderId:row.entryClientOrderId||null,exitOrderId:historyUnknown?null:row.exitOrderId||null,exitClientOrderId:historyUnknown?null:row.exitClientOrderId||null},
@@ -187,6 +201,7 @@ export function projectLedgerRecord(row,snapshotCutoffMs){
     pendingReason:!historyUnknown&&['entry_pending','exit_pending','pending_recovery','reconciliation_orphaned'].includes(row.status)?row.closeReason||null:null,
     valuation:capital?{priceCents:historyUnknown?null:mark?.priceCents??null,atMs:historyUnknown?null:mark?.atMs??null,source:mark?.source||'unavailable',complete:unrealized!=null,reason:historyUnknown?'historical_economic_state_at_cutoff_not_recorded':mark?.reason||null}:{priceCents:valuationAfterCutoff?null:num(row.currentPriceCents),atMs:valuationAfterCutoff?null:num(row.updatedAtMs),source:'virtual_reference_stored_mark'},
     snapshotId:frozen.id,
+    r17Qualification,
     admissionEvidence:config.durableEventAdmission||null,
     starlightBandDecision:config.starlightRecovery?.priceBandDecision||null,
     observations:{peakPriceCents:num(row.peakPriceCents),troughPriceCents:num(row.lowestPriceAfterEntryCents),priceBasis:'stored_column_not_executable_proof',maeCents:num(row.maeCents)},
@@ -980,7 +995,39 @@ const marksTimer=setInterval(pushMarks,500);
         database:engine.db?.resourceSnapshot?.()||null,brokerRequests:engine.kalshi?.resourceSnapshot?.()||null});
     }
     if(u.pathname==='/api/settings'&&req.method==='PATCH')return json(res,200,await engine.patchSettings(await body(req)));
-    if(u.pathname==='/api/mode'&&req.method==='POST'){const b=await body(req);return json(res,200,await engine.setMode(b.mode,b.confirmation));}
+    if(u.pathname==='/api/mode'&&req.method==='POST'){
+      const b=await body(req);
+      try{
+        const settings=await engine.setMode(b.mode,b.confirmation);
+        return json(res,200,{ok:true,mode:settings?.mode,liveArmed:settings?.liveArmed===true,settings});
+      }catch(error){
+        const reason=String(error?.message||error||'mode_change_denied').slice(0,240);
+        const code=String(error?.code||'').slice(0,80);
+        // A financial ownership discrepancy must NOT be classified as a
+        // transient transport outage inviting automatic re-arm retries.
+        const reconciliation=code==='broker_reconciliation_not_clean';
+        const reconciliationSubreason=reconciliation
+          ?String(error?.reconciliationReason||engine.health?.lastReconciliationReason||'reconciliation_not_clean').slice(0,100)
+          :null;
+        const input=/invalid_mode_request|Type ENABLE LIVE TRADING|ALLOW_LIVE_TRADING is false|clone_deployment_binding_required|Engine is stopped/.test(reason);
+        const conflict=/already_armed|superseded|live_arm_superseded/.test(reason);
+        const recoverableReconciliation=reconciliation&&['scope_changed_during_snapshot',
+          'account_generation_changed'].includes(reconciliationSubreason);
+        const transport=/timeout|ECONN|ETIMEDOUT|429|temporarily|unavailable/i.test(reason);
+        const status=conflict||reconciliation&&!recoverableReconciliation?409
+          :recoverableReconciliation||transport?503:input?400:500;
+        const retryable=status===503;
+        const category=status===409?'state_conflict':status===503?'temporary_dependency'
+          :status===400?'invalid_input':'internal';
+        const safeReason=reconciliation?(reconciliationSubreason?('broker_reconciliation_not_clean:'+reconciliationSubreason):'broker_reconciliation_not_clean'):reason;
+        return json(res,status,{
+          ok:false,error:safeReason,reason:safeReason,code:code||null,
+          reconciliationSubreason,category,retryable,
+          mode:engine.settings?.mode||null,liveArmed:engine.settings?.liveArmed===true,
+          protectedInvariant:'live_authorization_and_broker_proof',
+        });
+      }
+    }
     if(u.pathname==='/api/engine'&&req.method==='POST'){const b=await body(req);if(typeof b?.active!=='boolean')return json(res,400,{error:'invalid_engine_active_request'});return json(res,200,await engine.setEngine(b.active));}
     if(u.pathname==='/api/run-scan'&&req.method==='POST'){engine.requestScan();return json(res,202,{ok:true,requested:true});}
     if(u.pathname==='/api/reset-defaults'&&req.method==='POST')return json(res,200,await engine.resetOperatorSettingsToFactory());
@@ -993,11 +1040,12 @@ const marksTimer=setInterval(pushMarks,500);
     if(u.pathname==='/api/diagnostics'&&req.method==='GET')return json(res,200,await collectDiagnosticData(engine));
     if(u.pathname==='/api/diagnostics/full-trading/download'&&req.method==='GET'){
       try{
-        const built=fullTradingDiagnosticFiles(engine, Date.now());
+        const nativeFunnel=await collectNativeTradingDiagnostics(engine);
+        const built=fullTradingDiagnosticFiles(engine, Date.now(),nativeFunnel);
         let files=built.files;
         let zip=zipStore(files);
         if(zip.length>FULL_TRADING_DIAGNOSTIC_MAX_BYTES){
-          files=files.filter(f=>['diagnostic-manifest.json','trading-choke-analysis.json','athena-starlight-lifecycle.json','diagnostic-coverage.json'].includes(f.name));
+          files=files.filter(f=>['diagnostic-manifest.json','live-mode-authorization.json','trading-choke-analysis.json','athena-golden-saints-lifecycle.json','diagnostic-coverage.json','linked-trading-funnel.json','native-trading-funnel.json'].includes(f.name));
           zip=zipStore(files);
         }
         const stamp=new Date().toISOString().replace(/[:.]/g,'-');

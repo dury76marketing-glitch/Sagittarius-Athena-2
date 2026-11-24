@@ -42,6 +42,11 @@ export const SHADOW_SCHEMA_SQL = `
   create index if not exists sag_shadow_pending_handoff_v3
     on sag_shadow_stops_v3(system_name,owner_id,mode,reset_epoch,closed_at_ms,parent_entry_id)
     where delivery_status='PENDING';
+  -- Fair bounded R17 Athena outbox replay; a permanently invalid old proof
+  -- must not starve newer valid parents behind the first page.
+  create index if not exists sag_shadow_pending_parent_cursor_v1
+    on sag_shadow_stops_v3(system_name,owner_id,mode,reset_epoch,parent_entry_id)
+    where delivery_status='PENDING';
   create index if not exists sag_starlight_results_v3
     on sag_entries(system_name,mode,status,closed_at_ms desc)
     where concept_name='Crash Recovery Hunter' and archived=false;
@@ -445,12 +450,19 @@ export class ShadowStore {
       if(proof?.authorization){
         // LP's virtual close is still durably recorded, but its loss is NOT
         // authority for a Starlight watch. Both writes share this transaction.
-        const proofHash=authorityHash(proof),enabled=settings.crashRecoveryHunterEnabled===true
-          && starlightParentLossMayArmRecovery(current);
+        // R17: Athena's verified loss is a stand-alone Golden Saint authority.
+        // It must not depend on Crash Recovery Hunter's retired enabled switch
+        // or the existence of a historical Starlight watch. The shadow close,
+        // hash and outbox record still commit in this SAME transaction.
+        const isAthenaLoss=current.conceptName==='Athena Exclamation';
+        const proofHash=authorityHash(proof),legacyEnabled=!isAthenaLoss
+          &&settings.crashRecoveryHunterEnabled===true
+          &&starlightParentLossMayArmRecovery(current);
         await client.query(`insert into sag_shadow_stops_v3(parent_entry_id,system_name,owner_id,mode,reset_epoch,
           proof_hash,proof,closed_at_ms,delivery_status) values($5,$1,$2,$3,$4,$6,$7,$8,$9)`,
-          [...scopeParams(scope),current.id,proofHash,proof,now,enabled?'PENDING':'DISABLED_AT_CLOSE']);
-        if(enabled){
+          [...scopeParams(scope),current.id,proofHash,proof,now,
+            (isAthenaLoss||legacyEnabled)?'PENDING':'DISABLED_AT_CLOSE']);
+        if(legacyEnabled){
           watch=shadowWatchFromProof(current,proof,settings);
           const w=await client.query(`insert into sag_starlight_recovery_v1
             (system_name,owner_id,mode,reset_epoch,authorization_id,parent_entry_id,status,revision,watch,updated_at_ms)
@@ -490,12 +502,61 @@ export class ShadowStore {
       || watch.authorization!=='VALID_SHADOW_HARD_STOP' || Number(watch.stopPriceCents)!==proof.exitPriceCents)return null;
     return {parent,proof,proofHash:raw.proof_hash,watch:{...watch,revision:Number(raw.watch_revision),status:raw.watch_status}};
   }
-  async pending(scope,{limit=32}={}){
-    const r=await this.pool.query(`select parent_entry_id from sag_shadow_stops_v3 where
-      system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4 and delivery_status='PENDING'
-      and not exists (select 1 from sag_entries parent where parent.id=parent_entry_id
-        and parent.concept_name in ('Lightning Plasma','Crash Recovery Hunter'))
-      order by closed_at_ms,parent_entry_id limit $5`,[...scopeParams(scope),Math.max(1,Math.min(64,limit))]);
+  /** R17 independent Athena loss authority, rooted ONLY in Athena's original
+   * immutable virtual close and hashed proof. Legacy Starlight's enabled flag,
+   * old handoff status and watch are NOT authorization for the new ten attacks.
+   * The caller must use this same PostgreSQL client as the watch-insert TX.
+   */
+  async athenaLossAuthorization(parentId,scope,queryClient=this.pool){
+    if(typeof parentId!=='string'||!parentId||parentId.length>256||!sameShadowScope(scope,scope))return null;
+    const r=await queryClient.query(`select e.*,p.proof,p.proof_hash
+      from sag_entries e join sag_shadow_stops_v3 p on p.parent_entry_id=e.id
+        and p.system_name=e.system_name and p.owner_id=e.owner_id
+        and p.mode=e.mode and p.reset_epoch=e.shadow_epoch
+      where p.system_name=$1 and p.owner_id=$2 and p.mode=$3 and p.reset_epoch=$4
+        and p.parent_entry_id=$5 and e.execution_class='SHADOW_SAINT'
+        and e.concept_name='Athena Exclamation' and e.archived=false
+        and e.status='closed' and e.remaining_count=0 and e.close_reason='hard_stop_loss'
+        and e.pnl_cents<0 limit 1`,[...scopeParams(scope),parentId]);
+    const raw=r.rows?.[0];if(!raw)return null;
+    const parent=this.mapEntry(raw),proof=raw.proof;
+    if(parent?.conceptName!=='Athena Exclamation'||parent?.executionClass!=='SHADOW_SAINT'
+      ||parent?.entryConfig?.executionClass!=='SHADOW_SAINT'
+      ||!entryMatchesShadowScope(parent,scope)||parent.status!=='closed'
+      ||parent.archived===true||parent.closeReason!=='hard_stop_loss'
+      ||!Number.isFinite(Number(parent.pnlCents))||!(Number(parent.pnlCents)<0)
+      ||Number(parent.remainingCount)!==0||!(Number(parent.count)>0)
+      ||Number(parent.exitFilledCount)!==Number(parent.count)
+      ||parent.shadowEntryHash!==shadowEntryHash(parent)
+      ||!proof||proof.version!==SHADOW_PROTOCOL||proof.authorization!=='VALID_SHADOW_HARD_STOP'
+      ||proof.brokerOrderAuthority!==false||proof.full!==true
+      ||proof.entryHash!==parent.shadowEntryHash||proof.parentEntryId!==parent.id
+      ||!sameShadowScope(proof.scope,scope)
+      ||Number(proof.count)!==Number(parent.count)
+      ||Number(proof.filled)!==Number(parent.count)
+      ||Number(proof.exitFeeCents)!==Number(parent.exitFeeCents)
+      ||Number(proof.pnlCents)!==Number(parent.pnlCents)
+      ||proof.closeReason!==parent.closeReason
+      ||Number(proof.exitPriceCents)!==Number(parent.exitPriceCents)
+      ||Math.abs(Number(proof.exitPriceCents)*Number(proof.count)-Number(parent.exitNotionalCents))>1e-7
+      ||Number(proof.closedAtMs)!==Number(parent.closedAtMs)
+      ||authorityHash(proof)!==raw.proof_hash)return null;
+    return {parent,proof,proofHash:raw.proof_hash};
+  }
+  async pending(scope,{limit=32,after=null}={}){
+    // Bounded keyset pagination guarantees that an invalid Athena proof in
+    // the first page cannot starve all newer legitimate pending parents.
+    // Immediate post-close authorization retains first priority.
+    if(after!==null&&(typeof after!=='string'||after.length>256||!after))
+      throw new Error('r17_shadow_outbox_cursor_invalid');
+    const r=await this.pool.query(`select p.parent_entry_id from sag_shadow_stops_v3 p
+      join sag_entries e on e.id=p.parent_entry_id
+      where p.system_name=$1 and p.owner_id=$2 and p.mode=$3 and p.reset_epoch=$4
+        and p.delivery_status='PENDING' and ($6::text is null or p.parent_entry_id>$6)
+        and e.concept_name='Athena Exclamation' and e.execution_class='SHADOW_SAINT'
+        and e.status='closed' and e.close_reason='hard_stop_loss' and e.pnl_cents<0
+      order by p.parent_entry_id limit $5`,
+      [...scopeParams(scope),Math.max(1,Math.min(64,limit)),after]);
     return r.rows.map(r=>r.parent_entry_id);
   }
   async delivered(parentId,proofHash,scope){

@@ -603,6 +603,9 @@ export function starlightRecoverySignalState(w={},q={},s={},now=Date.now(),{adva
     out.lastBidCents=bid;
     out.lastAskCents=ask;
     out.lastQuoteAtMs=at;
+    // Required for an independently repeatable, exact observation proof at
+    // capital-candidate construction and the native PostgreSQL admission fence.
+    out.lastQuoteReceivedAtMs=receivedAt;
     out.lastQuoteEpoch=String(q?.quoteObservation?.epoch||'');
     out.lastQuoteRevision=Number(q?.quoteObservation?.revision||0);
     out.updatedAtMs=now;
@@ -1264,6 +1267,16 @@ export function validateJusticeArrowFireCommand(command,{q,settings,now=Date.now
 }
 
 
+// R28 preserves known sporting terminal/conflict evidence for shadow activity
+// without consulting regular-capital min/max or requiring a start lookup.
+export function shadowSportingLifecycleReason(...quotes){
+  for(const q of quotes){
+    if(q?.gameClockState?.phase==='FINAL')return 'game_final';
+    if(q?.gameClockState?.phase==='CONFLICT')return 'game_clock_conflict';
+  }
+  return null;
+}
+
 export class StrategyEngine {
   constructor({ db, kalshi, market, learning, getCurrentCrashWatch = null, getCurrentStarlightWatch = null, registerObservationWatch = null, athena = null, getSettings, getLiveReady, refreshGameClock = null, onHunterOpened = null, onFeederOpened = null, onShadowAttackOpened = null, onShadowAttackClosed = null, onEntryPipeline = null, captureSimulationMutationToken = null, enterSimulationMutation = null, random = Math.random }) {
     this.db = db;
@@ -1479,13 +1492,10 @@ export class StrategyEngine {
     const bid=Number(q.yesBid||0),ask=Number(q.yesAsk||0);
     const status=String(q.status||'active').toLowerCase();
     if (!(bid>0) || !(ask>0) || bid>ask || status!=='active' || Boolean(q.result)) return { vote:null, candidate:null, entry:null };
+    if(shadowSportingLifecycleReason(q,this.market?.getQuote?.(q.ticker)))return {vote:null,candidate:null,entry:null};
     const gameMinutes=confirmedInGameElapsedMinutes(q);
-    const sharedMin=Math.max(0,Number(s.minGameMinutes??20));
-    const sharedMax=Math.max(0,Number(s.maxGameMinutes??0));
-    // A Saint vote is an independently qualified Attack doctrine observation,
-    // not an exposure grant. Require a confirmed in-game clock when available
-    // here; the eventual Big Bang still force-refreshes GCA2 and the full book.
-    if (gameMinutes==null || gameMinutes+1e-9<sharedMin || (sharedMax>0&&gameMinutes-1e-9>sharedMax)) return { vote:null, candidate:null, entry:null };
+    // R28: a qualification vote is non-capital observation. Keep the original
+    // convergence/price/signal rules; the regular capital clock is downstream.
     const result=await this.athenaExclamation.recordQualification({
       conceptName:concept,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,qualifiedAtMs:Date.now(),
       priceCents:ask,bidCents:bid,sourceFeeder,sourceTradeId,gameMinutes,qualificationSnapshot,
@@ -1820,11 +1830,11 @@ export class StrategyEngine {
     // trigger a REST<->WS recovery loop. The candidate IOC limit remains q.yesAsk.
     let freshMarket=null,refreshed=null;
     if(typeof this.market.verifyTickerSnapshot==='function'){
-      refreshed=await this.market.verifyTickerSnapshot(q.ticker).catch(()=>null);
+      refreshed=await this.market.verifyTickerSnapshot(q.ticker,{maxAgeMs:5000}).catch(()=>null);
     }else if(typeof this.market.refreshTickerVerified==='function'){
-      refreshed=await this.market.refreshTickerVerified(q.ticker).catch(()=>null);
+      refreshed=await this.market.refreshTickerVerified(q.ticker,{maxAgeMs:5000}).catch(()=>null);
     }else{
-      freshMarket=await this.market.refreshTicker(q.ticker).catch(()=>null);
+      freshMarket=await this.market.refreshTicker(q.ticker,{maxAgeMs:5000}).catch(()=>null);
     }
     if(refreshed){
       if(!refreshed.marketFresh||!refreshed.bookFresh){
@@ -1976,7 +1986,7 @@ export class StrategyEngine {
 
   async hunterEntryPolicyDecision(concept, q, { requireClock = true, includeCooldown = true, stage = 'policy', crystalWallOverlay = false, starlightRecovery = false, lightningPlasmaScaleIn = false, starlightModelClone = false } = {}) {
     const s = this.getSettings();
-    if (requireClock) {
+    if (requireClock && !isShadowSaintConcept(concept)) {
       const minGameMinutes = Math.max(0, Number(s.minGameMinutes ?? 20));
       const maxGameMinutes = Math.max(0, Number(s.maxGameMinutes ?? 0));
       const elapsedMinutes = confirmedInGameElapsedMinutes(q);
@@ -2495,7 +2505,10 @@ export class StrategyEngine {
     // The ordinary 10-120 / 30-120 Game Clock is not its strategic veto.
     // This does not waive LIVE arming, lifecycle, orderbook, stake, fee, capital,
     // Aurora, owner/epoch CAS, or last-moment signal revalidation.
-    const strategicClockBypass=independentCrashRecoveryEntry||scarletContinuationEntry||lightningPlasmaContinuationEntry||starlightRecovery===true||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true;
+    const nonCapitalShadow=isShadowSaintConcept(concept)&&lightningPlasmaScaleIn!==true
+      &&starlightModelClone!==true&&independentRecovery!==true
+      &&!(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true);
+    const strategicClockBypass=nonCapitalShadow||independentCrashRecoveryEntry||scarletContinuationEntry||lightningPlasmaContinuationEntry||starlightRecovery===true||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true;
     const fullConfiguredSizeRequired=independentCrashRecoveryEntry||scarletContinuationEntry||lightningPlasmaContinuationEntry;
     let independentAuthority=null;
     let independentParent=null;
@@ -2534,6 +2547,8 @@ export class StrategyEngine {
       ...(starlightRecovery===true?{starlightRecoveryParentEntryId:String(sourceTradeId||'')}:{}),...data});
     };
     trace('RECEIVED','PASS',null,{eventTicker:String(q?.eventTicker || exactTicker),sourceFeeder:sourceFeeder || null,galacticExplosionEnabled:s.galacticExplosionEnabled===true,concurrencyLockKey:tickerLockKey});
+    const shadowLifecycleReason=nonCapitalShadow?shadowSportingLifecycleReason(q,this.market?.getQuote?.(exactTicker)):null;
+    if(shadowLifecycleReason){trace('SHADOW_LIFECYCLE','BLOCKED',shadowLifecycleReason);return null;}
     // EMI1 defense-in-depth: Engine scheduling is the primary mode boundary,
     // but createHunter itself must independently fail closed before any market
     // refresh, capital work, or broker mutation if LIVE is not currently armed.
@@ -2888,14 +2903,14 @@ export class StrategyEngine {
       const executionMaxGameMinutes = Math.max(0, Number(s.maxGameMinutes ?? 0));
       let executionElapsed=null;
       if(strategicClockBypass){
-        trace('GAME_CLOCK','PASS',starlightRecovery===true?'starlight_post_stop_loss_authority_exempt':crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_crash_authority_exempt':ci1IndependentEntry?'ci1_wall_clone_crash_authority_exempt':'scarlet_crystal_wall_win_authority_exempt',{minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
+        trace('GAME_CLOCK','PASS',nonCapitalShadow?'non_capital_shadow_signal':starlightRecovery===true?'starlight_post_stop_loss_authority_exempt':crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_crash_authority_exempt':ci1IndependentEntry?'ci1_wall_clone_crash_authority_exempt':'scarlet_crystal_wall_win_authority_exempt',{minGameMinutes:executionMinGameMinutes,maxGameMinutes:executionMaxGameMinutes});
       }else{
         if (!this.refreshGameClock) {
           trace('GAME_CLOCK','BLOCKED','clock_refresh_unavailable');
           await this.audit('hunter_clock_refresh_unavailable', { concept, ticker: q.ticker, eventTicker: q.eventTicker || q.ticker });
           return null;
         }
-        const refreshed = await this.refreshGameClock(q, { forceFresh: true }).catch(() => null);
+        const refreshed = await this.refreshGameClock(q, { forceFresh: true, clockOnly: true }).catch(() => null);
         if (!refreshed?.gameClockState) {
           trace('GAME_CLOCK','BLOCKED','clock_refresh_failed');
           await this.audit('hunter_clock_refresh_failed_closed', { concept, ticker: q.ticker, eventTicker: q.eventTicker || q.ticker });
@@ -3171,7 +3186,7 @@ export class StrategyEngine {
       // short-lived; recheck its freshness at the last executable boundary.
       const finalNow = Date.now();
       if(strategicClockBypass){
-        trace('FINAL_CLOCK','PASS',starlightRecovery===true?'starlight_post_stop_loss_authority_exempt':crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_crash_authority_exempt':ci1IndependentEntry?'ci1_wall_clone_crash_authority_exempt':'scarlet_crystal_wall_win_authority_exempt');
+        trace('FINAL_CLOCK','PASS',nonCapitalShadow?'non_capital_shadow_signal':starlightRecovery===true?'starlight_post_stop_loss_authority_exempt':crystalWallIndependentEntry?'crystal_wall_crash_authority_exempt':justiceArrowIndependentEntry?'justice_arrow_crash_authority_exempt':ci1IndependentEntry?'ci1_wall_clone_crash_authority_exempt':'scarlet_crystal_wall_win_authority_exempt');
         const capacity=(isShadowSaintConcept(concept)&&lightningPlasmaScaleIn!==true&&!starlightRealEarly&&!starlightModelClone&&!independentRecovery)?{active:0,maximum:null,blocked:false,virtual:true}:await this.portfolioCapacityState();
         const event=lightningPlasmaScaleIn===true?'lightning_plasma_scalein_capacity_blocked':starlightRecovery===true?'starlight_recovery_capacity_blocked':crystalWallIndependentEntry?'crystal_wall_v3_capacity_blocked':justiceArrowIndependentEntry?'justice_arrow_v2_capacity_blocked':'ci1_wall_clone_capacity_blocked';
         if(capacity.blocked){trace('PORTFOLIO_CAPACITY','BLOCKED','max_positions',capacity);await this.audit(event,{ticker:q.ticker,eventTicker:expectedEventTicker,stage:'commit',...capacity});return null;}
@@ -3201,6 +3216,8 @@ export class StrategyEngine {
       trace('FINAL_ENTRY_POLICY','PASS',finalEntryPolicy.reason,finalEntryPolicy);
       const finalConfirmation=()=>{
         const currentSettings=this.getSettings();
+        const lifecycleReason=nonCapitalShadow?shadowSportingLifecycleReason(q,this.market?.getQuote?.(exactTicker)):null;
+        if(lifecycleReason)return {ok:false,reason:lifecycleReason};
         if(!sameShadowScope(currentSettings,s) || currentSettings.engineActive===false || (!isModelEnabled(currentSettings,concept) && !((starlightModelClone===true || independentRecovery===true) && ((concept==='Lightning Plasma' && currentSettings.lightningPlasmaEnabled===true) || (concept==='Sagittarius Arrow Recovery' && currentSettings.sagittariusArrowEnabled===true)))) || ((!isShadowSaintConcept(concept)||lightningPlasmaScaleIn===true||starlightModelClone===true||independentRecovery===true||(concept==='Crash Recovery Hunter'&&starlightRecovery===true&&s.starlightExtinctionRealTradeEnabled===true))&&s.mode==='LIVE'&&!this.getLiveReady(independentRecovery===true||lightningPlasmaScaleIn===true?concept:null)))return {ok:false,reason:'execution_authority_changed'};
         if(cardIdentity(currentSettings)!==submittedCardIdentity)return {ok:false,reason:'execution_settings_changed'};
         const currentFamily=executionMarketFamilyExclusion(exactTicker,currentSettings,{concept});

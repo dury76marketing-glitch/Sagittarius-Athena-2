@@ -1,14 +1,22 @@
+import { liveArmingReconciliationDecision } from './liveArmingDecision.mjs';
+import {R17_GOLDEN_CAPITAL_CONCEPTS} from './doctrine.mjs';
 import { auroraStopWindowView } from './profitGuard.mjs';
 import {financialHistoryState,unresolvedFundedCapital} from './executionReporting.mjs';
 import {hasKnownZeroLiveEntryFee,liveRecoveryCollateralRequirement} from './executionEconomics.mjs';
 import {createQ17LiveCashWitness,q17LiveOwnedPositionDisposition} from './q17LiveCapitalAdmissibility.mjs';
 import {OperationalMonitor,QueueBudget,BoundedCoalescingQueue,scopeKey,validateBalance,validateRestingOrders,ownOrderIssues} from './operationalSafety.mjs';
+import {qualifiedGoldSaintLiveAdmission} from './liveQualifiedAdmission.mjs';
+
+
+
 import {deliverOperationalAlert,alertWebhookConfigured} from './operationalWatchdog.mjs';
 import {randomUUID} from 'node:crypto';
 import {MemoryTelemetry,MEMORY_REPAIR_VERSION} from './runtimeMemory.mjs';
+import {GOLDEN_SAINTS,applyGoldenSaintCardPatch} from './goldenSaintCards.mjs';
+import {GoldenSaintRuntime} from './goldenSaintExecution.mjs';
 import {TradingLiveness,BoundedDiagnosticReporter} from './tradingLiveness.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_VERSION} from './athenaStarlightTrigger.mjs';
-import {BUILD_INFO} from './authority.mjs';
+import {BUILD_INFO,authorityHash} from './authority.mjs';
 import {createGreatHornCapitalEntry} from './greatHornSimCapital.mjs';
 import {greatHornSeatPlan} from './greatHornRecovery.mjs';
 import {dispatchGreatHornLiveIntent} from './q17LiveRecoveryAdapter.mjs';
@@ -58,7 +66,9 @@ import { GoldenEye } from './goldenEye.mjs';
 import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
 import { PhoenixCosmoEngine } from './phoenix.mjs';
 import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, SHADOW_SAINT_ARCHITECTURE, isShadowSaintConcept, isShadowSaintEntry, SHADOW_SAINT_QUOTE_MAX_AGE_MS, executionMarketFamilyExclusion, MARKET_FAMILY_EXECUTION_EXCLUSION, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, CI1_WALL_CLONE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH } from './doctrine.mjs';
-import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState } from './gameClock.mjs';
+import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState, normalizeGameClockState } from './gameClock.mjs';
+import {EventClockRuntime,latestSameEventClockState} from './gameClockRuntime.mjs';
+import {TradingFunnel} from './tradingFunnel.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
 
 const openLike = (s) => ['open', 'entry_pending', 'exit_pending', 'pending_recovery'].includes(s);
@@ -69,6 +79,12 @@ const PROTECTION_BACKUP_MS = 1500;
 const GOLD_SAINT_ATTACKS = new Set(['Wave Surfer','Crash Recovery Hunter','Recovery Hunter','Momentum Hunter','Lightning Plasma','Scarlet Needle']);
 const stableHash=(value)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const rounded=(v,p=4)=>Number.isFinite(Number(v))?Number(Number(v).toFixed(p)):null;
+export function ownerTradingConfigurationFingerprint(settings={}){
+  const keys=[...new Set([...EDITABLE_NUMERIC_SETTINGS,...EDITABLE_BOOLEAN_SETTINGS,
+    'goldenSaints','systemName','ownerId','mode','resetTimestampMs'])].filter(key=>
+      !SETTINGS_MIGRATION_FLAGS.includes(key)&&!['liveArmed','liveOwnerAuthorized'].includes(key)).sort();
+  return authorityHash(Object.fromEntries(keys.filter(key=>Object.hasOwn(settings,key)).map(key=>[key,settings[key]])));
+}
 export const ENTRY_CANDIDATE_FUNNEL = Object.freeze({version:'ECF1',maximumCandidates:512,maximumRecent:80});
 export const DATABASE_PRESSURE_ISOLATION = Object.freeze({
   version:'DBPI2',
@@ -101,11 +117,9 @@ export const OPERATOR_PLANE_ISOLATION = Object.freeze({
 });
 
 export const ENTRY_ADMISSION_CONTROL = Object.freeze({
-  version:'EAC3',
-  unknownProbeIntervalMs:30_000,
+  version:'EAC4',
   maximumTrackedEvents:2048,
-  preBoltExecutionMarginMs:5_000,
-  role:'event_level_prequeue_clock_and_immediate_green_execution_admission',
+  role:'non_capital_signal_admission_independent_of_regular_capital_window',
 });
 
 
@@ -231,59 +245,37 @@ export function entryAdmissionDecision({ quote=null, mode='SIMULATION', minGameM
   const t=Number(now);
   if(phase==='FINAL')return{action:'BLOCK',reason:'game_final',nextEligibleAtMs:null};
   if(phase==='CONFLICT')return{action:'BLOCK',reason:'game_clock_conflict',nextEligibleAtMs:null};
-  const start=Number(state.startTimeMs||quote?.gameStartTimeMs||0);
-  if(phase==='CONFIRMED'&&Number.isFinite(start)&&start>0){
+  const expectedEvent=String(quote?.eventTicker||quote?.ticker||'');
+  const start=Number(state.actualStartMs||0);
+  if(phase==='CONFIRMED'&&isConfirmedGameClockState(state,expectedEvent)&&start>0){
+    if(!isEntryAuthorizedGameClockState(state,expectedEvent,t))
+      return{action:'PROBE',reason:'clock_live_status_refresh_required',nextEligibleAtMs:null};
     const nextEligibleAtMs=start+minMs;
     if(Number.isFinite(t)&&t+1e-9<nextEligibleAtMs)return{action:'BLOCK',reason:'minimum_game_time_wait',nextEligibleAtMs,startTimeMs:start};
     const lastEligibleAtMs=maxMs>0?start+maxMs:null;
     if(lastEligibleAtMs!=null&&Number.isFinite(t)&&t-1e-9>lastEligibleAtMs)return{action:'BLOCK',reason:'maximum_game_time_exceeded',nextEligibleAtMs:null,lastEligibleAtMs,startTimeMs:start};
     return{action:'ALLOW',reason:maxMs>0?'confirmed_entry_window':'confirmed_minimum_elapsed',nextEligibleAtMs,startTimeMs:start,lastEligibleAtMs};
   }
-  // GCA2-R3 LIVE/SIM parity: the observed-activity lower bound is shared
-  // strategic evidence. Legacy simulationActivityStartMs is accepted only as
-  // restart-safe migration input from pre-parity persisted GCA2 rows.
-  const observedStart=Number(state.observedActivityStartMs||state.simulationActivityStartMs||0);
-  if(Number.isFinite(observedStart)&&observedStart>0){
-    const nextEligibleAtMs=observedStart+minMs;
-    if(Number.isFinite(t)&&t+1e-9<nextEligibleAtMs)return{action:'BLOCK',reason:'observed_activity_aging_wait',nextEligibleAtMs,startTimeMs:observedStart};
-    // The lower bound is conservative. If even it exceeds the configured
-    // maximum, the event is certainly too old and may be rejected before an
-    // execution worker is consumed in either mode.
-    const lastEligibleAtMs=maxMs>0?observedStart+maxMs:null;
-    if(lastEligibleAtMs!=null&&Number.isFinite(t)&&t-1e-9>lastEligibleAtMs)return{action:'BLOCK',reason:'maximum_game_time_exceeded',nextEligibleAtMs:null,lastEligibleAtMs,startTimeMs:observedStart};
-    // Maturity is not exposure authority. It earns one bounded shared GCA2
-    // probe; only fresh exact-trade evidence can promote the event to CONFIRMED.
-    return{action:'PROBE',reason:'observed_activity_due_for_authority_probe',nextEligibleAtMs,startTimeMs:observedStart,lastEligibleAtMs};
-  }
+  // Trading activity is never sporting-time authority. It may not age,
+  // deny, or open the owner window.
   return{action:'PROBE',reason:'clock_authority_probe_required',nextEligibleAtMs:null};
 }
 
-// EAC3 keeps only the hard game-window proof needed by the immediate
-// COSMO_GREEN -> Atomic Thunder -> Athena chain. There is no strategic
-// PRE-BOLT waiting clock. A green signal or an already emitted Bolt needs only
-// enough remaining game time for the bounded execution margin.
-export function entryChainAdmissionDecision({
-  quote=null,
-  mode='SIMULATION',
-  minGameMinutes=0,
-  maxGameMinutes=0,
-  now=Date.now(),
-  stage='ATOMIC_GREEN',
-  executionMarginMs=ENTRY_ADMISSION_CONTROL.preBoltExecutionMarginMs,
-}={}){
-  const normalizedStage=stage==='NEW_PRE_BOLT'||stage==='ACTIVE_PRE_BOLT'?'ATOMIC_GREEN':stage==='POST_ATB2'?'POST_BOLT':String(stage||'ATOMIC_GREEN');
-  const base=entryAdmissionDecision({quote,mode,minGameMinutes,maxGameMinutes,now});
-  if(base.action!=='ALLOW')return{...base,stage:normalizedStage};
-  const maxAt=Number(base.lastEligibleAtMs||0),t=Number(now),margin=Math.max(0,Number(executionMarginMs)||0);
-  if(!(maxAt>0))return{...base,stage:normalizedStage,executionMarginMs:margin,preBoltFeasible:true,immediateGreenChain:true};
-  const expectedEvent=String(quote?.eventTicker||quote?.ticker||'');
-  const freshClock=isEntryAuthorizedGameClockState(quote?.gameClockState,expectedEvent,t);
-  if(['ATOMIC_GREEN','POST_BOLT'].includes(normalizedStage)&&!freshClock){
-    return{action:'PROBE',reason:normalizedStage==='POST_BOLT'?'post_bolt_clock_authorization_refresh_required':'cosmo_green_clock_authorization_refresh_required',stage:normalizedStage,startTimeMs:base.startTimeMs,lastEligibleAtMs:maxAt,nextEligibleAtMs:base.nextEligibleAtMs};
-  }
-  const readyAtMs=t+margin;
-  if(!(readyAtMs<maxAt))return{action:'BLOCK',reason:'execution_window_infeasible',stage:normalizedStage,startTimeMs:base.startTimeMs,lastEligibleAtMs:maxAt,readyAtMs,executionMarginMs:margin,nextEligibleAtMs:null};
-  return{...base,stage:normalizedStage,executionMarginMs:margin,readyAtMs,preBoltFeasible:true,immediateGreenChain:true};
+// R28: these callers create reference/shadow signals, never regular capital.
+// Preserve terminal/conflict refusal; missing/stale starts and owner capital
+// windows do not suppress observations. Gold Saint execution owns those gates.
+export function shadowSignalAdmissionDecision({quote=null}={}){
+  if(!quote?.ticker)return {action:'BLOCK',reason:'market_identity_missing'};
+  const state=quote.gameClockState||{};
+  if(state.phase==='FINAL')return {action:'BLOCK',reason:'game_final'};
+  if(state.phase==='CONFLICT')return {action:'BLOCK',reason:'game_clock_conflict'};
+  if(quote.result||['closed','determined','settled','finalized'].includes(String(quote.status||'').toLowerCase()))
+    return {action:'BLOCK',reason:'game_market_terminal'};
+  return {action:'ALLOW',reason:'non_capital_signal_observation',authority:'SHADOW_ONLY'};
+}
+export function entryChainAdmissionDecision({quote=null,stage='ATOMIC_GREEN'}={}){
+  const normalizedStage=['NEW_PRE_BOLT','ACTIVE_PRE_BOLT'].includes(stage)?'ATOMIC_GREEN':stage==='POST_ATB2'?'POST_BOLT':String(stage||'ATOMIC_GREEN');
+  return {...shadowSignalAdmissionDecision({quote}),stage:normalizedStage};
 }
 
 // R60-HF1 simulation reset mutation barrier. Reset invalidates the epoch,
@@ -375,7 +367,7 @@ export class SagittariusEngine {
       maxConcurrency:1,
       onError:async(error,key)=>{await this.db.audit('warning','phoenix_signal_backpressure',{key,message:String(error?.message||error)}).catch(()=>{});},
     });
-    this.entryAdmissionProbeAt = new Map();
+    this.eventClockRuntime = new EventClockRuntime();
     this.entryAdmissionStats = {version:ENTRY_ADMISSION_CONTROL.version,allowed:0,blockedBeforeQueue:0,probeAllowed:0,probeCoalesced:0,byReason:{}};
     // R60/ECF1: one bounded identity follows an opportunity from COSMO_GREEN to
     // OPENED. These maps are telemetry/dedup only; they never grant authority.
@@ -800,92 +792,9 @@ export class SagittariusEngine {
   }
 
   async attemptCrystalWallAttack(authorizationId) {
-    const stats=this.crystalWallContinuationRuntime(),s=this.settings||{};
-    const watch=this.crystalWallWatches.get(String(authorizationId));
-    if(!watch)return {status:'IGNORED',reason:'watch_missing'};
-    const ticker=String(watch.ticker||''),crashEpisodeId=String(watch.crashEpisodeId||'');
-    const record=(status,data={})=>{stats.lastEvent={status,atMs:Date.now(),authorizationId:String(authorizationId),crashEpisodeId,ticker,...data};return stats.lastEvent;};
-    if(s.recoveryHunterEnabled!==true){this.dropCrystalWallWatch(String(authorizationId));return {status:'IGNORED',reason:'crystal_wall_disabled'};}
-    const windowMs=Math.max(1,Number(s.recoveryTrackingHours||24))*3600000;
-    if(Number(watch.crashStartedAtMs||0)>0&&Date.now()-Number(watch.crashStartedAtMs)>windowMs){
-      this.dropCrystalWallWatch(String(authorizationId));stats.expired+=1;record('EXPIRED',{reason:'tracking_window_elapsed'});return {status:'EXPIRED',reason:'tracking_window_elapsed'};
-    }
-    if(this.crystalWallContinuationInFlight.has(String(authorizationId))){stats.duplicateSuppressed+=1;return {status:'DUPLICATE_SUPPRESSED',reason:'local_in_flight'};}
-    this.crystalWallContinuationInFlight.add(String(authorizationId));
-    let unlock=null;
-    const baseEpisode=(decision={},fireCommand={})=>({id:String(authorizationId),systemName:s.systemName,sourceRelease:RELEASE,cohortId:String(s.resetTimestampMs||''),ticker,eventTicker:String(watch.eventTicker||ticker),side:'YES',sport:String(watch.sport||'Unknown'),boltAtMs:Number(watch.crashStartedAtMs||watch.authorizedAtMs||Date.now()),boltSnapshot:{version:CRYSTAL_WALL.version,policyRevision:CRYSTAL_WALL.policyRevision,authority:CRYSTAL_WALL.strategicEntryAuthority,crashEpisodeId,preCrashPeakCents:Number(watch.preCrashPeakCents||0),crashDepthCents:Number(watch.crashDepthCents||0)},athenaDecision:decision,fireCommand,attackSelected:'Recovery Hunter',entryId:null,entryAtMs:null,outcome:{},trackingComplete:false,updatedAtMs:Date.now()});
-    try{
-      if(typeof this.db.acquireHunterTickerLock==='function'){
-        unlock=await this.db.acquireHunterTickerLock(s.systemName,`crystal-wall-v3:${String(authorizationId)}`);
-        if(!unlock){stats.duplicateSuppressed+=1;return {status:'DUPLICATE_SUPPRESSED',reason:'database_lock_busy'};}
-      }
-      const existing=typeof this.db.opportunityEpisode==='function'?await this.db.opportunityEpisode(String(authorizationId)).catch(()=>null):null;
-      const existingState=String(existing?.athenaDecision?.crystalWall?.status||existing?.athenaDecision?.decision||'');
-      if(existing?.entryId||['OPENED','EXPIRED','BLOCKED'].includes(existingState)){
-        this.dropCrystalWallWatch(String(authorizationId));stats.duplicateSuppressed+=1;record('DUPLICATE_SUPPRESSED',{existingState,entryId:existing?.entryId||null});return {status:'DUPLICATE_SUPPRESSED',reason:'durable_episode_consumed'};
-      }
-      if(!existing){
-        const lineage={version:CRYSTAL_WALL.version,policyRevision:CRYSTAL_WALL.policyRevision,status:'CRASH_ARMED',terminal:false,authorizationId:String(authorizationId),crashEpisodeId,ticker,eventTicker:String(watch.eventTicker||ticker),authorizedAtMs:Number(watch.authorizedAtMs||Date.now()),preCrashPeakCents:Number(watch.preCrashPeakCents||0),troughCents:Number(watch.troughCents||0),crashDepthCents:Number(watch.crashDepthCents||0),fixedStakeCents:Number(s.recoveryStakeCents),stakeMultiplier:1,stakeMultiplierAllowed:false,oneEntryPerCrashEpisode:true};
-        await this.db.upsertOpportunityEpisode(baseEpisode({decision:'AUTHORIZED',reason:'ci1_crash_authorized_crystal_wall_v3',strategicAuthority:true,crystalWall:lineage}));
-        stats.authorized+=1;record('AUTHORIZED',{crashDepthCents:Number(watch.crashDepthCents||0)});
-      }
-      if(watch.terminal||String(watch.status)==='EXPIRED'){
-        const decision={decision:'EXPIRED',reason:'market_final',strategicAuthority:true,crystalWall:{version:CRYSTAL_WALL.version,status:'EXPIRED',terminal:true,authorizationId:String(authorizationId),crashEpisodeId}};
-        await this.db.upsertOpportunityEpisode({...baseEpisode(decision),...(existing||{}),athenaDecision:decision,trackingComplete:true,updatedAtMs:Date.now()}).catch(()=>{});
-        this.dropCrystalWallWatch(String(authorizationId));stats.expired+=1;record('EXPIRED',{reason:'market_final'});return {status:'EXPIRED',reason:'market_final'};
-      }
-      const gate=this.shadowEntryGate();
-      if(!gate.allowed){this.setRecoveryWatchBackoff(this.crystalWallWatches,String(authorizationId),gate.reason,RECOVERY_WATCH_EXECUTION_GOVERNOR.genericExecutionBlockedRetryMs);stats.watching+=1;record('WATCHING',{reason:gate.reason});return {status:'WATCHING',reason:gate.reason};}
-      // RWG1: durable crash authorization is cheap; REST execution proof is
-      // reserved for an actually READY websocket-driven recovery watch.
-      if(String(watch.status||'')!=='READY'){stats.watching+=1;record('WATCHING',{reason:'rebound_not_ready',watchStatus:String(watch.status||'')});return {status:'WATCHING',reason:'rebound_not_ready'};}
-      // A same-attack position on this exact ticker cannot execute until the
-      // existing position closes. Detect that before REST verification so an
-      // impossible candidate cannot create quote-rate REST/WS recovery churn.
-      const openRows=typeof this.db?.openEntriesByTicker==='function'?await this.db.openEntriesByTicker(s.systemName,ticker).catch(()=>[]):[];
-      const coexisting=openRows.filter((e)=>PORTFOLIO_CONCEPTS.has(String(e.conceptName||''))&&openLike(e.status)&&String(e.ownerId||s.ownerId)===String(s.ownerId)&&String(e.mode||s.mode)===String(s.mode));
-      const sameConcept=coexisting.filter((e)=>String(e.conceptName||'')==='Recovery Hunter');
-      if(s.galacticExplosionEnabled!==true && sameConcept.length){
-        this.setRecoveryWatchBackoff(this.crystalWallWatches,String(authorizationId),'ticker_exposure_active',RECOVERY_WATCH_EXECUTION_GOVERNOR.exposureBlockedRetryMs);
-        stats.watching+=1;record('WATCHING',{reason:'ticker_exposure_active',existingEntryIds:sameConcept.map((e)=>String(e.id))});return {status:'WATCHING',reason:'ticker_exposure_active'};
-      }
-      const parentLike=coexisting.filter((e)=>String(e.conceptName||'')!=='Recovery Hunter');
-      const sourceKind=parentLike.length?'OWNED_REAL_POSITION':'TRACKED_MARKET';
-      // Use the already sequence-aligned websocket quote for the strategic
-      // READY recheck. Strategy.prepareEntryExecution performs the one required
-      // fresh REST market+book proof at the actual execution boundary.
-      const cached=this.market?.getQuote?.(ticker)||null;
-      if(!cached||cached.bookInvalid===true){this.setRecoveryWatchBackoff(this.crystalWallWatches,String(authorizationId),'canonical_book_not_ready',RECOVERY_WATCH_EXECUTION_GOVERNOR.genericExecutionBlockedRetryMs);stats.watching+=1;record('WATCHING',{reason:'canonical_book_not_ready'});return {status:'WATCHING',reason:'canonical_book_not_ready'};}
-      const q={...cached,ticker,eventTicker:String(cached.eventTicker||cached.ticker||ticker)};
-      const status=String(q.status||'').toLowerCase();
-      if(String(q.eventTicker||ticker)!==String(watch.eventTicker||ticker)){stats.blocked+=1;record('BLOCKED',{reason:'event_identity_mismatch'});return {status:'BLOCKED',reason:'event_identity_mismatch'};}
-      if(status!=='active'||Boolean(q.result)){
-        const decision={decision:'EXPIRED',reason:'market_not_active',strategicAuthority:true,crystalWall:{version:CRYSTAL_WALL.version,status:'EXPIRED',terminal:true,authorizationId:String(authorizationId),crashEpisodeId}};
-        await this.db.upsertOpportunityEpisode({...baseEpisode(decision),...(existing||{}),athenaDecision:decision,trackingComplete:true,updatedAtMs:Date.now()}).catch(()=>{});
-        this.dropCrystalWallWatch(String(authorizationId));stats.expired+=1;record('EXPIRED',{reason:'market_not_active'});return {status:'EXPIRED',reason:'market_not_active'};
-      }
-      const signal=crystalWallSignalState(watch,q,s,Date.now());
-      const updated={...watch,...signal,updatedAtMs:Date.now(),status:signal.qualified?'READY':signal.reason==='tracking_new_low'?'TRACKING_TROUGH':'REBOUND_CONFIRMING'};
-      this.crystalWallWatches.set(String(authorizationId),updated);
-      if(!signal.qualified){stats.watching+=1;record('WATCHING',{reason:signal.reason,troughCents:signal.troughCents,reboundCents:signal.reboundCents,upwardTicks:signal.upwardTicks});return {status:'WATCHING',reason:signal.reason};}
-      const executionWatch={...updated,...signal,sourceKind,coexistingEntryIds:parentLike.map((e)=>String(e.id))};
-      stats.attempted+=1;if(sourceKind==='OWNED_REAL_POSITION')stats.ownedSource+=1;else stats.trackedSource+=1;record('ATTEMPTED',{sourceKind,bidCents:signal.bidCents,askCents:signal.askCents,troughCents:signal.troughCents,reboundCents:signal.reboundCents,upwardTicks:signal.upwardTicks});
-      const opened=await this.strategy.executeCrystalWallAttack(q,executionWatch);
-      if(!opened){this.setRecoveryWatchBackoff(this.crystalWallWatches,String(authorizationId),'hard_safety_liquidity_or_capacity_blocked',RECOVERY_WATCH_EXECUTION_GOVERNOR.genericExecutionBlockedRetryMs);stats.watching+=1;record('WATCHING',{reason:'hard_safety_liquidity_or_capacity_blocked',sourceKind});return {status:'WATCHING',reason:'hard_safety_liquidity_or_capacity_blocked'};}
-      this.dropCrystalWallWatch(String(authorizationId));
-      stats.opened+=1;record('OPENED',{sourceKind,entryId:opened.id,entryPriceCents:Number(opened.entryPriceCents||0),count:Number(opened.count||0)});
-      const lineage=structuredClone(opened.entryConfig?.crystalWall||executionWatch);
-      const openedDecision={decision:'OPENED',reason:'crystal_wall_v3_crash_rebound_opened',strategicAuthority:true,crystalWall:{...lineage,status:'OPENED',terminal:true,entryId:opened.id,entryAtMs:Number(opened.openedAtMs||Date.now()),entryPriceCents:Number(opened.entryPriceCents||0)}};
-      const current=typeof this.db.opportunityEpisode==='function'?await this.db.opportunityEpisode(String(authorizationId)).catch(()=>null):existing;
-      await this.db.upsertOpportunityEpisode({...baseEpisode(openedDecision,structuredClone(opened.entryConfig?.crystalWallFire||{})),...(current||{}),athenaDecision:openedDecision,fireCommand:structuredClone(opened.entryConfig?.crystalWallFire||{}),entryId:opened.id,entryAtMs:Number(opened.openedAtMs||Date.now()),attackSelected:'Recovery Hunter',updatedAtMs:Date.now()}).catch(()=>{});
-      await this.db.audit('info','crystal_wall_v3_opened',{authorizationId:String(authorizationId),crashEpisodeId,ticker,sourceKind,coexistingEntryIds:executionWatch.coexistingEntryIds,entryId:opened.id,entryPriceCents:Number(opened.entryPriceCents||0),count:Number(opened.count||0),troughCents:Number(signal.troughCents||0),reboundCents:Number(signal.reboundCents||0),fixedStakeCents:Number(s.recoveryStakeCents),stakeMultiplier:1}).catch(()=>{});
-      return {status:'OPENED',authorizationId:String(authorizationId),entry:opened};
-    }catch(error){
-      stats.blocked+=1;record('BLOCKED',{reason:'crystal_wall_v3_exception',message:String(error?.message||error)});await this.db.audit('error','crystal_wall_v3_failed',{authorizationId:String(authorizationId),crashEpisodeId,ticker,message:String(error?.message||error)}).catch(()=>{});return {status:'BLOCKED',reason:'crystal_wall_v3_exception'};
-    }finally{
-      if(unlock)await unlock().catch(()=>{});
-      this.crystalWallContinuationInFlight.delete(String(authorizationId));
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async hydrateCrystalWallV3() {
@@ -1455,224 +1364,15 @@ export class SagittariusEngine {
   }
 
   async evaluateIndependentRecovery(){
-    if(!(this.independentRecoveryWatches instanceof Map)||!this.independentRecoveryWatches.size)return;
-    if(this.independentRecoveryEvaluationActive===true)return;
-    this.independentRecoveryEvaluationActive=true;
-    try{
-    const s=this.settings||{};
-    for(const [id,watch] of [...this.independentRecoveryWatches]){
-      if(['CONSUMED','BLOCKED','EXPIRED'].includes(String(watch.status)))continue;
-      if(watch.concept!=='Sagittarius Arrow Recovery')continue;
-      if(['systemName','ownerId','mode'].some(k=>String(watch[k])!==String(s[k]))
-        ||Number(watch.resetEpoch)!==Number(s.resetTimestampMs||0))continue;
-      // Fail closed until the durable row exists. An in-memory ARMED watch
-      // with revision 0 has not been persisted; opening it would leave the
-      // database ARMED and a restart could open a second capital seat.
-      if(!(Number(watch.revision)>0))continue;
-      let seatBook;
-      try{seatBook=await this.independentRecoverySeatBook(watch);}catch(error){
-        this.independentRecoveryBootPending=true;
-        this.independentRecoveryLastError=String(error?.message||error);
-        this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_seat_read_failed'});continue;
-      }
-      if(!seatBook.ok||seatBook.pendingIds.length||!seatBook.nextSeat){
-        this.independentRecoveryWatches.set(id,{...watch,status:seatBook.status,
-          openedSeatIds:seatBook.fundedIds,maximumSeats:seatBook.maximumSeats,lastAttemptReason:seatBook.reason});
-        continue;
-      }
-      const quote=this.market?.getQuote?.(watch.ticker);
-      if(!quote)continue;
-      const geom=this.independentGeometrySettings(watch.concept,s);
-      // Frozen Link is a watch-scoped strategy choice, never permission to
-      // skip fresh quotes, durable proof, book, Aurora, cash or capacity.
-      const currentLink=watch.concept==='Lightning Plasma'
-        ?s.lightningPlasmaLinkEnabled===true:s.sagittariusArrowLinkEnabled===true;
-      // Pre-R5 durable watches did not record a LINK field. They may be
-      // upgraded to the explicitly OFF policy only: this preserves their old
-      // geometry with no broadened entry authority. Never auto-upgrade an old
-      // watch into LINK ON. Use the same durable CAS used for observations.
-      if(typeof watch.link!=='boolean' && currentLink===false){
-        if(typeof this.db?.updateIndependentWatch==='function'){
-          const legacy={...watch,link:false,lastAttemptReason:'q17_r5_legacy_link_off_restored'};
-          let committed=null;
-          try{committed=await this.db.updateIndependentWatch(legacy,Number(watch.revision));}catch{}
-          if(committed&&Number(committed.revision)===Number(watch.revision)+1){
-            this.independentRecoveryWatches.set(id,{...legacy,revision:Number(committed.revision),status:committed.status});
-          }else this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_link_legacy_persistence_pending'});
-        }
-        continue;
-      }
-      if(typeof watch.link!=='boolean'||watch.link!==currentLink){
-        this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_link_settings_changed'});
-        continue;
-      }
-      if(watch.link===true){
-        geom.crashRecoveryHunterMinCrashCents=0;
-        geom.crashRecoveryHunterMinReboundCents=0;
-        geom.crashRecoveryHunterMinUpwardTicks=0;
-        geom.crashRecoveryMinEntryCents=1;
-        geom.crashRecoveryMaxEntryCents=99;
-      }
-      const signal=starlightRecoverySignalState(watch,quote,geom,Date.now(),{advance:true,liveEpoch:this.market?.quoteEpoch||''});
-      const next={...watch,...signal,attempts:Number(watch.attempts||0)};
-      if(!signal.qualified){
-        // The geometry is cumulative (crash depth, rebound, upward ticks).
-        // Preserve each newly accepted quote/geometry revision in the SAME
-        // durable independent watch used for final capital authorization.
-        // Otherwise a restart between crash and rebound silently erases the
-        // qualified history and SIM/LIVE can behave differently on restart.
-        const observed=Number(signal.lastQuoteAtMs)>Number(watch.lastQuoteAtMs||0)
-          && Number(signal.lastQuoteRevision)>0
-          && String(signal.lastQuoteEpoch||'').length>0;
-        if(observed){
-          if(typeof this.db?.updateIndependentWatch!=='function'){
-            this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_observation_persistence_unavailable'});
-            continue;
-          }
-          const observation={...next,qualified:false,lastAttemptReason:signal.reason};
-          let committed=null;
-          try{committed=await this.db.updateIndependentWatch(observation,Number(watch.revision));}catch{}
-          if(committed && Number(committed.revision)===Number(watch.revision)+1){
-            this.independentRecoveryWatches.set(id,{...observation,revision:Number(committed.revision),status:committed.status});
-          }else{
-            // A stale evaluator cannot advance in-memory geometry from an
-            // uncommitted quote. Next evaluation must start from durable truth.
-            this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'independent_observation_revision_conflict'});
-          }
-        }else{
-          this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:signal.reason});
-        }
-        continue;
-      }
-      const attackEnabled = watch.concept==='Lightning Plasma' ? s.lightningPlasmaEnabled===true
-        : watch.concept==='Sagittarius Arrow Recovery' ? s.sagittariusArrowEnabled===true : false;
-      if(!attackEnabled){
-        this.independentRecoveryWatches.set(id,{...watch,lastAttemptReason:'attack_disabled'});
-        continue;
-      }
-      let opened=null,reason='independent_create_returned_null';
-      try{
-        // Independent execution requires the same durable, qualified
-        // crash/rebound observation in SIM and LIVE. Persist it with a CAS
-        // revision BEFORE any capital entry; a stale worker cannot invent
-        // an in-memory qualified watch or reuse another evaluator's proof.
-        if(typeof this.db?.updateIndependentWatch!=='function')
-          throw new Error('independent_qualified_signal_persistence_unavailable');
-        const qualifiedWatch={...next,status:'WATCHING',qualified:true,
-          maximumSeats:seatBook.maximumSeats,openedSeatIds:seatBook.fundedIds,
-          lastAttemptReason:'qualified_for_capital_admission'};
-        const committed=await this.db.updateIndependentWatch(qualifiedWatch,Number(watch.revision));
-        if(!committed||!Number.isSafeInteger(Number(committed.revision))
-          ||Number(committed.revision)!==Number(watch.revision)+1)
-          throw new Error('independent_qualified_signal_revision_conflict');
-        const admittedWatch={...qualifiedWatch,revision:Number(committed.revision),status:committed.status};
-        this.independentRecoveryWatches.set(id,admittedWatch);
-        const stake=watch.concept==='Lightning Plasma'
-          ? Number(s.lightningPlasmaFieldStakeCents||0)
-          : Number(s.sagittariusArrowStakeCents||0);
-        opened=await this.strategy.createHunter(watch.concept,quote,stake,0,{
-          sourceFeeder:'Athena Exclamation',sourceTradeId:watch.parentEntryId,
-          independentRecovery:true,
-          independentAttemptGeneration:seatBook.attemptGeneration,
-          stackIndex:seatBook.nextSeat,stackSeat:seatBook.nextSeat>1,
-          stackParentId:seatBook.fundedIds[0]||null,
-          starlightRecoverySnapshot:admittedWatch,
-        });
-      }catch(error){reason=String(error?.message||error);}
-      if(opened?.id){
-        const active=this.independentRecoveryWatches.get(id)||watch;
-        // A create result can be entry_pending or an ambiguous broker receipt.
-        // Re-read durable seats before classifying any funded outcome.
-        let book;
-        try{book=await this.independentRecoverySeatBook(active);}catch(error){
-          this.independentRecoveryBootPending=true;
-          this.independentRecoveryWatches.set(id,{...active,status:'PENDING',childId:opened.id,
-            lastAttemptReason:'independent_child_reconciliation_read_failed'});continue;
-        }
-        const saved={...active,status:book.status,childId:opened.id,openedSeatIds:book.fundedIds,
-          maximumSeats:book.maximumSeats,lastAttemptReason:book.reason};
-        let durable=null;
-        try{
-          durable=await this.db.updateIndependentWatch(saved,Number(active.revision));
-        }catch{}
-        if(durable){
-          this.independentRecoveryWatches.set(id,{...saved,revision:Number(durable.revision)});
-        }else{
-          this.independentRecoveryBootPending=true;
-          this.independentRecoveryWatches.set(id,{...saved,lastAttemptReason:'independent_child_stamp_pending'});
-        }
-      }else{
-        const active=this.independentRecoveryWatches.get(id)||next;
-        this.independentRecoveryWatches.set(id,{...active,lastAttemptReason:reason});
-      }
-    }
-    }finally{this.independentRecoveryEvaluationActive=false;}
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async evaluateStarlightModelClones(){
-    if(!(this.starlightModelClones instanceof Map)||!this.starlightModelClones.size)return;
-    // Prevent two overlapping market ticks evaluating the same parent+seat.
-    // PostgreSQL remains the final cross-process safety boundary.
-    if(this.starlightModelCloneEvaluationActive===true)return;
-    this.starlightModelCloneEvaluationActive=true;
-    try{
-    const s=this.settings||{};
-    for(const [id,watch] of [...this.starlightModelClones]){
-      if(watch.status==='OPENED')continue;
-      const quote=this.market?.getQuote?.(watch.ticker);
-      if(!quote){this.starlightModelClones.set(id,{...watch,lastAttemptReason:'clone_quote_missing'});continue;}
-      const signal=starlightRecoverySignalState(watch,quote,s,Date.now(),{advance:true,liveEpoch:this.market?.quoteEpoch||''});
-      const next={...watch,...signal,attempts:Number(watch.attempts||0)};
-      if(!signal.qualified){this.starlightModelClones.set(id,{...next,lastAttemptReason:signal.reason});continue;}
-      const target=attackMultiplySeats(s,'Crash Recovery Hunter');
-      const book=await this.cloneSeatsFromBook(watch);
-      if(!book.ok){
-        this.starlightModelClones.set(id,{...next,status:'PENDING',lastAttemptReason:book.reason||'clone_seat_evidence_unavailable'});
-        continue;
-      }
-      const openedSeatIds=[...book.fundedIds];
-      if(book.unresolvedIds.length){
-        this.starlightModelClones.set(id,{...next,status:'PENDING',openedSeatIds,
-          maximumSeats:target,lastAttemptReason:'clone_broker_or_seat_reconciliation_pending'});
-        continue;
-      }
-      if(openedSeatIds.length>=target){this.starlightModelClones.set(id,{...next,status:'OPENED',openedSeatIds,maximumSeats:target});continue;}
-      const occupied=new Set(book.occupiedSeats);
-      const seat=Array.from({length:target},(_,i)=>i+1).find(x=>!occupied.has(x));
-      const generation=book.retryGenerations?.[seat]??0;
-      if(!seat){this.starlightModelClones.set(id,{...next,status:'PENDING',openedSeatIds,
-        maximumSeats:target,lastAttemptReason:'clone_no_certified_free_seat'});continue;}
-      let opened=null,reason='clone_create_returned_null';
-      const cloneRefusal={reason:null,stage:null};
-      try{
-        opened=await this.strategy.createHunter(watch.concept,quote,Number(s.crashRecoveryStakeCents||500),0,{
-          sourceFeeder:'Athena Exclamation',sourceTradeId:watch.parentEntryId,
-          starlightModelClone:true,starlightRecoverySnapshot:watch,cloneRefusal,
-          cloneAttemptGeneration:generation,stackSeat:seat>1,stackIndex:seat,
-          stackParentId:openedSeatIds[0]||null,
-        });
-      }catch(error){reason=String(error?.message||error);}
-      if(!opened?.id && cloneRefusal.reason)reason=cloneRefusal.reason;
-      if(opened?.id){
-        // LIVE entry_pending is NOT a funded opening. Keep the parent gated
-        // until authoritative broker reconciliation resolves the intent.
-        const pending=opened.mode==='LIVE' && opened.status==='entry_pending';
-        if(!pending)openedSeatIds.push(opened.id);
-        const full=openedSeatIds.length>=target;
-        const saved={...next,status:pending?'PENDING':full?'OPENED':'ARMED',childId:opened.id,
-          openedSeatIds,maximumSeats:target,lastAttemptReason:pending?'clone_entry_pending':full?'opened':`seat_${seat}_of_${target}`};
-        this.starlightModelClones.set(id,saved);
-        this.persistCloneSeatProgress(watch.parentEntryId,saved);
-        void this.db?.audit?.('info',pending?'starlight_model_clone_intent_pending':'starlight_model_clone_opened',
-          {id,concept:watch.concept,childId:opened.id,ticker:watch.ticker,seat,maximumSeats:target}).catch?.(()=>{});
-      }else{
-        const saved={...next,attempts:next.attempts+1,openedSeatIds,maximumSeats:target,lastAttemptReason:reason};
-        this.starlightModelClones.set(id,saved);
-        this.persistCloneSeatProgress(watch.parentEntryId,saved);
-        void this.db?.audit?.('warning','starlight_model_clone_refused',{id,concept:watch.concept,ticker:watch.ticker,reason,seat,maximumSeats:target}).catch?.(()=>{});
-      }
-    }
-    }finally{this.starlightModelCloneEvaluationActive=false;}
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async cloneSeatsFromBook(watch){
@@ -2204,221 +1904,9 @@ export class SagittariusEngine {
   }
 
   async attemptStarlightLinkEntry(authorizationId){
-    const id=String(authorizationId||''),s=this.settings||{};
-    if(s.crashRecoveryHunterLinkEnabled!==true||s.crashRecoveryHunterEnabled!==true)return {status:'IGNORED',reason:'link_off'};
-    if(this.shadowEntryGate && !this.shadowEntryGate().allowed)return {status:'WATCHING',reason:'entry_gate_disabled'};
-    const watch=this.starlightRecoveryWatches?.get(id);
-    if(!watch||!this.starlightScopeMatches(watch))return {status:'IGNORED',reason:'watch_missing'};
-    if(await this.blockLightningOriginWatch(watch))return {status:'BLOCKED',reason:'lightning_plasma_parent_no_follow_up'};
-    if(String(watch.status)==='PERSIST_FAILED'||!(Number(watch.revision)>0))return {status:'WATCHING',reason:'link_parent_not_durable'};
-    if(['CONSUMED','BLOCKED','EXPIRED'].includes(String(watch.status)))return {status:'IGNORED',reason:'watch_not_linkable'};
-    if(String(watch.status)==='EXECUTING' && watch.resultWritePending!==true)return {status:'IGNORED',reason:'watch_not_linkable'};
-    if(Number(watch.retryNotBeforeMs||0)>Date.now())return {status:'WATCHING',reason:'link_retry_waiting'};
-    const stop=Number(watch.stopPriceCents);
-    if(!(stop>0)||stop>100){
-      const blocked={...watch,status:'BLOCKED',lastAttemptReason:'stop_price_invalid',stopPriceCents:stop};
-      if(typeof this.db?.updateStarlightWatch==='function' && Number(watch.revision)>0){
-        const saved=await this.db.updateStarlightWatch(blocked,Number(watch.revision));
-        if(!saved)return {status:'WATCHING',reason:'stale_revision_stop_block'};
-        this.starlightRecoveryWatches.set(id,{...blocked,revision:Number(saved.revision)});
-      }else this.starlightRecoveryWatches.set(id,blocked);
-      return {status:'BLOCKED',reason:'stop_price_invalid'};
-    }
-    const minEntry=Math.round(Number(s.crashRecoveryMinEntryCents));
-    const maxEntry=Math.round(Number(s.crashRecoveryMaxEntryCents));
-    // MW-R25: freeze precisely which *effective* runtime card the gate read.
-    // The stored config history is separately committed in applySettingsPatch;
-    // neither a browser's unsaved edit nor a later changed card can rewrite
-    // this historical watch. Both edges remain inclusive.
-    const bandDecision={version:'MW-R25-BAND-EVIDENCE',decisionAtMs:Date.now(),
-      ownerId:String(s.ownerId||''),systemName:String(s.systemName||''),mode:String(s.mode||''),
-      resetEpoch:Number(s.resetTimestampMs||0),authorizationId:id,watchRevision:Number(watch.revision||0),
-      stopPriceCents:stop,operatorMinEntryCents:Number(s.crashRecoveryMinEntryCents),
-      operatorMaxEntryCents:Number(s.crashRecoveryMaxEntryCents),minEntryCents:minEntry,maxEntryCents:maxEntry,
-      latestSettingsVerificationAtMs:Number(this.settingsPersistence?.lastVerifiedAtMs||0),
-      settingsCommitRevision:Number(this.settingsPersistence?.lastRevision||0),
-      effectiveBandFingerprint:stableHash(['STARLIGHT-BAND',s.systemName,s.ownerId,s.mode,s.resetTimestampMs,minEntry,maxEntry]),
-      exactMatchEligible:stop>=minEntry&&stop<=maxEntry};
-    if(!Number.isFinite(minEntry)||!Number.isFinite(maxEntry)||minEntry<1||maxEntry>100||minEntry>maxEntry){
-      return {status:'WATCHING',reason:'link_band_unusable'};
-    }
-    // Link authorization is the durable Athena stop. The operator band is
-    // recorded for audit but cannot veto the stopped parent or cap the new
-    // executable ask. Exchange status, spread, book, depth and Aurora remain.
-    bandDecision.linkStopBandAdvisoryOnly=true;
-    const liveQuote=this.market?.getQuote?.(watch.ticker);
-    const marketDead=Boolean(liveQuote?.result)||['finalized','settled','closed','determined'].includes(String(liveQuote?.status||liveQuote?.liveStatus||'').toLowerCase());
-    if(marketDead){
-      const blocked={...watch,status:'BLOCKED',lastAttemptReason:'market_finalized',terminalReason:'market_finalized',terminalAtMs:Date.now()};
-      if(typeof this.db?.updateStarlightWatch==='function' && Number(watch.revision)>0){
-        const saved=await this.db.updateStarlightWatch(blocked,Number(watch.revision));
-        if(!saved)return {status:'WATCHING',reason:'stale_revision_terminal_block'};
-        this.starlightRecoveryWatches.set(id,{...blocked,revision:Number(saved.revision)});
-      }else this.starlightRecoveryWatches.set(id,blocked);
-      this.starlightRecoveryStats.blocked=(this.starlightRecoveryStats.blocked||0)+1;
-      return {status:'BLOCKED',reason:'market_finalized'};
-    }
-    if(!liveQuote || Number(liveQuote.quoteAtMs)<=0 || Number(liveQuote.quoteAtMs)>Date.now()
-      || Date.now()-Number(liveQuote.quoteAtMs)>5000 || !(Number(liveQuote.yesAsk)>0))
-      return {status:'WATCHING',reason:'link_fresh_quote_unavailable'};
-    let verified=null;
-    if(watch.shadowProtocol===SHADOW_PROTOCOL){
-      verified=await this.db.verifiedShadowStop?.(watch.parentEntryId,shadowScope(s));
-      if(!verified || verified.proofHash!==watch.shadowProofHash)return {status:'WATCHING',reason:'shadow_stop_not_verified'};
-    }
-    const athenaRise=await this.starlightAthenaRiseDecision(watch,liveQuote,s,verified);
-    if(!athenaRise.ok){
-      await this.recordStarlightAthenaTriggerWait(watch,athenaRise);
-      return {status:'WATCHING',reason:athenaRise.reason,athenaTrigger:athenaRise};
-    }
-    const claimed={...watch,...this.starlightGroupClaim(watch,s),status:'EXECUTING',attempts:Number(watch.attempts||0)+1,
-      claimAtMs:Date.now(),link:true,priceBandDecision:bandDecision,
-      ...(athenaRise.enabled?{athenaTrigger:athenaRise.stamp,lastAttemptReason:null,
-        athenaTriggerObservation:this.starlightAthenaTriggerObservation(athenaRise)}:{} )};
-    let revision=Number(watch.revision||0);
-    if(typeof this.db?.updateStarlightWatch==='function' && revision>0){
-      const saved=await this.db.updateStarlightWatch(claimed,revision);
-      if(!saved)return {status:'WATCHING',reason:'stale_revision_claim'};
-      revision=Number(saved.revision);
-      claimed.revision=revision;
-    }else{
-      revision=Math.max(1,revision);
-      claimed.revision=revision;
-    }
-    this.starlightRecoveryWatches.set(id,claimed);
-    const quote=structuredClone(liveQuote);
-    const snapshot={
-      version:'SE2-R10-STARLIGHT-LINK',link:true,parentEntryId:watch.parentEntryId,
-      // R12 source-phase proof requires the *same* scope as the locked watch;
-      // an entry snapshot without these fields cannot mint no-send authority.
-      status:'EXECUTING',virtualGroupVersion:claimed.virtualGroupVersion,
-      ticker:claimed.ticker,eventTicker:claimed.eventTicker,
-      shadowProtocol:watch.shadowProtocol||null,shadowProofHash:watch.shadowProofHash||null,
-      parentConcept:watch.parentConcept,authorizationId:id,revision,maximumSeats:claimed.maximumSeats,
-      groupSettingsHash:claimed.groupSettingsHash,
-      ownerId:watch.ownerId,systemName:watch.systemName,mode:watch.mode,resetEpoch:watch.resetEpoch,
-      armedAtMs:watch.armedAtMs,stopPriceCents:stop,priceBandDecision:bandDecision,
-      ...(claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION?{
-        noSendRetryGeneration:starlightNoSendRetryGeneration(claimed),
-        ...(Number(claimed.rearmedNoSubmitAtMs)>0?{
-          rearmedNoSubmitAtMs:claimed.rearmedNoSubmitAtMs,
-          rearmedNoSubmitChildIds:claimed.rearmedNoSubmitChildIds,
-          rearmedNoSubmitProofIds:claimed.rearmedNoSubmitProofIds}:{}),
-      }:{}),
-      ...(athenaRise.enabled?{athenaTrigger:athenaRise.stamp}:{}),
-    };
-    let already=null;
-    if(typeof this.db?.entryByConceptSourceTradeId==='function'){
-      try{already=await this.db.entryByConceptSourceTradeId(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});}
-      catch(error){
-        await this.recordStarlightLinkUncertainClaim(claimed,'child_lookup_failed',error);
-        return {status:'RECONCILING',reason:'child_lookup_failed'};
-      }
-    }
-    if(already?.id && !this.starlightRearmedTerminalIntent(already,watch)){
-      if(!this.starlightChildMatchesWatch(already,claimed)){
-        await this.recordStarlightLinkUncertainClaim(claimed,'child_scope_mismatch',null,{terminal:true});
-        return {status:'BLOCKED',reason:'child_scope_mismatch'};
-      }
-      if(claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION){
-        // Rejected != filled. Even an explicit local no-send terminal intent
-        // is not a new capital position, and must be reconciled by the
-        // durable rearm worker rather than counted as an OPENED result.
-        if(already.status==='rejected'){
-          await this.consumeStarlightRecoveryWatch(claimed,already.id);
-          return {status:'RECONCILING',reason:'sc1_rejected_intent_requires_rearm_proof',entry:already};
-        }
-        return {status:'RECONCILING',reason:'sc1_capital_group_resume',entry:already};
-      }
-      await this.consumeStarlightRecoveryWatch(claimed,already.id);
-      return {status:'IGNORED',reason:'existing_child_or_pending_broker_receipt',entry:already};
-    }
-    let opened;
-    try{
-      opened=await this.strategy.createHunter('Crash Recovery Hunter',quote,Number(s.crashRecoveryStakeCents||500),0,{
-        sourceFeeder:watch.parentConcept,sourceTradeId:watch.parentEntryId,
-        starlightRecovery:true,starlightRecoverySnapshot:snapshot,
-      });
-    }catch(error){
-      let child=null;
-      try{child=await this.db?.entryByConceptSourceTradeId?.(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});}catch{child=null;}
-      if(child?.id && !this.starlightRearmedTerminalIntent(child,watch)
-        && this.starlightChildMatchesWatch(child,claimed)){
-        if(child.status==='entry_pending' || (claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && !starlightCapitalSeatFunded(child))){
-          return {status:'RECONCILING',entry:child,watchConsumed:false,reason:'live_fill_unconfirmed'};
-        }
-        const consumed=await this.consumeStarlightRecoveryWatch(claimed,child.id);
-        if(child.status==='rejected')return {status:'RECONCILING',entry:child,
-          reason:'sc1_rejected_intent_requires_rearm_proof'};
-        return {status:consumed?'OPENED':'RECONCILING',entry:child,watchConsumed:consumed===true,reason:consumed?'opened_before_exception':'live_fill_unconfirmed'};
-      }
-      await this.recordStarlightLinkUncertainClaim(claimed,'execution_exception_no_child',error);
-      return {status:'RECONCILING',reason:'execution_exception_no_child'};
-    }
-    if(opened?.id){
-      // R15 connected-failure check: a durable LIVE intent is NOT broker-funded
-      // merely because createHunter returned a row. On a failed release CAS,
-      // that row can be rejected or still entry_pending; do not consume its
-      // parent, stack additional seats, or report a fictitious LIVE opening.
-      // The durable EXECUTING watch remains reconciliation-owned.
-      if(claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && opened.status!=='open'){
-        return {status:'RECONCILING',entry:opened,
-          reason:opened.status==='rejected'
-            ?'sc1_rejected_intent_requires_rearm_proof'
-            :'sc1_unverified_live_intent_requires_reconciliation'};
-      }
-      const seats=await this.strategy.stackSameAttackSeats('Crash Recovery Hunter',quote,opened,{
-        sourceFeeder:watch.parentConcept,sourceTradeId:watch.parentEntryId,
-        starlightRecovery:true,starlightRecoverySnapshot:snapshot,
-      }).catch(()=>[]);
-      const consumed=await this.consumeStarlightRecoveryWatch(claimed,opened.id);
-      this.starlightRecoveryStats.opened=(this.starlightRecoveryStats.opened||0)+1+(seats?.length||0);
-      this.starlightRecoveryStats.lastEvent={status:consumed?'LINK_OPENED':'LINK_OPENED_CONSUME_PENDING',atMs:Date.now(),authorizationId:id,ticker:watch.ticker,entryPriceCents:Number(opened.entryPriceCents||stop),recoveredChildId:opened.id,seats:1+(seats?.length||0)};
-      await this.db?.audit?.('info','starlight_link_opened',{authorizationId:id,parentEntryId:watch.parentEntryId,entryId:opened.id,stopPriceCents:stop,entryPriceCents:opened.entryPriceCents,watchConsumed:consumed===true,seats:1+(seats?.length||0)}).catch?.(()=>{});
-      return {status:'OPENED',entry:opened,watchConsumed:consumed===true,seats:1+(seats?.length||0)};
-    }
-    let committed=null;
-    try{committed=await this.db?.entryByConceptSourceTradeId?.(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});}catch{committed=null;}
-    if(committed?.id && !this.starlightRearmedTerminalIntent(committed,watch)
-      && this.starlightChildMatchesWatch(committed,claimed)){
-      if(committed.status==='entry_pending' || (claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && !starlightCapitalSeatFunded(committed))){
-        return {status:'RECONCILING',entry:committed,watchConsumed:false,reason:'live_fill_unconfirmed'};
-      }
-      const consumed=await this.consumeStarlightRecoveryWatch(claimed,committed.id);
-      if(committed.status==='rejected')return {status:'RECONCILING',entry:committed,
-        reason:'sc1_rejected_intent_requires_rearm_proof'};
-      return {status:consumed?'OPENED':'RECONCILING',entry:committed,watchConsumed:consumed===true,reason:consumed?'child_committed_without_return':'live_fill_unconfirmed'};
-    }
-    const reject=this.starlightLinkRejectReason(id,watch.ticker,watch.parentEntryId);
-    const permanent=this.starlightLinkRejectIsPermanent(reject);
-    // R15-R12: LIVE Link ON uses the same release boundary as Link OFF.
-    if(s.mode==='LIVE' && !permanent){
-      const refusal=this.strategy?.lastStarlightRefusalByAuth?.get(String(id));
-      if(refusal)this.strategy.lastStarlightRefusalByAuth.delete(String(id));
-      const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection({...claimed,revision:refusal?.revision||claimed.revision}).catch(()=>null);
-      if(released?.status==='WATCHING'){
-        this.starlightRecoveryWatches.set(id,{...released.watch,status:'WATCHING',revision:Number(released.revision)});
-        return {status:'WATCHING',reason:'sc1_verified_pre_dispatch_rejection_rearmed'};
-      }
-      const held={...claimed,status:'EXECUTING',lastAttemptReason:reject||'live_null_return_unresolved',lastAttemptAtMs:Date.now()};
-      const saved=await this.db.updateStarlightWatch(held,revision).catch(()=>null);
-      if(saved)this.starlightRecoveryWatches.set(id,{...held,revision:Number(saved.revision)});
-      return {status:'EXECUTING',reason:'live_null_return_unresolved',diagnosis:reject};
-    }
-    const next=permanent
-      ?{...claimed,status:'BLOCKED',lastAttemptReason:reject}
-      :{...claimed,status:'WATCHING',lastAttemptReason:reject,retryNotBeforeMs:Date.now()+2_000};
-    if(typeof this.db?.updateStarlightWatch==='function' && revision>0){
-      const saved=await this.db.updateStarlightWatch(next,revision).catch(()=>null);
-      if(!saved){
-        this.starlightRecoveryWatches.set(id,{...claimed,status:'WATCHING',lastAttemptReason:reject,retryNotBeforeMs:Date.now()+2_000,resultWritePending:true});
-        return {status:'WATCHING',reason:'stale_revision_link_result'};
-      }
-      next.revision=Number(saved.revision);
-    }
-    this.starlightRecoveryWatches.set(id,next);
-    if(permanent)this.starlightRecoveryStats.blocked=(this.starlightRecoveryStats.blocked||0)+1;
-    return {status:next.status,reason:reject};
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   // SE2-R8 durable stop-loss outbox reconciliation. Close events are already
@@ -3026,175 +2514,9 @@ export class SagittariusEngine {
   }
 
   async attemptStarlightRecovery(authorizationId){
-    const id=String(authorizationId),s=this.settings||{};
-    if(s.crashRecoveryHunterLinkEnabled===true)return this.attemptStarlightLinkEntry(id);
-    const watch=this.starlightRecoveryWatches?.get(id);
-    if(!watch||watch.status!=='READY'||!this.starlightScopeMatches(watch)||!Number(watch.revision))
-      return {status:'IGNORED',reason:'watch_not_durably_ready'};
-    if(await this.blockLightningOriginWatch(watch))return {status:'BLOCKED',reason:'lightning_plasma_parent_no_follow_up'};
-    if(!this.shadowEntryGate().allowed)return {status:'WATCHING',reason:'entry_gate_disabled'};
-    if(s.crashRecoveryHunterEnabled!==true)return {status:'WATCHING',reason:'model_disabled'};
-    if(Date.now()>Number(watch.expiresAtMs))return {status:'WATCHING',reason:'expired_requires_persistence'};
-    if(typeof this.db?.entryById!=='function'||typeof this.db?.entryByConceptSourceTradeId!=='function'
-      ||typeof this.db?.updateStarlightWatch!=='function')return {status:'WATCHING',reason:'durable_authority_unavailable'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent||String(parent.status)!=='closed'||String(parent.closeReason)!=='hard_stop_loss'
-      ||String(parent.ownerId)!==String(watch.ownerId)||String(parent.systemName)!==String(watch.systemName)
-      ||String(parent.mode)!==String(watch.mode)||parent.archived===true
-      ||String(parent.conceptName)===String('Crash Recovery Hunter')
-      ||!lightningPlasmaLossMayArmStarlight(parent))return {status:'WATCHING',reason:'parent_authority_invalid'};
-    const existing=await this.db.entryByConceptSourceTradeId(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});
-    if(existing && !this.starlightRearmedTerminalIntent(existing,watch)){
-      if(!this.starlightChildMatchesWatch(existing,watch))return {status:'BLOCKED',reason:'existing_child_scope_mismatch'};
-      const resumable=(isShadowSaintEntry(existing)&&watch.virtualGroupVersion===STARLIGHT_SHADOW_VERSION)
-        ||(!isShadowSaintEntry(existing)&&watch.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION);
-      const next={...watch,status:resumable?'EXECUTING':'BLOCKED',recoveredChildId:existing.id,
-        lastAttemptReason:resumable?'starlight_resume_unfinished_group':'starlight_child_class_mismatch'};
-      const saved=await this.db.updateStarlightWatch(next,watch.revision);
-      if(saved){if(resumable)this.starlightRecoveryWatches.set(id,{...next,revision:Number(saved.revision)});else this.starlightRecoveryWatches.delete(id);}
-      return {status:'IGNORED',reason:next.lastAttemptReason};
-    }
-    if(typeof this.market?.ensureFreshBook==='function')await this.market.ensureFreshBook(watch.ticker,Math.max(250,Number(s.infinityBreakMaximumBookAgeMs||5000)));
-    const quote=this.market?.getQuote?.(watch.ticker);
-    if(!quote)return {status:'WATCHING',reason:'quote_missing'};
-    const athenaRise=await this.starlightAthenaRiseDecision(watch,quote,s);
-    if(!athenaRise.ok){
-      await this.recordStarlightAthenaTriggerWait(watch,athenaRise);
-      return {status:'WATCHING',reason:athenaRise.reason,athenaTrigger:athenaRise};
-    }
-    const signal=starlightRecoverySignalState(watch,quote,s,Date.now(),{liveEpoch:this.market?.quoteEpoch||''});
-    if(!signal.qualified){
-      if(signal.reason==='unpersisted_price_change')
-        this.enqueueStarlightRecoveryQuote(quote);
-      return {status:'WATCHING',reason:signal.reason};
-    }
-    // The DB claim is a CAS. Only one worker can enter EXECUTING, regardless
-    // of how many Railway processes observed the same recovery.
-    const claimed={...watch,...this.starlightGroupClaim(watch,s),status:'EXECUTING',attempts:Number(watch.attempts||0)+1,claimAtMs:Date.now(),
-      ...(athenaRise.enabled?{athenaTrigger:athenaRise.stamp,lastAttemptReason:null,
-        athenaTriggerObservation:this.starlightAthenaTriggerObservation(athenaRise)}:{})};
-    const claim=await this.db.updateStarlightWatch(claimed,watch.revision);
-    if(!claim){this.starlightRecoveryWatches.delete(id);return {status:'WATCHING',reason:'stale_revision_claim'};}
-    claimed.revision=Number(claim.revision);
-    this.starlightRecoveryWatches.set(id,claimed);
-    const snapshot={version:'SE2-R5-DURABLE-STOP-LOSS-RECOVERY',parentEntryId:watch.parentEntryId,
-      status:'EXECUTING',virtualGroupVersion:claimed.virtualGroupVersion,
-      ticker:claimed.ticker,eventTicker:claimed.eventTicker,
-      shadowProtocol:watch.shadowProtocol||null,shadowProofHash:watch.shadowProofHash||null,
-      parentConcept:watch.parentConcept,authorizationId:id,revision:claimed.revision,maximumSeats:claimed.maximumSeats,
-      groupSettingsHash:claimed.groupSettingsHash,
-      ownerId:watch.ownerId,systemName:watch.systemName,mode:watch.mode,resetEpoch:watch.resetEpoch,
-      armedAtMs:watch.armedAtMs,releaseAtMs:watch.releaseAtMs,expiresAtMs:watch.expiresAtMs,
-      stopPriceCents:watch.stopPriceCents,peakSinceArmCents:watch.peakSinceArmCents,
-      troughSinceArmCents:watch.troughSinceArmCents,crashConfirmedAtMs:watch.crashConfirmedAtMs,
-      upwardTicks:watch.upwardTicks,lastQuoteAtMs:watch.lastQuoteAtMs,
-      ...(athenaRise.enabled?{athenaTrigger:athenaRise.stamp}:{}),
-      ...(claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION?{
-        noSendRetryGeneration:starlightNoSendRetryGeneration(claimed),
-        rearmedNoSubmitAtMs:claimed.rearmedNoSubmitAtMs,
-        rearmedNoSubmitChildIds:claimed.rearmedNoSubmitChildIds,
-        rearmedNoSubmitProofIds:claimed.rearmedNoSubmitProofIds,
-      }:{}),
-    };
-    // Any exception/ambiguous LIVE result intentionally leaves EXECUTING
-    // durable. Restart reconciles a broker-owned intent BEFORE retrying.
-    let opened;
-    try{
-      opened=await this.strategy.createHunter('Crash Recovery Hunter',quote,Number(s.crashRecoveryStakeCents||500),0,{
-        sourceFeeder:watch.parentConcept,sourceTradeId:watch.parentEntryId,
-        starlightRecovery:true,starlightRecoverySnapshot:snapshot,
-      });
-    }catch(error){
-      // SE2-R7: an exception after the durable claim previously left the
-      // watch in EXECUTING forever, even in SIM with no broker mutation.
-      // Query child truth before releasing: a completed/ambiguous LIVE BUY
-      // must NEVER be duplicated by a blind retry.
-      try{
-        const child=await this.db.entryByConceptSourceTradeId(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});
-        if(!child && s.mode==='SIMULATION'){
-          const retry={...claimed,status:'WATCHING',retryNotBeforeMs:Date.now()+2_000,
-            lastAttemptReason:'execution_exception_no_child',lastExecutionError:String(error?.message||error).slice(0,240)};
-          const saved=await this.db.updateStarlightWatch(retry,claimed.revision);
-          if(saved)this.starlightRecoveryWatches.set(id,{...retry,revision:Number(saved.revision)});
-        }
-        // R15-R9: LIVE with no child stays EXECUTING. Absence is not no-send proof.
-        // If a child exists, retain the claim and let durable reconciliation
-        // decide its final broker/ledger state. No second BUY is authorized.
-      }catch{ /* Database uncertainty must remain fail-closed in EXECUTING. */ }
-      throw error;
-    }
-    const refusal=this.strategy?.lastStarlightRefusalByAuth?.get(String(id));
-    if(!opened && refusal?.kind==='PRE_DISPATCH_REFUSAL'){
-      this.strategy.lastStarlightRefusalByAuth.delete(String(id));
-      const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection({...claimed,revision:refusal.revision,watch:refusal.watch}).catch(()=>null);
-      if(released?.status==='WATCHING'){
-        this.starlightRecoveryWatches.set(id,{...released.watch,status:'WATCHING',revision:Number(released.revision)});
-        return {status:'WATCHING',reason:'sc1_verified_pre_dispatch_rejection_rearmed'};
-      }
-      return {status:'EXECUTING',reason:'pre_dispatch_refusal_recorded',revision:refusal.revision};
-    }
-    if(opened){
-      // R15-R4: a returned row is not a funded open. entry_pending and any
-      // non-open capital child stay EXECUTING until fill or verified rejection.
-      if(opened.status==='rejected' && opened.entryConfig?.dispatchProof?.submitted===false){
-        const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection({...claimed,lastAttemptReason:'aps2_group_child_not_in_verified_seats'}).catch(()=>null);
-        if(released?.status==='WATCHING'){
-          this.starlightRecoveryWatches.set(id,{...released.watch,status:'WATCHING',revision:Number(released.revision)});
-          return {status:'WATCHING',reason:'sc1_verified_pre_dispatch_rejection_rearmed',entry:opened};
-        }
-      }
-      if(String(opened.status)==='entry_pending' || (claimed.virtualGroupVersion===STARLIGHT_CAPITAL_VERSION && opened.status!=='open')){
-        const held={...claimed,status:'EXECUTING',consumePending:true,lastAttemptReason:'live_fill_unconfirmed',recoveredChildId:opened.id,lastAttemptAtMs:Date.now()};
-        const saved=await this.db.updateStarlightWatch(held, claimed.revision);
-        if(saved)this.starlightRecoveryWatches.set(id,{...held,revision:Number(saved.revision)});
-        return {status:'EXECUTING',reason:'live_fill_unconfirmed',entry:opened};
-      }
-      const seats=await this.strategy.stackSameAttackSeats('Crash Recovery Hunter',quote,opened,{
-        sourceFeeder:watch.parentConcept,sourceTradeId:watch.parentEntryId,
-        starlightRecovery:true,starlightRecoverySnapshot:snapshot,
-      }).catch(()=>[]);
-      await this.consumeStarlightRecoveryWatch(claimed,opened.id);
-      this.starlightRecoveryStats.opened+=(1+(seats?.length||0));
-      this.starlightRecoveryStats.lastEvent={status:'OPENED',atMs:Date.now(),authorizationId:id,entryId:opened.id,ticker:watch.ticker,seats:1+(seats?.length||0)};
-      return {status:'OPENED',entry:opened,seats:1+(seats?.length||0)};
-    }
-    const pending=await this.db.entryByConceptSourceTradeId(s.systemName,'Crash Recovery Hunter',watch.parentEntryId,{ownerId:watch.ownerId,mode:watch.mode,resetEpoch:watch.resetEpoch});
-    if(pending){
-      if(String(pending.status)==='entry_pending'){
-        return {status:'EXECUTING',reason:'live_fill_unconfirmed',entry:pending};
-      }
-      if(this.starlightChildMatchesWatch(pending,claimed) && String(pending.status)==='open')
-        await this.consumeStarlightRecoveryWatch(claimed,pending.id);
-      return {status:'WATCHING',reason:'aps2_group_resume_required'};
-    }
-    // SE2-R7: Record the REAL StrategyEngine rejection stage on the parent
-    // watch. Prior builds returned null and stored only a generic retry timer,
-    // making another zero-entry ledger impossible to diagnose.
-    const blocked=[...(this.strategy?.entryPipelineEvents||[])].reverse().find(e=>
-      String(e.concept)==='Crash Recovery Hunter'&&String(e.starlightRecoveryParentEntryId||'')===String(watch.parentEntryId)
-      &&String(e.status)==='BLOCKED');
-    const reason=blocked?String(blocked.reason||blocked.stage||'entry_safety_rejected'):'entry_safety_rejected';
-    // R15-R10: LIVE null-return is not no-send proof. Stay EXECUTING.
-    // Only the locked rearm procedure may release, and only with verified children.
-    if(s.mode==='LIVE'){
-      if(typeof this.db.rearmStarlightAfterVerifiedUnsubmittedRejection==='function'){
-        const released=await this.db.rearmStarlightAfterVerifiedUnsubmittedRejection(claimed).catch(()=>null);
-        if(released?.status==='WATCHING'){
-          this.starlightRecoveryWatches.set(id,{...released.watch,status:'WATCHING',revision:Number(released.revision)});
-          return {status:'WATCHING',reason:'sc1_verified_pre_dispatch_rejection_rearmed'};
-        }
-      }
-      const held={...claimed,status:'EXECUTING',lastAttemptReason:reason,lastAttemptStage:blocked?.stage||'EXECUTION',lastAttemptAtMs:Date.now()};
-      const saved=await this.db.updateStarlightWatch(held,claimed.revision);
-      if(saved)this.starlightRecoveryWatches.set(id,{...held,revision:Number(saved.revision)});
-      return {status:'EXECUTING',reason:'live_null_return_unresolved',diagnosis:reason};
-    }
-    const next={...claimed,status:'WATCHING',retryNotBeforeMs:Date.now()+20_000,
-      lastAttemptReason:reason,lastAttemptStage:blocked?.stage||null,lastAttemptAtMs:Date.now()};
-    const saved=await this.db.updateStarlightWatch(next,claimed.revision);
-    if(saved)this.starlightRecoveryWatches.set(id,{...next,revision:Number(saved.revision)});
-    else this.starlightRecoveryWatches.delete(id);
-    return {status:'WATCHING',reason};
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   currentCrashWatch(concept, authorizationId, episodeId) {
@@ -3509,132 +2831,15 @@ export class SagittariusEngine {
   }
 
   async handleLightningPlasmaContinuation(parentShadow) {
-    const stats=this.lightningPlasmaContinuationRuntime();
-    const s=this.settings||{};
-    const parentId=String(parentShadow?.id||''),ticker=String(parentShadow?.ticker||'');
-    const record=(status,data={})=>{stats.lastEvent={status,atMs:Date.now(),parentShadowTradeId:parentId,ticker,...data};return stats.lastEvent;};
-    return {status:'IGNORED',reason:'follow_up_retired_athena_initial_entry'};
-    if(!parentId||!ticker||parentShadow?.status!=='closed'||Number(parentShadow?.remainingCount||0)>1e-9)return {status:'IGNORED',reason:'not_fully_closed'};
-    if(!isProfitableExecutableParent(parentShadow))return {status:'IGNORED',reason:'not_profitable_executable_parent'};
-    if(String(parentShadow.conceptName||'')==='Lightning Plasma')return {status:'IGNORED',reason:'self_parent_blocked'};
-    if(s.lightningPlasmaEnabled!==true||s.geminiEnabled!==true)return {status:'IGNORED',reason:'lightning_plasma_disabled'};
-    if(String(parentShadow.conceptName||'')==='Lightning Plasma'){
-      stats.selfParentBlocked+=1;record('IGNORED',{reason:'parent_is_lightning_plasma'});
-      return {status:'IGNORED',reason:'parent_is_lightning_plasma'};
-    }
-    if(String(parentShadow.systemName||'')!==String(s.systemName)||String(parentShadow.ownerId||'')!==String(s.ownerId)){
-      stats.blocked+=1;record('BLOCKED',{reason:'owner_or_system_mismatch'});return {status:'BLOCKED',reason:'owner_or_system_mismatch'};
-    }
-    if(String(parentShadow.mode||'')!==String(s.mode||'')){
-      stats.modeMismatchBlocked+=1;stats.blocked+=1;record('BLOCKED',{reason:'mode_changed_since_shadow_close'});return {status:'BLOCKED',reason:'mode_changed_since_shadow_close'};
-    }
-    const windowMs=Math.max(1,Number(s.recoveryTrackingHours||24))*3600000;
-    if(Number(parentShadow.closedAtMs||0)>0 && Date.now()-Number(parentShadow.closedAtMs)>windowMs)return {status:'IGNORED',reason:'tracking_window_elapsed'};
-    stats.eligible+=1;
-    const authorizationId=`LIGHTNING-PLASMA-CONTINUATION:${parentId}:1`;
-    if(this.lightningPlasmaContinuationInFlight.has(authorizationId)){
-      stats.duplicateSuppressed+=1;record('DUPLICATE_SUPPRESSED',{authorizationId,scope:'local'});return {status:'DUPLICATE_SUPPRESSED',reason:'local_in_flight'};
-    }
-    this.lightningPlasmaContinuationInFlight.add(authorizationId);
-    let unlock=null;
-    const baseEpisode=(decision={})=>({id:authorizationId,systemName:s.systemName,sourceRelease:RELEASE,cohortId:String(s.resetTimestampMs||''),ticker,eventTicker:String(parentShadow.eventTicker||ticker),side:'YES',sport:String(parentShadow.sport||'Unknown'),boltAtMs:Number(parentShadow.closedAtMs||Date.now()),boltSnapshot:{version:LIGHTNING_PLASMA.version,authority:LIGHTNING_PLASMA.strategicEntryAuthority,parentShadowTradeId:parentId},athenaDecision:decision,fireCommand:{},attackSelected:'Lightning Plasma',entryId:null,entryAtMs:null,outcome:{},trackingComplete:false,updatedAtMs:Date.now()});
-    try{
-      if(typeof this.db.acquireHunterTickerLock!=='function')return {status:'BLOCKED',reason:'continuation_lock_unavailable'};
-      unlock=await this.db.acquireHunterTickerLock(s.systemName,`lightning-plasma-continuation:${parentId}`);
-      if(!unlock){stats.duplicateSuppressed+=1;record('DUPLICATE_SUPPRESSED',{authorizationId,scope:'database_lock'});return {status:'DUPLICATE_SUPPRESSED',reason:'database_lock_busy'};}
-      const existing=typeof this.db.opportunityEpisode==='function'?await this.db.opportunityEpisode(authorizationId).catch(()=>null):null;
-      const existingStatus=String(existing?.athenaDecision?.lightningPlasmaContinuation?.status||existing?.athenaDecision?.decision||'');
-      if(existing?.entryId||['OPENED','BLOCKED'].includes(existingStatus)){
-        stats.duplicateSuppressed+=1;record('DUPLICATE_SUPPRESSED',{authorizationId,scope:'durable_episode',existingStatus,entryId:existing?.entryId||null});return {status:'DUPLICATE_SUPPRESSED',reason:'durable_authorization_already_consumed',entryId:existing?.entryId||null};
-      }
-      const authorizedAtMs=Number(existing?.athenaDecision?.lightningPlasmaContinuation?.authorizedAtMs||Date.now());
-      const lineage={version:LIGHTNING_PLASMA.version,status:'AUTHORIZED',terminal:false,authorizationId,parentShadowTradeId:parentId,parentConcept:String(parentShadow.conceptName||''),parentCloseReason:String(parentShadow.closeReason||''),parentRealizedPnlCents:Number(parentShadow.pnlCents||0),parentExitPriceCents:Number(parentShadow.exitPriceCents||0),parentClosedAtMs:Number(parentShadow.closedAtMs||0),sourceCosmo:String(parentShadow.sourceFeeder||''),sourceCosmoTradeId:String(parentShadow.sourceTradeId||''),authorizedAtMs,fullExecutionSafetyRequired:true,normalStrategicDiscoveryBypassed:true,reboundRequired:true};
-      if(existingStatus!=='AUTHORIZED'&&existingStatus!=='WATCHING'){
-        await this.db.upsertOpportunityEpisode(baseEpisode({decision:'AUTHORIZED',reason:'another_dimension_aurora_authorized_lightning_plasma',strategicAuthority:false,lightningPlasmaContinuation:lineage}));
-        stats.authorized+=1;record('AUTHORIZED',{authorizationId});
-      }
-      const watch={authorizationId,parentShadow,authorizedAtMs,ticker,eventTicker:String(parentShadow.eventTicker||ticker)};
-      this.lightningPlasmaWatches.set(authorizationId,watch);
-      return this.attemptLightningPlasmaContinuation(watch);
-    }catch(error){
-      await this.db.audit('error','lightning_plasma_continuation_failed',{authorizationId,parentShadowTradeId:parentId,ticker,message:String(error?.message||error)}).catch(()=>{});
-      stats.blocked+=1;record('BLOCKED',{reason:'continuation_exception',authorizationId});
-      return {status:'BLOCKED',reason:'continuation_exception'};
-    }finally{
-      if(unlock)await unlock().catch(()=>{});
-      this.lightningPlasmaContinuationInFlight.delete(authorizationId);
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async attemptLightningPlasmaContinuation(watch) {
-    const stats=this.lightningPlasmaContinuationRuntime();
-    const s=this.settings||{};
-    const authorizationId=String(watch?.authorizationId||'');
-    const parentShadow=watch?.parentShadow;
-    const parentId=String(parentShadow?.id||'');
-    const ticker=String(watch?.ticker||parentShadow?.ticker||'');
-    const record=(status,data={})=>{stats.lastEvent={status,atMs:Date.now(),parentShadowTradeId:parentId,ticker,authorizationId,...data};return stats.lastEvent;};
-    if(!authorizationId||!parentId||!ticker)return {status:'IGNORED',reason:'watch_incomplete'};
-    const windowMs=Math.max(1,Number(s.recoveryTrackingHours||24))*3600000;
-    if(Number(parentShadow.closedAtMs||0)>0 && Date.now()-Number(parentShadow.closedAtMs)>windowMs){
-      this.lightningPlasmaWatches.delete(authorizationId);
-      stats.blocked+=1;record('BLOCKED',{reason:'tracking_window_elapsed'});
-      return {status:'BLOCKED',reason:'tracking_window_elapsed'};
-    }
-    const existing=typeof this.db.opportunityEpisode==='function'?await this.db.opportunityEpisode(authorizationId).catch(()=>null):null;
-    const existingStatus=String(existing?.athenaDecision?.lightningPlasmaContinuation?.status||existing?.athenaDecision?.decision||'');
-    if(existing?.entryId||['OPENED','BLOCKED'].includes(existingStatus)){
-      this.lightningPlasmaWatches.delete(authorizationId);
-      return {status:'DUPLICATE_SUPPRESSED',reason:'durable_authorization_already_consumed',entryId:existing?.entryId||null};
-    }
-    const refreshed=await this.freshExecutionSnapshot(ticker);
-    if(!refreshed?.marketFresh||!refreshed?.bookFresh||!refreshed?.quote){
-      stats.watching+=1;record('WATCHING',{reason:'fresh_executable_market_unavailable'});
-      return {status:'WATCHING',reason:'fresh_executable_market_unavailable'};
-    }
-    const q={...refreshed.quote,ticker,eventTicker:String(refreshed.quote.eventTicker||refreshed.quote.ticker||ticker)};
-    const expectedEvent=String(parentShadow.eventTicker||ticker),status=String(q.status||'').toLowerCase();
-    if(String(q.eventTicker||ticker)!==expectedEvent){
-      this.lightningPlasmaWatches.delete(authorizationId);stats.blocked+=1;record('BLOCKED',{reason:'event_identity_mismatch'});
-      await this.db.upsertOpportunityEpisode({...(existing||{}),id:authorizationId,athenaDecision:{decision:'BLOCKED',reason:'event_identity_mismatch',lightningPlasmaContinuation:{status:'BLOCKED',terminal:true,authorizationId}},updatedAtMs:Date.now()}).catch(()=>{});
-      return {status:'BLOCKED',reason:'event_identity_mismatch'};
-    }
-    if(status!=='active'||Boolean(q.result)){
-      this.lightningPlasmaWatches.delete(authorizationId);stats.blocked+=1;record('BLOCKED',{reason:'market_not_active'});
-      await this.db.upsertOpportunityEpisode({...(existing||{}),id:authorizationId,athenaDecision:{decision:'BLOCKED',reason:'market_not_active',lightningPlasmaContinuation:{status:'BLOCKED',terminal:true,authorizationId}},updatedAtMs:Date.now()}).catch(()=>{});
-      return {status:'BLOCKED',reason:'market_not_active'};
-    }
-    const signal=followUpConfirmationState({
-      preCrashPeakCents:Number(parentShadow.peakPriceCents||parentShadow.exitPriceCents||0),
-      troughCents:Number(parentShadow.exitPriceCents||0),
-      parentExitPriceCents:Number(parentShadow.exitPriceCents||0),
-      lastBidCents:Number(q.yesBid||0),
-      upwardTicks:0,
-      crashDepthCents:Math.max(0,Number(parentShadow.peakPriceCents||0)-Number(parentShadow.exitPriceCents||0)),
-    },q,s,Date.now(),'Lightning Plasma');
-    if(!signal.qualified){
-      stats.watching+=1;record('WATCHING',{reason:signal.reason,bidCents:signal.bidCents,troughCents:signal.troughCents,reboundCents:signal.reboundCents});
-      await this.db.upsertOpportunityEpisode({...(existing||{}),id:authorizationId,athenaDecision:{decision:'WATCHING',reason:signal.reason,lightningPlasmaContinuation:{status:'WATCHING',terminal:false,authorizationId,reboundCents:signal.reboundCents,troughCents:signal.troughCents}},updatedAtMs:Date.now()}).catch(()=>{});
-      return {status:'WATCHING',reason:signal.reason};
-    }
-    stats.attempted+=1;record('ATTEMPTED',{authorizationId,bidCents:signal.bidCents,askCents:signal.askCents,reboundCents:signal.reboundCents});
-    const opened=await this.strategy.executeLightningPlasmaContinuation(q,parentShadow,{authorizationId,authorizedAtMs:Number(watch.authorizedAtMs||Date.now()),recoveryContext:{troughCents:signal.troughCents,reboundCents:signal.reboundCents}});
-    if(!opened){
-      stats.watching+=1;record('WATCHING',{reason:'hard_safety_or_execution_blocked'});
-      return {status:'WATCHING',reason:'hard_safety_or_execution_blocked'};
-    }
-    this.lightningPlasmaWatches.delete(authorizationId);
-    stats.opened+=1;record('OPENED',{authorizationId,entryId:opened.id,entryPriceCents:Number(opened.entryPriceCents||0)});
-    const parentDurable=typeof this.db?.entryById==='function'?await this.db.entryById(parentId).catch(()=>null):parentShadow;
-    if(parentDurable&&typeof this.db?.updateEntry==='function'){
-      const feederState={...(parentDurable.feederState||parentShadow.feederState||{}),universe:'Gemini',lightningPlasmaEntryId:opened.id,lightningPlasmaOpenedAtMs:Number(opened.openedAtMs||Date.now()),lightningPlasmaAuthorizationId:authorizationId};
-      await this.db.updateEntry(parentId,{feederState,updatedAtMs:Date.now()}).catch(()=>{});
-      this.rememberAnotherDimension({...parentDurable,feederState,updatedAtMs:Date.now()});
-    }
-    const openedDecision={decision:'OPENED',reason:'lightning_plasma_continuation_opened',strategicAuthority:false,lightningPlasmaContinuation:{version:LIGHTNING_PLASMA.version,status:'OPENED',terminal:true,authorizationId,parentShadowTradeId:parentId,repeatIndex:1,maxRepeats:1,entryId:opened.id,entryAtMs:Number(opened.openedAtMs||Date.now()),entryPriceCents:Number(opened.entryPriceCents||0)}};
-    await this.db.upsertOpportunityEpisode({id:authorizationId,systemName:s.systemName,sourceRelease:RELEASE,cohortId:String(s.resetTimestampMs||''),ticker,eventTicker:String(parentShadow.eventTicker||ticker),side:'YES',sport:String(parentShadow.sport||'Unknown'),athenaDecision:openedDecision,fireCommand:structuredClone(opened.entryConfig?.athenaFire||{}),attackSelected:'Lightning Plasma',entryId:opened.id,entryAtMs:Number(opened.openedAtMs||Date.now()),updatedAtMs:Date.now()}).catch(()=>{});
-    await this.db.audit('info','lightning_plasma_continuation_opened',{authorizationId,parentShadowTradeId:parentId,ticker,entryId:opened.id,entryPriceCents:Number(opened.entryPriceCents||0),reboundCents:Number(opened.entryConfig?.lightningPlasmaContinuation?.reboundCents||0),closeToEntryLatencyMs:Math.max(0,Number(opened.openedAtMs||Date.now())-Number(parentShadow.closedAtMs||watch.authorizedAtMs||0))}).catch(()=>{});
-    return {status:'OPENED',authorizationId,entry:opened};
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async init() {
@@ -3647,13 +2852,14 @@ export class SagittariusEngine {
     // startup normalizer below still disarms unconditionally BEFORE this value
     // can become executable engine state. Never restore authority from disk.
     const loadedSettings = await this.db.loadSettings(freshInstallSettings(),{preserveRuntimeArm:true});
+    const ownerConfigurationBefore=ownerTradingConfigurationFingerprint(loadedSettings);
     const persistedArmedAtBoot=loadedSettings.mode==='LIVE'&&loadedSettings.liveArmed===true;
     if(typeof this.db.loadSettingsRevision==='function')this.settingsPersistence.lastRevision=await this.db.loadSettingsRevision();
     const startupMode = normalizeStartupExecutionMode(loadedSettings, env.allowLiveTrading);
     this.settings = startupMode.settings;
     // The database loader already supplies fresh-install defaults for missing
     // fields. Seal legacy card migrations BEFORE any can overwrite saved values.
-    const preserved = startupSettingsPreservation(this.settings);
+    const preserved = startupSettingsPreservation(this.settings,{preserveCard:true});
     this.settings = preserved.settings;
     if (this.settings.card20261006SessionApplied !== true) {
       const card = factoryOperatorSettingsPatch();
@@ -3720,6 +2926,12 @@ export class SagittariusEngine {
       await this.db.saveSettings(this.settings);
       await this.db.audit('info', 'card_20261006_applied', { release: RELEASE }).catch(() => {});
     }
+    const ownerConfigurationAfter=ownerTradingConfigurationFingerprint(this.settings);
+    this.settingsUpgradeEvidence={version:'R28-SETTINGS-PRESERVATION-1',
+      beforeFingerprint:ownerConfigurationBefore,afterFingerprint:ownerConfigurationAfter,
+      preserved:ownerConfigurationBefore===ownerConfigurationAfter,
+      modeNormalizationReason:startupMode.reason||null,
+      scope:'loaded_owner_trading_configuration_excludes_transient_arm_and_migration_markers'};
     // Q17-R4/R5 card-copy migrations are historical only. R15 restores the
     // existing LP-V5 route using the operator's own saved Plasma card. Keep
     // every saved value and migration flag exactly as loaded, including an
@@ -3869,6 +3081,11 @@ export class SagittariusEngine {
           }
           if(advanced)this.queueLightningScaleInWake({ticker:q.ticker,quoteDriven:true});
         }
+        // R17 exact quote notification is critical for rebound/upward-tick
+        // continuity. It performs NO SQL or network I/O on this callback.
+        // The old research debounce below returned early before calling R17,
+        // silently deleting fast rising ticks and losing LIVE/SIM parity.
+        this.r17?.onQuote(q);
         // Unchanged chatter on a non-protected ticker does no work for 2s.
         // A price move, an open position, or a watch always runs the full path.
         if(q?.ticker){
@@ -3897,6 +3114,7 @@ export class SagittariusEngine {
         }
         try { this.atomicThunderBolt?.observeCounterfactual?.(q,Date.now()); } catch {}
         this.queueQuoteProtection(q?.ticker);
+        // R17 was already notified above the optional research debounce.
         this.queueGoldenEyeEvaluation(q?.ticker);
         // SE2-R6: this is an independent post-stop-loss watcher, not a
         // subscriber to CI1 crash-learning admissibility. CI1 may be absent,
@@ -3970,91 +3188,22 @@ export class SagittariusEngine {
       getSettings: () => this.settings,
       onOpportunityCompleted: (episode) => this.athenaCommander?.learnEpisode?.(episode),
       onPositionClosed: (entry) => {
-        // AU2: Scarlet and Plasma are ordinary Athena-path Attacks. Close events no longer arm them.
-        // SE2: a hard_stop_loss of a real executable hunter arms Starlight Extinction recovery.
-        if(entry?.conceptName==='Lightning Plasma' && !isShadowSaintEntry(entry)){
-          void this.db.armGreatHornWatchFromClosedLightning(entry.id).then(result=>{
-            const context={parentId:entry.id,ticker:entry.ticker,systemName:entry.systemName,
-              ownerId:entry.ownerId,mode:entry.mode,resetEpoch:this.settings?.resetTimestampMs||0};
-            if(result?.ok){
-              if(entry.ticker){
-                this.greatHornPriorityTickers.add(String(entry.ticker));
-                const wanted=new Set(this.market?.wanted||[]);wanted.add(String(entry.ticker));
-                this.market?.setWanted?.([...wanted]);
-              }
-              void this.recordGreatHornDecision(result.status==='WATCHING_CREATED'?'gh1_watch_created':'gh1_watch_exists',
-                {...context,watchId:result.watchId,reason:result.status});
-              this.queueGreatHornWake({watchId:result.watchId,ticker:entry.ticker});
-            }else{
-              void this.recordGreatHornDecision('gh1_parent_denied',{...context,reason:result?.reason||'unknown'});
-            }
-          }).catch(error=>{
-            void this.recordGreatHornDecision('gh1_parent_arm_failed',{parentId:entry.id,ticker:entry.ticker,
-              ownerId:entry.ownerId,mode:entry.mode,reason:String(error?.message||error)});
-          });
-        }
-        if(entry?.conceptName==='Great Horn Recovery' && !isShadowSaintEntry(entry)
-          &&this.settings?.crystalWallRecoveryEnabled===true){
-          void this.db.armCrystalWallWatchFromClosedGreatHorn(entry.id).then(result=>{
-            const context={parentId:entry.id,ticker:entry.ticker,systemName:entry.systemName,
-              ownerId:entry.ownerId,mode:entry.mode,resetEpoch:this.settings?.resetTimestampMs||0};
-            if(result?.ok){
-              if(entry.ticker){
-                this.crystalWallRecoveryPriorityTickers.add(String(entry.ticker));
-                const wanted=new Set(this.market?.wanted||[]);wanted.add(String(entry.ticker));
-                this.market?.setWanted?.([...wanted]);
-              }
-              void this.recordCrystalWallDecision(result.status==='WATCHING_CREATED'?'cw1_watch_created':'cw1_watch_exists',
-                {...context,watchId:result.watchId,reason:result.status});
-              this.queueCrystalWallWake({watchId:result.watchId,ticker:entry.ticker});
-            }else void this.recordCrystalWallDecision('cw1_parent_denied',{...context,reason:result?.reason||'unknown'});
-          }).catch(error=>{
-            void this.recordCrystalWallDecision('cw1_parent_arm_failed',{parentId:entry.id,ticker:entry.ticker,
-              ownerId:entry.ownerId,mode:entry.mode,reason:String(error?.message||error)});
-          });
-        }
-
-        // Pegasus follows a verified Scarlet loss only, never Arrow directly.
-
-
-        if(entry?.conceptName==='Sagittarius Arrow Recovery' && !isShadowSaintEntry(entry) && entry.parentEntryId){
-          void this.db.shadowStore?.settleFromLinkedArrow?.(entry.parentEntryId, entry);
-        }
-
+        // R17: no legacy chain may mint a NEW capital child. The original
+        // ProfitGuard still reconciles/closes and protects funded legacy
+        // positions; their historical P&L and receipts are never erased.
         if(entry?.conceptName==='Sagittarius Arrow Recovery' && !isShadowSaintEntry(entry)
-          &&this.settings?.scarletNeedleCapitalEnabled===true){
-          void this.db.armScarletNeedleCapitalWatchFromClosedSagittariusArrow(entry.id).then(result=>{
-            const context={parentId:entry.id,ticker:entry.ticker,systemName:entry.systemName,
-              ownerId:entry.ownerId,mode:entry.mode,resetEpoch:this.settings?.resetTimestampMs||0};
-            if(result?.ok){
-              if(entry.ticker){
-                this.scarletNeedleCapitalPriorityTickers.add(String(entry.ticker));
-                const wanted=new Set(this.market?.wanted||[]);wanted.add(String(entry.ticker));
-                this.market?.setWanted?.([...wanted]);
-              }
-              this.queueScarletNeedleCapitalWake({watchId:result.watchId,ticker:entry.ticker});
-            }else void this.recordScarletNeedleCapitalDecision('sn2_parent_denied',{...context,reason:result?.reason||'unknown'});
-          }).catch(error=>void this.recordScarletNeedleCapitalDecision('sn2_parent_arm_failed',{parentId:entry.id,reason:String(error?.message||error)}));
+          &&entry.parentEntryId){
+          void this.db.shadowStore?.settleFromLinkedArrow?.(entry.parentEntryId,entry);
+        }
+        if(String(entry?.conceptName||'').startsWith('R17:')){
+          void this.r17?.armCapitalLoss(entry).then((result)=>{
+            if(result?.created)this.r17?.requestTick();
+          }).catch(error=>{
+            void this.db.audit('error','r17_capital_recovery_arm_failed',{
+              parentId:entry.id,reason:String(error?.message||error)}).catch(()=>{});
+          });
         }
 
-        if(entry?.conceptName==='Scarlet Needle Recovery' && !isShadowSaintEntry(entry)
-          &&this.settings?.pegasusRyuSeiKenCapitalEnabled===true){
-          void this.db.armPegasusRyuSeiKenCapitalWatchFromClosedScarletNeedleRecovery(entry.id).then(result=>{
-            const context={parentId:entry.id,ticker:entry.ticker,systemName:entry.systemName,
-              ownerId:entry.ownerId,mode:entry.mode,resetEpoch:this.settings?.resetTimestampMs||0};
-            if(result?.ok){
-              if(entry.ticker){
-                this.pegasusRyuSeiKenCapitalPriorityTickers.add(String(entry.ticker));
-                const wanted=new Set(this.market?.wanted||[]);wanted.add(String(entry.ticker));
-                this.market?.setWanted?.([...wanted]);
-              }
-              this.queuePegasusRyuSeiKenCapitalWake({watchId:result.watchId,ticker:entry.ticker});
-            }else void this.recordPegasusRyuSeiKenCapitalDecision('pr3_parent_denied',{...context,reason:result?.reason||'unknown'});
-          }).catch(error=>void this.recordPegasusRyuSeiKenCapitalDecision('pr3_parent_arm_failed',{parentId:entry.id,reason:String(error?.message||error)}));
-        }
-        try { this.armStarlightRecovery(entry); } catch(error) {
-          void this.db?.audit?.('error','starlight_recovery_arm_failed',{id:entry?.id||null,message:String(error?.message||error)}).catch?.(()=>{});
-        }
       },
     });
     this.goldenEye = new GoldenEye({
@@ -4118,6 +3267,7 @@ export class SagittariusEngine {
       enterSimulationMutation: (token) => this.simulationMutationGate.enter(token),
     });
     await this.strategy.init({backgroundResearch:true});
+    this.r17=new GoldenSaintRuntime(this);
     await this.hydrateAnotherDimension();
     await this.hydrateCrystalWallV3();
     await this.hydrateJusticeArrowV2();
@@ -4155,11 +3305,13 @@ export class SagittariusEngine {
       this.health.reconciliationOk=false;
       await this.reconcileBroker().catch((e)=>this.recordError('startup_live_reconciliation',e));
     }else this.health.reconciliationOk=true;
-    this.startStarlightRecoveryMaintenance();
+    // R17 retires the Starlight/GH/CW/Arrow/SN/PR new-entry workers; LIVE
+    // protection and reconciliation loops remain running below.
     // R33: complete a startup read of authoritative owned exposure before the
     // market scanner can begin admitting entries. A failed sweep remains a
     // protection-health failure and cannot silently make LIVE entries ready.
     await this.runProtectionSweep('startup_verified_open').catch(error=>this.recordError('startup_protection_index',error));
+    this.r17.start();
     this.protectionLoopPromise = this.protectionLoop();
     this.cyclePromise = this.cycleLoop();
     this.startBackgroundIntelligenceHydration();
@@ -4197,8 +3349,7 @@ export class SagittariusEngine {
     this.operationalInstalled=true;
     this.operational ||= new OperationalMonitor();
     const monitored={runProtectionSweep:'protection',fullScan:'scanner',reconcileBroker:'reconciliation',
-      sweepShadowSaints:'shadow',sweepLightningPlasmaScaleIn:'lightning',
-      wakeStarlightRecoveryWatches:'starlightWake',refreshStarlightRecoveryMarketQuotes:'starlightPoll'};
+      sweepShadowSaints:'shadow'};
     for(const [method,name] of Object.entries(monitored)){
       if(typeof this[method]!=='function')continue;
       if(name!=='reconciliation')this.operational.requireWorker(name);
@@ -4260,28 +3411,9 @@ export class SagittariusEngine {
       queueMicrotask(()=>{void this.runGreatHornObserver({immediate:true});});
   }
   async runGreatHornObserver({immediate=false}={}){
-    if(this.greatHornObserverInFlight)return;
-    const ids=immediate?[...this.greatHornWakeIds].slice(0,16):[];
-    const tickers=immediate?[...this.greatHornWakeTickers].slice(0,8):[];
-    if(immediate&&!ids.length&&!tickers.length)return;
-    this.greatHornObserverInFlight=true;
-    try{
-      await this.observeGreatHornWatches({priorityWatchIds:ids,priorityTickers:tickers});
-      this.greatHornLastObserverSuccessMs=Date.now();
-      for(const id of ids)this.greatHornWakeIds.delete(id);
-      for(const ticker of tickers)this.greatHornWakeTickers.delete(ticker);
-    }catch(error){
-      // No unbounded immediate error loop. The periodic scheduler and durable
-      // watch table remain the recovery mechanism after a transient failure.
-      for(const id of ids)this.greatHornWakeIds.delete(id);
-      for(const ticker of tickers)this.greatHornWakeTickers.delete(ticker);
-      this.greatHornObserverStatus={atMs:Date.now(),error:String(error?.message||error),capitalAdmission:'DENIED'};
-      this.queueRuntimeDiagnostic(()=>this.recordGreatHornDecision('gh1_observer_failed',{reason:String(error?.message||error)},5000));
-    }finally{
-      this.greatHornObserverInFlight=false;
-      if(this.greatHornWakeIds.size||this.greatHornWakeTickers.size)
-        setImmediate(()=>{void this.runGreatHornObserver({immediate:true});});
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** Restart recovery for a Lightning close that committed before its GH callback.
@@ -4289,46 +3421,9 @@ export class SagittariusEngine {
    * Restarting the process merely starts the idempotent scan again.
    */
   async replayGreatHornMissedParents(){
-    if(!this.running||this.shuttingDown||this.settings?.greatHornEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const settings=this.settings,cursor=this.greatHornReplayCursor||null;
-    const scopeKey=[settings.systemName,settings.ownerId,settings.mode,settings.resetTimestampMs].map(String).join('|');
-    const before=cursor?.scopeKey===scopeKey?cursor:null;
-    const page=await this.db.greatHornMissingParentPage(settings,{limit:8,
-      beforeClosedMs:before?.closedAtMs??Number.MAX_SAFE_INTEGER,beforeId:before?.id??'\uffff'});
-    let created=0,rejected=0,failed=0,lastFailure=null;
-    for(const p of page){
-      // A malformed legacy parent, transient database failure, or competing
-      // process must not poison the entire eight-parent replay page. Continue
-      // in durable keyset order and allow the next sweep to retry failures.
-      try{
-        const result=await this.db.armGreatHornWatchFromClosedLightning(p.id);
-        if(result?.ok){
-          if(result.status==='WATCHING_CREATED')created++;
-          if(result.status==='WATCHING_CREATED'||result.status==='WATCH_ALREADY_PRESENT'){
-            this.greatHornPriorityTickers.add(String(p.ticker||''));
-            this.queueGreatHornWake({watchId:result.watchId,ticker:p.ticker});
-          }
-        }else{
-          rejected++;
-          await this.recordGreatHornDecision('gh1_parent_denied',{parentId:p.id,ticker:p.ticker,
-            systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,
-            resetEpoch:settings.resetTimestampMs||0,reason:result?.reason||'unknown',source:'replay'},30000);
-        }
-      }catch(error){
-        failed++;lastFailure=String(error?.message||error).slice(0,240);
-        await this.recordGreatHornDecision('gh1_parent_arm_failed',{parentId:p.id,
-          ticker:p.ticker,systemName:settings.systemName,ownerId:settings.ownerId,
-          mode:settings.mode,resetEpoch:settings.resetTimestampMs||0,
-          reason:lastFailure,source:'replay'},30000);
-      }
-    }
-    const last=page[page.length-1];
-    this.greatHornReplayCursor=last&&page.length===8?{scopeKey,closedAtMs:last.closedAtMs,id:last.id}:null;
-    this.greatHornReplayStatus={version:'GH1-ROOT1-RESILIENT-REPLAY',atMs:Date.now(),checked:page.length,
-      created,rejected,failed,lastFailure,more:!!this.greatHornReplayCursor,
-      capitalAdmission:'RECOVERY_REPLAY_ONLY'};
-    return this.greatHornReplayStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** GH1 SIM-owned fill or LIVE durable pending intent per independently
@@ -4336,145 +3431,9 @@ export class SagittariusEngine {
    * Financial exits and broker reconciliation never depend on that entry gate.
    */
   async executeGreatHornCapitalSeat(watch,priorQuote){
-    const s=structuredClone(this.settings||{});
-    const safetyRevision=this.runtimeSettingsSafetyRevision||0;
-    // SIM reset must drain GH capital mutations exactly as it drains every
-    // other financial mutation. Capture the reset token BEFORE the REST await.
-    const live=s.mode==='LIVE';
-    // A tested code path is not evidence of a native PostgreSQL / Railway
-    // release. Keep unverified real-money GH BUYs OFF by default. This gate
-    // never applies to existing financial protection, reconciliation or exits.
-    const simulationToken=live?null:this.simulationMutationGate?.capture?.();
-    if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
-      return {ok:false,reason:'gh_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.greatHornEnabled!==true
-      ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
-      return {ok:false,reason:'gh_sim_operator_or_signal_disabled'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent)return {ok:false,reason:'gh_sim_parent_missing'};
-    // The stop-time websocket quote is a wake hint, not a BUY price limit.
-    // Obtain one current verified REST market+book snapshot, then size and
-    // compute the executable limit from THAT SAME snapshot. This also allows
-    // a 38c losing exit to recover at a fresh 39c executable ask.
-    const verified=await prepareGreatHornExecutionBook({market:this.market,watch,
-      stakeCents:Number(s.greatHornStakeCents||0),maxAgeMs:s.infinityBreakMaximumBookAgeMs});
-    if(!verified.ok)return verified;
-    const {quote,plan}=verified;
-    const occupied=await this.db.pool.query('select seat from sag_great_horn_seats_v1 where watch_id=$1 order by seat',[watch.id]);
-    // Use the existing canonical seat-ledger integrity proof before choosing a
-    // free seat. An invalid/duplicate seat cannot be silently ignored while
-    // a parent recovery group is executing. Valid per-parent Multiply is intact.
-    const seatPlan=greatHornSeatPlan(watch,occupied.rows);
-    if(!seatPlan.ok)return {ok:false,reason:seatPlan.reason};
-    const seat=seatPlan.free[0];
-    if(!seat)return {ok:false,reason:'gh_sim_multiply_fully_consumed'};
-    if(live){
-      const pending=await this.db.pool.query(`select 1 from sag_great_horn_seats_v1 x
-        join sag_entries e on e.id=x.position_id where x.watch_id=$1
-        and x.status='RECONCILE' and e.status='entry_pending' limit 1`,[watch.id]);
-      if(pending.rowCount)return {ok:false,reason:'gh_live_previous_order_unreconciled'};
-    }
-    // SIM must not reuse the same visible best-ask liquidity for every Multiply
-    // seat. Pool all positions already consumed by this parent recovery group,
-    // including closed seats, against a fresh full-depth book at the entry limit.
-    const priorVolume=await this.db.pool.query(`select coalesce(sum(e.count),0)::double precision as contracts
-      from sag_great_horn_seats_v1 x join sag_entries e on e.id=x.position_id
-      where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
-    const previouslyConsumed=Number(priorVolume.rows?.[0]?.contracts||0);
-    const depth=greatHornAskDepth(plan.executionEvidence?.book,Number(quote.yesAsk));
-    const plannedAvailable=Number(plan.verifiedAvailableAtLimitCount);
-    if(!depth.ok||!Number.isSafeInteger(plannedAvailable)||plannedAvailable!==depth.count
-      ||!Number.isFinite(previouslyConsumed)||previouslyConsumed<0
-      ||(!live&&!Number.isSafeInteger(previouslyConsumed))
-      ||depth.count<(live?0:previouslyConsumed)+Number(plan.count||0))
-      return {ok:false,reason:'gh_sim_cumulative_executable_depth_insufficient',
-        depthReason:!depth.ok?depth.reason:plannedAvailable!==depth.count
-          ?'gh_book_changed_after_snapshot':'gh_available_whole_contracts_exhausted',
-        availableAtLimitCount:depth.count,plannedAvailableAtLimitCount:plannedAvailable,
-        previouslyConsumedCount:previouslyConsumed,requestedCount:Number(plan.count||0)};
-    plan.existingGroupQuantity=previouslyConsumed;
-    plan.availableAtLimitCount=depth.count;
-    const current=()=>{const c=this.settings;
-      return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
-        &&c?.greatHornEnabled===true&&String(c.systemName)===String(s.systemName)
-        &&String(c.ownerId)===String(s.ownerId)
-        &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
-        &&JSON.stringify(['greatHornMultiply','greatHornStakeCents','greatHornMinEntryCents',
-          'greatHornMaxEntryCents','greatHornMinCrashCents','greatHornMinReboundCents',
-          'greatHornMinUpwardTicks','greatHornObservationMinutes','greatHornLinkEnabled',
-          'greatHornParentEntryRiseCents','greatHornAuroraDamageControlPercent',
-          'greatHornMinProfitNetPerOriginalContractCents','greatHornAthenaX1Enabled',
-          'greatHornMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>c[k]))===
-          JSON.stringify(['greatHornMultiply','greatHornStakeCents','greatHornMinEntryCents',
-          'greatHornMaxEntryCents','greatHornMinCrashCents','greatHornMinReboundCents',
-          'greatHornMinUpwardTicks','greatHornObservationMinutes','greatHornLinkEnabled',
-          'greatHornParentEntryRiseCents','greatHornAuroraDamageControlPercent',
-          'greatHornMinProfitNetPerOriginalContractCents','greatHornAthenaX1Enabled',
-          'greatHornMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>s[k]));};
-    if(!current())return {ok:false,reason:'gh_sim_card_changed_during_book_refresh'};
-    const clientOrderId=live?this.kalshi?.buildClientOrderId?.(s.ownerId,
-      'GH1-'+watch.id+'-'+seat,'entry'):null;
-    const planned=createGreatHornCapitalEntry({watch,parent,quote,plan,settings:s,seat,clientOrderId});
-    if(!planned.ok)return planned;
-    if(live)planned.entry.entryConfig.greatHornOperatorRevision=safetyRevision;
-    if(live){
-      if(typeof this.kalshi?.ensureExchangeBalance!=='function')return {ok:false,reason:'gh_live_exchange_preflight_missing'};
-      const funding=liveRecoveryCollateralRequirement(planned.entry);
-      if(!funding.ok)return {ok:false,reason:funding.reason};
-      const balance=await this.kalshi.ensureExchangeBalance({ticker:watch.ticker,
-        exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
-      if(!balance?.ok)return {ok:false,reason:balance?.reason||'gh_live_exchange_preflight_denied'};
-      planned.entry.entryConfig.brokerRouting={version:'GH1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
-      const witness=createQ17LiveCashWitness(planned.entry,balance);
-      if(!witness.ok)return {ok:false,reason:witness.reason};
-      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
-    }
-    // Enter the SIM reset gate immediately before the PostgreSQL financial
-    // transaction. An in-progress reset rejects admission; an admitted
-    // transaction completes or rolls back BEFORE reset can archive records.
-    const releaseSimulation=live?()=>{}:this.simulationMutationGate?.enter?.(simulationToken);
-    if(!releaseSimulation)return {ok:false,reason:'gh_sim_reset_in_progress'};
-    let brokerUnlock=null;
-    try{
-      if(live){
-        if(typeof s.ownerId!=='string'||!s.ownerId.trim()||s.ownerId!==s.ownerId.trim())
-          return {ok:false,reason:'gh_live_broker_mutation_owner_scope_missing'};
-        // Broker inventory is shared by owner across system instances.
-        brokerUnlock=await this.db.acquireHunterTickerLock(s.ownerId,`broker:${watch.ticker}`);
-        if(!brokerUnlock)return {ok:false,reason:'gh_live_broker_mutation_lock_busy'};
-      }
-      const saved=live?await this.db.insertGreatHornLiveEntry(planned.entry,{quote,isCurrent:current})
-        :await this.db.insertGreatHornSimulationEntry(planned.entry,{quote,isCurrent:current});
-      if(live){
-        const receipt=await dispatchGreatHornLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
-          readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
-          audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
-        return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
-      }
-      try{this.strategy.onHunterOpened?.(planned.entry);}catch{}
-      try{this.profitGuard?.registerInfinityBreakFastWake?.(planned.entry,s);}catch{}
-      await this.recordGreatHornDecision('gh1_sim_capital_entry_committed',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),id:planned.entry.id,
-        watchId:watch.id,parentId:parent.id,seat,ticker:watch.ticker,
-        count:planned.entry.count,entryPriceCents:planned.entry.entryPriceCents,
-        auroraDangerPriceCents:planned.entry.stopPriceCents});
-      return {ok:true,id:saved.entry.id,seat,count:saved.entry.count};
-    }catch(error){
-      const reason=String(error?.message||error);
-      await this.recordGreatHornDecision('gh1_sim_seat_admission_blocked',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),
-        watchId:watch.id,parentId:parent.id,ticker:watch.ticker,seat,reason});
-      return {ok:false,reason};
-    }finally{
-      if(brokerUnlock)try{await brokerUnlock();}catch{}
-      releaseSimulation();
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** GH1-SIM3: each eligible recovery group can consume all remaining
@@ -4484,108 +3443,9 @@ export class SagittariusEngine {
    * seats and never count a failed/unknown broker outcome as a fill.
    */
   async observeGreatHornWatches({priorityWatchIds=[],priorityTickers=[]}={}){
-    if(!this.running||this.shuttingDown||this.settings?.greatHornEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const s=this.settings;
-    const page=await this.db.greatHornObservationPage(s,{limit:16,priorityWatchIds,priorityTickers});
-    const prioritized=new Set(priorityWatchIds.map(String));
-    const priorityMarkets=new Set(priorityTickers.map(String));
-    let advanced=0,ready=0,unavailable=0,simOpened=0,simBlocked=0,simPartial=0;
-    let directRefreshes=0;
-    const refreshedThisPage=new Map();
-    for(const watch of page){
-      if(!this.running||this.shuttingDown||this.settings?.engineActive!==true)break;
-      if(watch.ticker && !this.greatHornPriorityTickers.has(watch.ticker)){
-        this.greatHornPriorityTickers.add(watch.ticker);
-        const wanted=new Set(this.market?.wanted||[]);wanted.add(watch.ticker);
-        this.market?.setWanted?.([...wanted]);
-      }
-      let q=this.market?.getQuote?.(watch.ticker);
-      const age=Date.now()-Number(q?.quoteAtMs||0);
-      const maxAge=5000; // recovery observation; admission keeps operator book age
-      const needsFresh=!q||!Number.isFinite(age)||age>maxAge
-        ||Number(q.quoteAtMs)<Number(watch.armedAtMs)
-        ||q.bookInvalid===true||q.status!=='active';
-      // Recovery WATCHING state must not depend on a prior scanner retaining
-      // the ticker in RAM. Bound REST refreshes and coalesce by exact ticker;
-      // stale/missing quotes NEVER become fabricated fills or signal evidence.
-      if(needsFresh){
-        const ticker=String(watch.ticker);
-        if(refreshedThisPage.has(ticker))q=refreshedThisPage.get(ticker)||q;
-        else if(directRefreshes<4 && Date.now()-Number(this.greatHornLastDirectRefreshMs.get(ticker)||0)>=2000){
-          directRefreshes++;
-          this.greatHornLastDirectRefreshMs.set(ticker,Date.now());
-          while(this.greatHornLastDirectRefreshMs.size>256)
-            this.greatHornLastDirectRefreshMs.delete(this.greatHornLastDirectRefreshMs.keys().next().value);
-          const fresh=typeof this.market?.refreshTickerVerified==='function'
-            ?await this.market.refreshTickerVerified(ticker).catch(()=>null)
-            :typeof this.market?.refreshTicker==='function'
-              ?{quote:await this.market.refreshTicker(ticker).catch(()=>null)}:null;
-          const checked=fresh?.marketFresh===false||fresh?.bookFresh===false?null:fresh?.quote||null;
-          refreshedThisPage.set(ticker,checked);
-          if(checked)q=checked;
-        }
-      }
-      if(!q){
-        unavailable++;
-        await this.recordGreatHornDecision('gh1_quote_waiting',{watchId:watch.id,parentId:watch.parentEntryId,
-          ticker:watch.ticker,reason:'gh1_quote_missing',mode:watch.mode,ownerId:watch.ownerId},30000);
-        continue;
-      }
-      const result=await this.db.greatHornObserve(watch.id,stampLiveEpoch(q,this.market?.quoteEpoch));
-      if(result?.changed){
-        advanced++;
-        await this.recordGreatHornDecision(result.signalQualified?'gh1_watch_qualified':'gh1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,mode:watch.mode,
-            ownerId:watch.ownerId,reason:result.reason,quoteAtMs:q.quoteAtMs,
-            bidCents:q.yesBid,askCents:q.yesAsk,watchRevision:result.revision},
-          result.signalQualified?0:15000);
-      }else if(result?.reason&&result.reason!=='gh1_duplicate_or_out_of_order_quote'){
-        await this.recordGreatHornDecision('gh1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:result.reason},30000);
-      }
-      // An already-qualified durable watch remains eligible after restart or
-      // interrupted admission even when the cache has no new quote revision.
-      // The transactional entry revalidates on a new independently fresh book.
-      if(result?.ok!==true||result?.watch?.status!=='WATCHING'||result.watch.qualified!==true)continue;
-      ready++;
-      if(!['SIMULATION','LIVE'].includes(s.mode))continue;
-      const batch=await runGreatHornSequentialSeats(result.watch,{
-        isCurrent:()=>this.running&&!this.shuttingDown&&this.settings?.engineActive===true
-          &&this.settings?.greatHornEnabled===true&&this.settings?.mode===s.mode
-          &&String(this.settings.systemName)===String(s.systemName)
-          &&String(this.settings.ownerId)===String(s.ownerId)
-          &&Number(this.settings.resetTimestampMs||0)===Number(s.resetTimestampMs||0),
-        attempt:()=>this.executeGreatHornCapitalSeat(result.watch,q),
-      });
-      simOpened+=batch.opened;
-      if(batch.pending){
-        // A pending/uncertain broker order is not a failed admission. Never
-        // mislabel it as denied; retain the distinct reconciliation obligation.
-        await this.recordGreatHornDecision('gh1_live_pending_reconciliation',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats});
-      }else if(batch.blocked){
-        simBlocked++;
-        await this.recordGreatHornDecision('gh1_capital_denied',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats,
-            ...(batch.denialEvidence||{})},15000);
-      }else if(batch.opened>0){
-        await this.recordGreatHornDecision('gh1_seat_executed',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,seatsOpened:batch.opened,
-            maximumSeats:batch.maximumSeats});
-      }
-      if(batch.opened>0&&batch.opened<batch.maximumSeats)simPartial++;
-    }
-    this.greatHornObserverStatus={version:'GH1-OBSERVATION-SIM3',atMs:Date.now(),
-      scanned:page.length,advanced,qualifiedSignals:ready,quotesUnavailable:unavailable,
-      simOpened,simBlocked,simPartial,directRefreshes,capitalAdmission:s.mode==='SIMULATION'?'GH_SIM_CAPITAL_ADMISSION':'GH_LIVE_PENDING_INTENT_PROTECTED_DISPATCH' };
-    return this.greatHornObserverStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
 
@@ -4623,28 +3483,9 @@ export class SagittariusEngine {
       queueMicrotask(()=>{void this.runSagittariusArrowObserver({immediate:true});});
   }
   async runSagittariusArrowObserver({immediate=false}={}){
-    if(this.sagittariusArrowObserverInFlight)return;
-    const ids=immediate?[...this.sagittariusArrowWakeIds].slice(0,16):[];
-    const tickers=immediate?[...this.sagittariusArrowWakeTickers].slice(0,8):[];
-    if(immediate&&!ids.length&&!tickers.length)return;
-    this.sagittariusArrowObserverInFlight=true;
-    try{
-      await this.observeSagittariusArrowWatches({priorityWatchIds:ids,priorityTickers:tickers});
-      this.sagittariusArrowLastObserverSuccessMs=Date.now();
-      for(const id of ids)this.sagittariusArrowWakeIds.delete(id);
-      for(const ticker of tickers)this.sagittariusArrowWakeTickers.delete(ticker);
-    }catch(error){
-      // No unbounded immediate error loop. The periodic scheduler and durable
-      // watch table remain the recovery mechanism after a transient failure.
-      for(const id of ids)this.sagittariusArrowWakeIds.delete(id);
-      for(const ticker of tickers)this.sagittariusArrowWakeTickers.delete(ticker);
-      this.sagittariusArrowObserverStatus={atMs:Date.now(),error:String(error?.message||error),capitalAdmission:'DENIED'};
-      this.queueRuntimeDiagnostic(()=>this.recordSagittariusArrowDecision('sa1_observer_failed',{reason:String(error?.message||error)},5000));
-    }finally{
-      this.sagittariusArrowObserverInFlight=false;
-      if(this.sagittariusArrowWakeIds.size||this.sagittariusArrowWakeTickers.size)
-        setImmediate(()=>{void this.runSagittariusArrowObserver({immediate:true});});
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** Restart recovery for a Lightning close that committed before its GH callback.
@@ -4669,46 +3510,9 @@ export class SagittariusEngine {
   }
 
   async replaySagittariusArrowMissedParents(){
-    if(!this.running||this.shuttingDown||this.settings?.sagittariusArrowEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const settings=this.settings,cursor=this.sagittariusArrowReplayCursor||null;
-    const scopeKey=[settings.systemName,settings.ownerId,settings.mode,settings.resetTimestampMs].map(String).join('|');
-    const before=cursor?.scopeKey===scopeKey?cursor:null;
-    const page=await this.db.sagittariusArrowMissingParentPage(settings,{limit:8,
-      beforeClosedMs:before?.closedAtMs??Number.MAX_SAFE_INTEGER,beforeId:before?.id??'\uffff'});
-    let created=0,rejected=0,failed=0,lastFailure=null;
-    for(const p of page){
-      // A malformed legacy parent, transient database failure, or competing
-      // process must not poison the entire eight-parent replay page. Continue
-      // in durable keyset order and allow the next sweep to retry failures.
-      try{
-        const result=await this.db.armSagittariusArrowWatchFromOpenStarlight(p.id);
-        if(result?.ok){
-          if(result.status==='WATCHING_CREATED')created++;
-          if(result.status==='WATCHING_CREATED'||result.status==='WATCH_ALREADY_PRESENT'){
-            this.sagittariusArrowPriorityTickers.add(String(p.ticker||''));
-            this.queueSagittariusArrowWake({watchId:result.watchId,ticker:p.ticker});
-          }
-        }else{
-          rejected++;
-          await this.recordSagittariusArrowDecision('sa1_parent_denied',{parentId:p.id,ticker:p.ticker,
-            systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,
-            resetEpoch:settings.resetTimestampMs||0,reason:result?.reason||'unknown',source:'replay'},30000);
-        }
-      }catch(error){
-        failed++;lastFailure=String(error?.message||error).slice(0,240);
-        await this.recordSagittariusArrowDecision('sa1_parent_arm_failed',{parentId:p.id,
-          ticker:p.ticker,systemName:settings.systemName,ownerId:settings.ownerId,
-          mode:settings.mode,resetEpoch:settings.resetTimestampMs||0,
-          reason:lastFailure,source:'replay'},30000);
-      }
-    }
-    const last=page[page.length-1];
-    this.sagittariusArrowReplayCursor=last&&page.length===8?{scopeKey,closedAtMs:last.closedAtMs,id:last.id}:null;
-    this.sagittariusArrowReplayStatus={version:'SA1-ROOT1-RESILIENT-REPLAY',atMs:Date.now(),checked:page.length,
-      created,rejected,failed,lastFailure,more:!!this.sagittariusArrowReplayCursor,
-      capitalAdmission:'RECOVERY_REPLAY_ONLY'};
-    return this.sagittariusArrowReplayStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** SA1 SIM-owned fill or LIVE durable pending intent per independently
@@ -4716,152 +3520,9 @@ export class SagittariusEngine {
    * Financial exits and broker reconciliation never depend on that entry gate.
    */
   async executeSagittariusArrowCapitalSeat(watch,priorQuote){
-    const s=structuredClone(this.settings||{});
-    const safetyRevision=this.runtimeSettingsSafetyRevision||0;
-    // SIM reset must drain GH capital mutations exactly as it drains every
-    // other financial mutation. Capture the reset token BEFORE the REST await.
-    const live=s.mode==='LIVE';
-    // A tested code path is not evidence of a native PostgreSQL / Railway
-    // release. Keep unverified real-money GH BUYs OFF by default. This gate
-    // never applies to existing financial protection, reconciliation or exits.
-    const simulationToken=live?null:this.simulationMutationGate?.capture?.();
-    if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
-      return {ok:false,reason:'sa_sim_reset_gate_unavailable'};
-    if(live&&!this.isLiveReadyForQ17Recovery()){
-      this.sagittariusArrowLastDenial={atMs:Date.now(),reason:'sa_live_not_ready',liveArmed:s.liveArmed===true};
-      return {ok:false,reason:'sa_live_not_ready'};
-    }
-    if(!['SIMULATION','LIVE'].includes(s.mode)||s.engineActive!==true||s.sagittariusArrowEnabled!==true
-      ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
-      return {ok:false,reason:'sa_sim_operator_or_signal_disabled'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent)return {ok:false,reason:'sa_sim_parent_missing'};
-    // The stop-time websocket quote is a wake hint, not a BUY price limit.
-    // Obtain one current verified REST market+book snapshot, then size and
-    // compute the executable limit from THAT SAME snapshot. This also allows
-    // a 38c losing exit to recover at a fresh 39c executable ask.
-    const verified=await prepareSagittariusArrowExecutionBook({market:this.market,watch,
-      stakeCents:Number(s.sagittariusArrowStakeCents||0)});
-    if(!verified.ok){
-      this.sagittariusArrowLastDenial={atMs:Date.now(),watchId:watch.id,ticker:watch.ticker,reason:verified.reason};
-      return verified;
-    }
-    const {quote,plan}=verified;
-    const occupied=await this.db.pool.query('select seat from sag_sagittarius_arrow_seats_v1 where watch_id=$1 order by seat',[watch.id]);
-    // Use the existing canonical seat-ledger integrity proof before choosing a
-    // free seat. An invalid/duplicate seat cannot be silently ignored while
-    // a parent recovery group is executing. Valid per-parent Multiply is intact.
-    const seatPlan=sagittariusArrowSeatPlan(watch,occupied.rows);
-    if(!seatPlan.ok)return {ok:false,reason:seatPlan.reason};
-    const seat=seatPlan.free[0];
-    if(!seat)return {ok:false,reason:'sa_sim_multiply_fully_consumed'};
-    if(live){
-      const pending=await this.db.pool.query(`select 1 from sag_sagittarius_arrow_seats_v1 x
-        join sag_entries e on e.id=x.position_id where x.watch_id=$1
-        and x.status='RECONCILE' and e.status='entry_pending' limit 1`,[watch.id]);
-      if(pending.rowCount)return {ok:false,reason:'sa_live_previous_order_unreconciled'};
-    }
-    // SIM must not reuse the same visible best-ask liquidity for every Multiply
-    // seat. Pool all positions already consumed by this parent recovery group,
-    // including closed seats, against a fresh full-depth book at the entry limit.
-    const priorVolume=await this.db.pool.query(`select coalesce(sum(e.count),0)::double precision as contracts
-      from sag_sagittarius_arrow_seats_v1 x join sag_entries e on e.id=x.position_id
-      where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
-    const previouslyConsumed=Number(priorVolume.rows?.[0]?.contracts||0);
-    const depth=sagittariusArrowAskDepth(plan.executionEvidence?.book,Number(quote.yesAsk));
-    const plannedAvailable=Number(plan.verifiedAvailableAtLimitCount);
-    if(!depth.ok||!Number.isSafeInteger(plannedAvailable)||plannedAvailable!==depth.count
-      ||!Number.isFinite(previouslyConsumed)||previouslyConsumed<0
-      ||(!live&&!Number.isSafeInteger(previouslyConsumed))
-      ||depth.count<(live?0:previouslyConsumed)+Number(plan.count||0))
-      return {ok:false,reason:'sa_sim_cumulative_executable_depth_insufficient',
-        depthReason:!depth.ok?depth.reason:plannedAvailable!==depth.count
-          ?'sa_book_changed_after_snapshot':'sa_available_whole_contracts_exhausted',
-        availableAtLimitCount:depth.count,plannedAvailableAtLimitCount:plannedAvailable,
-        previouslyConsumedCount:previouslyConsumed,requestedCount:Number(plan.count||0)};
-    plan.existingGroupQuantity=previouslyConsumed;
-    plan.availableAtLimitCount=depth.count;
-    const current=()=>{const c=this.settings;
-      return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
-        &&c?.sagittariusArrowEnabled===true&&String(c.systemName)===String(s.systemName)
-        &&String(c.ownerId)===String(s.ownerId)
-        &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
-        &&JSON.stringify(['sagittariusArrowMultiply','sagittariusArrowStakeCents','sagittariusArrowMinEntryCents',
-          'sagittariusArrowMaxEntryCents','sagittariusArrowMinCrashCents','sagittariusArrowMinReboundCents',
-          'sagittariusArrowMinUpwardTicks','sagittariusArrowObservationMinutes','sagittariusArrowLinkEnabled',
-          'sagittariusArrowParentEntryRiseCents','sagittariusArrowAuroraDamageControlPercent',
-          'sagittariusArrowMinProfitNetPerOriginalContractCents','sagittariusArrowAthenaX1Enabled',
-          'sagittariusArrowMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>c[k]))===
-          JSON.stringify(['sagittariusArrowMultiply','sagittariusArrowStakeCents','sagittariusArrowMinEntryCents',
-          'sagittariusArrowMaxEntryCents','sagittariusArrowMinCrashCents','sagittariusArrowMinReboundCents',
-          'sagittariusArrowMinUpwardTicks','sagittariusArrowObservationMinutes','sagittariusArrowLinkEnabled',
-          'sagittariusArrowParentEntryRiseCents','sagittariusArrowAuroraDamageControlPercent',
-          'sagittariusArrowMinProfitNetPerOriginalContractCents','sagittariusArrowAthenaX1Enabled',
-          'sagittariusArrowMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>s[k]));};
-    if(!current())return {ok:false,reason:'sa_sim_card_changed_during_book_refresh'};
-    const clientOrderId=live?this.kalshi?.buildClientOrderId?.(s.ownerId,
-      'SA1-'+watch.id+'-'+seat+'-TRY-'+Number(watch.retryAttempt??0),'entry'):null;
-    const planned=createSagittariusArrowCapitalEntry({watch,parent,quote,plan,settings:s,seat,clientOrderId});
-    if(!planned.ok)return planned;
-    if(live)planned.entry.entryConfig.sagittariusArrowOperatorRevision=safetyRevision;
-    if(live){
-      if(typeof this.kalshi?.ensureExchangeBalance!=='function')return {ok:false,reason:'sa_live_exchange_preflight_missing'};
-      const funding=liveRecoveryCollateralRequirement(planned.entry);
-      if(!funding.ok)return {ok:false,reason:funding.reason};
-      const balance=await this.kalshi.ensureExchangeBalance({ticker:watch.ticker,
-        exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
-      if(!balance?.ok)return {ok:false,reason:balance?.reason||'sa_live_exchange_preflight_denied'};
-      planned.entry.entryConfig.brokerRouting={version:'SA1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
-      const witness=createQ17LiveCashWitness(planned.entry,balance);
-      if(!witness.ok)return {ok:false,reason:witness.reason};
-      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
-    }
-    // Enter the SIM reset gate immediately before the PostgreSQL financial
-    // transaction. An in-progress reset rejects admission; an admitted
-    // transaction completes or rolls back BEFORE reset can archive records.
-    const releaseSimulation=live?()=>{}:this.simulationMutationGate?.enter?.(simulationToken);
-    if(!releaseSimulation)return {ok:false,reason:'sa_sim_reset_in_progress'};
-    let brokerUnlock=null;
-    try{
-      if(live){
-        if(typeof s.ownerId!=='string'||!s.ownerId.trim()||s.ownerId!==s.ownerId.trim())
-          return {ok:false,reason:'sa_live_broker_mutation_owner_scope_missing'};
-        // Broker inventory is shared by owner across system instances.
-        brokerUnlock=await this.db.acquireHunterTickerLock(s.ownerId,`broker:${watch.ticker}`);
-        if(!brokerUnlock)return {ok:false,reason:'sa_live_broker_mutation_lock_busy'};
-      }
-      const saved=live?await this.db.insertSagittariusArrowLiveEntry(planned.entry,{quote,isCurrent:current})
-        :await this.db.insertSagittariusArrowSimulationEntry(planned.entry,{quote,isCurrent:current});
-      if(live){
-        const receipt=await dispatchSagittariusArrowLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
-          readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
-          audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
-        return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
-      }
-      try{this.strategy.onHunterOpened?.(planned.entry);}catch{}
-      try{this.profitGuard?.registerInfinityBreakFastWake?.(planned.entry,s);}catch{}
-      await this.recordSagittariusArrowDecision('sa1_sim_capital_entry_committed',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),id:planned.entry.id,
-        watchId:watch.id,parentId:parent.id,seat,ticker:watch.ticker,
-        count:planned.entry.count,entryPriceCents:planned.entry.entryPriceCents,
-        auroraDangerPriceCents:planned.entry.stopPriceCents});
-      return {ok:true,id:saved.entry.id,seat,count:saved.entry.count};
-    }catch(error){
-      const reason=String(error?.message||error);
-      await this.recordSagittariusArrowDecision('sa1_sim_seat_admission_blocked',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),
-        watchId:watch.id,parentId:parent.id,ticker:watch.ticker,seat,reason});
-      return {ok:false,reason};
-    }finally{
-      if(brokerUnlock)try{await brokerUnlock();}catch{}
-      releaseSimulation();
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** SA1-SIM3: each eligible recovery group can consume all remaining
@@ -4871,110 +3532,9 @@ export class SagittariusEngine {
    * seats and never count a failed/unknown broker outcome as a fill.
    */
   async observeSagittariusArrowWatches({priorityWatchIds=[],priorityTickers=[]}={}){
-    if(this.settings?.sagittariusArrowLinkEnabled===true)
-      void this.db.shadowStore?.settleOpenParentsWithClosedArrow?.(this.settings).catch(()=>{});
-    if(!this.running||this.shuttingDown||this.settings?.sagittariusArrowEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const s=this.settings;
-    const page=await this.db.sagittariusArrowObservationPage(s,{limit:64,priorityWatchIds,priorityTickers});
-    const prioritized=new Set(priorityWatchIds.map(String));
-    const priorityMarkets=new Set(priorityTickers.map(String));
-    let advanced=0,ready=0,unavailable=0,simOpened=0,simBlocked=0,simPartial=0;
-    let directRefreshes=0;
-    const refreshedThisPage=new Map();
-    for(const watch of page){
-      if(!this.running||this.shuttingDown||this.settings?.engineActive!==true)break;
-      if(watch.ticker && !this.sagittariusArrowPriorityTickers.has(watch.ticker)){
-        this.sagittariusArrowPriorityTickers.add(watch.ticker);
-        const wanted=new Set(this.market?.wanted||[]);wanted.add(watch.ticker);
-        this.market?.setWanted?.([...wanted]);
-      }
-      let q=this.market?.getQuote?.(watch.ticker);
-      const age=Date.now()-Number(q?.quoteAtMs||0);
-      const maxAge=5000; // recovery observation; admission keeps operator book age
-      const needsFresh=!q||!Number.isFinite(age)||age>maxAge
-        ||Number(q.quoteAtMs)<Number(watch.armedAtMs)
-        ||q.bookInvalid===true||q.status!=='active';
-      // Recovery WATCHING state must not depend on a prior scanner retaining
-      // the ticker in RAM. Bound REST refreshes and coalesce by exact ticker;
-      // stale/missing quotes NEVER become fabricated fills or signal evidence.
-      if(needsFresh){
-        const ticker=String(watch.ticker);
-        if(refreshedThisPage.has(ticker))q=refreshedThisPage.get(ticker)||q;
-        else if(directRefreshes<16 && Date.now()-Number(this.sagittariusArrowLastDirectRefreshMs.get(ticker)||0)>=2000){
-          directRefreshes++;
-          this.sagittariusArrowLastDirectRefreshMs.set(ticker,Date.now());
-          while(this.sagittariusArrowLastDirectRefreshMs.size>256)
-            this.sagittariusArrowLastDirectRefreshMs.delete(this.sagittariusArrowLastDirectRefreshMs.keys().next().value);
-          const fresh=typeof this.market?.refreshTickerVerified==='function'
-            ?await this.market.refreshTickerVerified(ticker).catch(()=>null)
-            :typeof this.market?.refreshTicker==='function'
-              ?{quote:await this.market.refreshTicker(ticker).catch(()=>null)}:null;
-          const checked=fresh?.marketFresh===false||fresh?.bookFresh===false?null:fresh?.quote||null;
-          refreshedThisPage.set(ticker,checked);
-          if(checked)q=checked;
-        }
-      }
-      if(!q){
-        unavailable++;
-        await this.recordSagittariusArrowDecision('sa1_quote_waiting',{watchId:watch.id,parentId:watch.parentEntryId,
-          ticker:watch.ticker,reason:'sa1_quote_missing',mode:watch.mode,ownerId:watch.ownerId},30000);
-        continue;
-      }
-      const result=await this.db.sagittariusArrowObserve(watch.id,stampLiveEpoch(q,this.market?.quoteEpoch));
-      if(result?.changed){
-        advanced++;
-        await this.recordSagittariusArrowDecision(result.signalQualified?'sa1_watch_qualified':'sa1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,mode:watch.mode,
-            ownerId:watch.ownerId,reason:result.reason,quoteAtMs:q.quoteAtMs,
-            bidCents:q.yesBid,askCents:q.yesAsk,watchRevision:result.revision},
-          result.signalQualified?0:15000);
-      }else if(result?.reason&&result.reason!=='sa1_duplicate_or_out_of_order_quote'){
-        await this.recordSagittariusArrowDecision('sa1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:result.reason},30000);
-      }
-      // An already-qualified durable watch remains eligible after restart or
-      // interrupted admission even when the cache has no new quote revision.
-      // The transactional entry revalidates on a new independently fresh book.
-      if(result?.ok!==true||result?.watch?.status!=='WATCHING'||result.watch.qualified!==true)continue;
-      ready++;
-      if(!['SIMULATION','LIVE'].includes(s.mode))continue;
-      const batch=await runSagittariusArrowSequentialSeats(result.watch,{
-        isCurrent:()=>this.running&&!this.shuttingDown&&this.settings?.engineActive===true
-          &&this.settings?.sagittariusArrowEnabled===true&&this.settings?.mode===s.mode
-          &&String(this.settings.systemName)===String(s.systemName)
-          &&String(this.settings.ownerId)===String(s.ownerId)
-          &&Number(this.settings.resetTimestampMs||0)===Number(s.resetTimestampMs||0),
-        attempt:()=>this.executeSagittariusArrowCapitalSeat(result.watch,q),
-      });
-      simOpened+=batch.opened;
-      if(batch.pending){
-        // A pending/uncertain broker order is not a failed admission. Never
-        // mislabel it as denied; retain the distinct reconciliation obligation.
-        await this.recordSagittariusArrowDecision('sa1_live_pending_reconciliation',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats});
-      }else if(batch.blocked){
-        simBlocked++;
-        await this.recordSagittariusArrowDecision('sa1_capital_denied',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats,
-            ...(batch.denialEvidence||{})},15000);
-      }else if(batch.opened>0){
-        await this.recordSagittariusArrowDecision('sa1_seat_executed',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,seatsOpened:batch.opened,
-            maximumSeats:batch.maximumSeats});
-      }
-      if(batch.opened>0&&batch.opened<batch.maximumSeats)simPartial++;
-    }
-    this.sagittariusArrowObserverStatus={version:'SA1-OBSERVATION-SIM3',atMs:Date.now(),
-      scanned:page.length,advanced,qualifiedSignals:ready,quotesUnavailable:unavailable,
-      simOpened,simBlocked,simPartial,directRefreshes,capitalAdmission:s.mode==='SIMULATION'?'SA_SIM_CAPITAL_ADMISSION':'SA_LIVE_PENDING_INTENT_PROTECTED_DISPATCH' };
-    return this.sagittariusArrowObserverStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
 
@@ -5012,28 +3572,9 @@ export class SagittariusEngine {
       queueMicrotask(()=>{void this.runScarletNeedleCapitalObserver({immediate:true});});
   }
   async runScarletNeedleCapitalObserver({immediate=false}={}){
-    if(this.scarletNeedleCapitalObserverInFlight)return;
-    const ids=immediate?[...this.scarletNeedleCapitalWakeIds].slice(0,16):[];
-    const tickers=immediate?[...this.scarletNeedleCapitalWakeTickers].slice(0,8):[];
-    if(immediate&&!ids.length&&!tickers.length)return;
-    this.scarletNeedleCapitalObserverInFlight=true;
-    try{
-      await this.observeScarletNeedleCapitalWatches({priorityWatchIds:ids,priorityTickers:tickers});
-      this.scarletNeedleCapitalLastObserverSuccessMs=Date.now();
-      for(const id of ids)this.scarletNeedleCapitalWakeIds.delete(id);
-      for(const ticker of tickers)this.scarletNeedleCapitalWakeTickers.delete(ticker);
-    }catch(error){
-      // No unbounded immediate error loop. The periodic scheduler and durable
-      // watch table remain the recovery mechanism after a transient failure.
-      for(const id of ids)this.scarletNeedleCapitalWakeIds.delete(id);
-      for(const ticker of tickers)this.scarletNeedleCapitalWakeTickers.delete(ticker);
-      this.scarletNeedleCapitalObserverStatus={atMs:Date.now(),error:String(error?.message||error),capitalAdmission:'DENIED'};
-      this.queueRuntimeDiagnostic(()=>this.recordScarletNeedleCapitalDecision('sn2_observer_failed',{reason:String(error?.message||error)},5000));
-    }finally{
-      this.scarletNeedleCapitalObserverInFlight=false;
-      if(this.scarletNeedleCapitalWakeIds.size||this.scarletNeedleCapitalWakeTickers.size)
-        setImmediate(()=>{void this.runScarletNeedleCapitalObserver({immediate:true});});
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** Restart recovery for a Lightning close that committed before its GH callback.
@@ -5041,46 +3582,9 @@ export class SagittariusEngine {
    * Restarting the process merely starts the idempotent scan again.
    */
   async replayScarletNeedleCapitalMissedParents(){
-    if(!this.running||this.shuttingDown||this.settings?.scarletNeedleCapitalEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const settings=this.settings,cursor=this.scarletNeedleCapitalReplayCursor||null;
-    const scopeKey=[settings.systemName,settings.ownerId,settings.mode,settings.resetTimestampMs].map(String).join('|');
-    const before=cursor?.scopeKey===scopeKey?cursor:null;
-    const page=await this.db.scarletNeedleCapitalMissingParentPage(settings,{limit:8,
-      beforeClosedMs:before?.closedAtMs??Number.MAX_SAFE_INTEGER,beforeId:before?.id??'\uffff'});
-    let created=0,rejected=0,failed=0,lastFailure=null;
-    for(const p of page){
-      // A malformed legacy parent, transient database failure, or competing
-      // process must not poison the entire eight-parent replay page. Continue
-      // in durable keyset order and allow the next sweep to retry failures.
-      try{
-        const result=await this.db.armScarletNeedleCapitalWatchFromClosedSagittariusArrow(p.id);
-        if(result?.ok){
-          if(result.status==='WATCHING_CREATED')created++;
-          if(result.status==='WATCHING_CREATED'||result.status==='WATCH_ALREADY_PRESENT'){
-            this.scarletNeedleCapitalPriorityTickers.add(String(p.ticker||''));
-            this.queueScarletNeedleCapitalWake({watchId:result.watchId,ticker:p.ticker});
-          }
-        }else{
-          rejected++;
-          await this.recordScarletNeedleCapitalDecision('sn2_parent_denied',{parentId:p.id,ticker:p.ticker,
-            systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,
-            resetEpoch:settings.resetTimestampMs||0,reason:result?.reason||'unknown',source:'replay'},30000);
-        }
-      }catch(error){
-        failed++;lastFailure=String(error?.message||error).slice(0,240);
-        await this.recordScarletNeedleCapitalDecision('sn2_parent_arm_failed',{parentId:p.id,
-          ticker:p.ticker,systemName:settings.systemName,ownerId:settings.ownerId,
-          mode:settings.mode,resetEpoch:settings.resetTimestampMs||0,
-          reason:lastFailure,source:'replay'},30000);
-      }
-    }
-    const last=page[page.length-1];
-    this.scarletNeedleCapitalReplayCursor=last&&page.length===8?{scopeKey,closedAtMs:last.closedAtMs,id:last.id}:null;
-    this.scarletNeedleCapitalReplayStatus={version:'SN2-ROOT1-RESILIENT-REPLAY',atMs:Date.now(),checked:page.length,
-      created,rejected,failed,lastFailure,more:!!this.scarletNeedleCapitalReplayCursor,
-      capitalAdmission:'RECOVERY_REPLAY_ONLY'};
-    return this.scarletNeedleCapitalReplayStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** SN2 SIM-owned fill or LIVE durable pending intent per independently
@@ -5088,145 +3592,9 @@ export class SagittariusEngine {
    * Financial exits and broker reconciliation never depend on that entry gate.
    */
   async executeScarletNeedleCapitalCapitalSeat(watch,priorQuote){
-    const s=structuredClone(this.settings||{});
-    const safetyRevision=this.runtimeSettingsSafetyRevision||0;
-    // SIM reset must drain GH capital mutations exactly as it drains every
-    // other financial mutation. Capture the reset token BEFORE the REST await.
-    const live=s.mode==='LIVE';
-    // A tested code path is not evidence of a native PostgreSQL / Railway
-    // release. Keep unverified real-money GH BUYs OFF by default. This gate
-    // never applies to existing financial protection, reconciliation or exits.
-    const simulationToken=live?null:this.simulationMutationGate?.capture?.();
-    if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
-      return {ok:false,reason:'sn_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.scarletNeedleCapitalEnabled!==true
-      ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
-      return {ok:false,reason:'sn_sim_operator_or_signal_disabled'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent)return {ok:false,reason:'sn_sim_parent_missing'};
-    // The stop-time websocket quote is a wake hint, not a BUY price limit.
-    // Obtain one current verified REST market+book snapshot, then size and
-    // compute the executable limit from THAT SAME snapshot. This also allows
-    // a 38c losing exit to recover at a fresh 39c executable ask.
-    const verified=await prepareScarletNeedleCapitalExecutionBook({market:this.market,watch,
-      stakeCents:Number(s.scarletNeedleCapitalStakeCents||0),maxAgeMs:s.infinityBreakMaximumBookAgeMs});
-    if(!verified.ok)return verified;
-    const {quote,plan}=verified;
-    const occupied=await this.db.pool.query('select seat from sag_scarlet_needle_recovery_seats_v1 where watch_id=$1 order by seat',[watch.id]);
-    // Use the existing canonical seat-ledger integrity proof before choosing a
-    // free seat. An invalid/duplicate seat cannot be silently ignored while
-    // a parent recovery group is executing. Valid per-parent Multiply is intact.
-    const seatPlan=scarletNeedleCapitalSeatPlan(watch,occupied.rows);
-    if(!seatPlan.ok)return {ok:false,reason:seatPlan.reason};
-    const seat=seatPlan.free[0];
-    if(!seat)return {ok:false,reason:'sn_sim_multiply_fully_consumed'};
-    if(live){
-      const pending=await this.db.pool.query(`select 1 from sag_scarlet_needle_recovery_seats_v1 x
-        join sag_entries e on e.id=x.position_id where x.watch_id=$1
-        and x.status='RECONCILE' and e.status='entry_pending' limit 1`,[watch.id]);
-      if(pending.rowCount)return {ok:false,reason:'sn_live_previous_order_unreconciled'};
-    }
-    // SIM must not reuse the same visible best-ask liquidity for every Multiply
-    // seat. Pool all positions already consumed by this parent recovery group,
-    // including closed seats, against a fresh full-depth book at the entry limit.
-    const priorVolume=await this.db.pool.query(`select coalesce(sum(e.count),0)::double precision as contracts
-      from sag_scarlet_needle_recovery_seats_v1 x join sag_entries e on e.id=x.position_id
-      where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
-    const previouslyConsumed=Number(priorVolume.rows?.[0]?.contracts||0);
-    const depth=scarletNeedleCapitalAskDepth(plan.executionEvidence?.book,Number(quote.yesAsk));
-    const plannedAvailable=Number(plan.verifiedAvailableAtLimitCount);
-    if(!depth.ok||!Number.isSafeInteger(plannedAvailable)||plannedAvailable!==depth.count
-      ||!Number.isFinite(previouslyConsumed)||previouslyConsumed<0
-      ||(!live&&!Number.isSafeInteger(previouslyConsumed))
-      ||depth.count<(live?0:previouslyConsumed)+Number(plan.count||0))
-      return {ok:false,reason:'sn_sim_cumulative_executable_depth_insufficient',
-        depthReason:!depth.ok?depth.reason:plannedAvailable!==depth.count
-          ?'sn_book_changed_after_snapshot':'sn_available_whole_contracts_exhausted',
-        availableAtLimitCount:depth.count,plannedAvailableAtLimitCount:plannedAvailable,
-        previouslyConsumedCount:previouslyConsumed,requestedCount:Number(plan.count||0)};
-    plan.existingGroupQuantity=previouslyConsumed;
-    plan.availableAtLimitCount=depth.count;
-    const current=()=>{const c=this.settings;
-      return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
-        &&c?.scarletNeedleCapitalEnabled===true&&String(c.systemName)===String(s.systemName)
-        &&String(c.ownerId)===String(s.ownerId)
-        &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
-        &&JSON.stringify(['scarletNeedleCapitalMultiply','scarletNeedleCapitalStakeCents','scarletNeedleCapitalMinEntryCents',
-          'scarletNeedleCapitalMaxEntryCents','scarletNeedleCapitalMinCrashCents','scarletNeedleCapitalMinReboundCents',
-          'scarletNeedleCapitalMinUpwardTicks','scarletNeedleCapitalObservationMinutes','scarletNeedleCapitalLinkEnabled',
-          'scarletNeedleCapitalParentEntryRiseCents','scarletNeedleCapitalAuroraDamageControlPercent',
-          'scarletNeedleCapitalMinProfitNetPerOriginalContractCents','scarletNeedleCapitalAthenaX1Enabled',
-          'scarletNeedleCapitalMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>c[k]))===
-          JSON.stringify(['scarletNeedleCapitalMultiply','scarletNeedleCapitalStakeCents','scarletNeedleCapitalMinEntryCents',
-          'scarletNeedleCapitalMaxEntryCents','scarletNeedleCapitalMinCrashCents','scarletNeedleCapitalMinReboundCents',
-          'scarletNeedleCapitalMinUpwardTicks','scarletNeedleCapitalObservationMinutes','scarletNeedleCapitalLinkEnabled',
-          'scarletNeedleCapitalParentEntryRiseCents','scarletNeedleCapitalAuroraDamageControlPercent',
-          'scarletNeedleCapitalMinProfitNetPerOriginalContractCents','scarletNeedleCapitalAthenaX1Enabled',
-          'scarletNeedleCapitalMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>s[k]));};
-    if(!current())return {ok:false,reason:'sn_sim_card_changed_during_book_refresh'};
-    const clientOrderId=live?this.kalshi?.buildClientOrderId?.(s.ownerId,
-      'SN2-'+watch.id+'-'+seat,'entry'):null;
-    const planned=createScarletNeedleCapitalCapitalEntry({watch,parent,quote,plan,settings:s,seat,clientOrderId});
-    if(!planned.ok)return planned;
-    if(live)planned.entry.entryConfig.scarletNeedleCapitalOperatorRevision=safetyRevision;
-    if(live){
-      if(typeof this.kalshi?.ensureExchangeBalance!=='function')return {ok:false,reason:'sn_live_exchange_preflight_missing'};
-      const funding=liveRecoveryCollateralRequirement(planned.entry);
-      if(!funding.ok)return {ok:false,reason:funding.reason};
-      const balance=await this.kalshi.ensureExchangeBalance({ticker:watch.ticker,
-        exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
-      if(!balance?.ok)return {ok:false,reason:balance?.reason||'sn_live_exchange_preflight_denied'};
-      planned.entry.entryConfig.brokerRouting={version:'SN2-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
-      const witness=createQ17LiveCashWitness(planned.entry,balance);
-      if(!witness.ok)return {ok:false,reason:witness.reason};
-      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
-    }
-    // Enter the SIM reset gate immediately before the PostgreSQL financial
-    // transaction. An in-progress reset rejects admission; an admitted
-    // transaction completes or rolls back BEFORE reset can archive records.
-    const releaseSimulation=live?()=>{}:this.simulationMutationGate?.enter?.(simulationToken);
-    if(!releaseSimulation)return {ok:false,reason:'sn_sim_reset_in_progress'};
-    let brokerUnlock=null;
-    try{
-      if(live){
-        if(typeof s.ownerId!=='string'||!s.ownerId.trim()||s.ownerId!==s.ownerId.trim())
-          return {ok:false,reason:'sn_live_broker_mutation_owner_scope_missing'};
-        // Broker inventory is shared by owner across system instances.
-        brokerUnlock=await this.db.acquireHunterTickerLock(s.ownerId,`broker:${watch.ticker}`);
-        if(!brokerUnlock)return {ok:false,reason:'sn_live_broker_mutation_lock_busy'};
-      }
-      const saved=live?await this.db.insertScarletNeedleCapitalLiveEntry(planned.entry,{quote,isCurrent:current})
-        :await this.db.insertScarletNeedleCapitalSimulationEntry(planned.entry,{quote,isCurrent:current});
-      if(live){
-        const receipt=await dispatchScarletNeedleCapitalLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
-          readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
-          audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
-        return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
-      }
-      try{this.strategy.onHunterOpened?.(planned.entry);}catch{}
-      try{this.profitGuard?.registerInfinityBreakFastWake?.(planned.entry,s);}catch{}
-      await this.recordScarletNeedleCapitalDecision('sn2_sim_capital_entry_committed',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),id:planned.entry.id,
-        watchId:watch.id,parentId:parent.id,seat,ticker:watch.ticker,
-        count:planned.entry.count,entryPriceCents:planned.entry.entryPriceCents,
-        auroraDangerPriceCents:planned.entry.stopPriceCents});
-      return {ok:true,id:saved.entry.id,seat,count:saved.entry.count};
-    }catch(error){
-      const reason=String(error?.message||error);
-      await this.recordScarletNeedleCapitalDecision('sn2_sim_seat_admission_blocked',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),
-        watchId:watch.id,parentId:parent.id,ticker:watch.ticker,seat,reason});
-      return {ok:false,reason};
-    }finally{
-      if(brokerUnlock)try{await brokerUnlock();}catch{}
-      releaseSimulation();
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** SN2-SIM3: each eligible recovery group can consume all remaining
@@ -5236,108 +3604,9 @@ export class SagittariusEngine {
    * seats and never count a failed/unknown broker outcome as a fill.
    */
   async observeScarletNeedleCapitalWatches({priorityWatchIds=[],priorityTickers=[]}={}){
-    if(!this.running||this.shuttingDown||this.settings?.scarletNeedleCapitalEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const s=this.settings;
-    const page=await this.db.scarletNeedleCapitalObservationPage(s,{limit:16,priorityWatchIds,priorityTickers});
-    const prioritized=new Set(priorityWatchIds.map(String));
-    const priorityMarkets=new Set(priorityTickers.map(String));
-    let advanced=0,ready=0,unavailable=0,simOpened=0,simBlocked=0,simPartial=0;
-    let directRefreshes=0;
-    const refreshedThisPage=new Map();
-    for(const watch of page){
-      if(!this.running||this.shuttingDown||this.settings?.engineActive!==true)break;
-      if(watch.ticker && !this.scarletNeedleCapitalPriorityTickers.has(watch.ticker)){
-        this.scarletNeedleCapitalPriorityTickers.add(watch.ticker);
-        const wanted=new Set(this.market?.wanted||[]);wanted.add(watch.ticker);
-        this.market?.setWanted?.([...wanted]);
-      }
-      let q=this.market?.getQuote?.(watch.ticker);
-      const age=Date.now()-Number(q?.quoteAtMs||0);
-      const maxAge=5000; // recovery observation; admission keeps operator book age
-      const needsFresh=!q||!Number.isFinite(age)||age>maxAge
-        ||Number(q.quoteAtMs)<Number(watch.armedAtMs)
-        ||q.bookInvalid===true||q.status!=='active';
-      // Recovery WATCHING state must not depend on a prior scanner retaining
-      // the ticker in RAM. Bound REST refreshes and coalesce by exact ticker;
-      // stale/missing quotes NEVER become fabricated fills or signal evidence.
-      if(needsFresh){
-        const ticker=String(watch.ticker);
-        if(refreshedThisPage.has(ticker))q=refreshedThisPage.get(ticker)||q;
-        else if(directRefreshes<4 && Date.now()-Number(this.scarletNeedleCapitalLastDirectRefreshMs.get(ticker)||0)>=2000){
-          directRefreshes++;
-          this.scarletNeedleCapitalLastDirectRefreshMs.set(ticker,Date.now());
-          while(this.scarletNeedleCapitalLastDirectRefreshMs.size>256)
-            this.scarletNeedleCapitalLastDirectRefreshMs.delete(this.scarletNeedleCapitalLastDirectRefreshMs.keys().next().value);
-          const fresh=typeof this.market?.refreshTickerVerified==='function'
-            ?await this.market.refreshTickerVerified(ticker).catch(()=>null)
-            :typeof this.market?.refreshTicker==='function'
-              ?{quote:await this.market.refreshTicker(ticker).catch(()=>null)}:null;
-          const checked=fresh?.marketFresh===false||fresh?.bookFresh===false?null:fresh?.quote||null;
-          refreshedThisPage.set(ticker,checked);
-          if(checked)q=checked;
-        }
-      }
-      if(!q){
-        unavailable++;
-        await this.recordScarletNeedleCapitalDecision('sn2_quote_waiting',{watchId:watch.id,parentId:watch.parentEntryId,
-          ticker:watch.ticker,reason:'sn2_quote_missing',mode:watch.mode,ownerId:watch.ownerId},30000);
-        continue;
-      }
-      const result=await this.db.scarletNeedleCapitalObserve(watch.id,stampLiveEpoch(q,this.market?.quoteEpoch));
-      if(result?.changed){
-        advanced++;
-        await this.recordScarletNeedleCapitalDecision(result.signalQualified?'sn2_watch_qualified':'sn2_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,mode:watch.mode,
-            ownerId:watch.ownerId,reason:result.reason,quoteAtMs:q.quoteAtMs,
-            bidCents:q.yesBid,askCents:q.yesAsk,watchRevision:result.revision},
-          result.signalQualified?0:15000);
-      }else if(result?.reason&&result.reason!=='sn2_duplicate_or_out_of_order_quote'){
-        await this.recordScarletNeedleCapitalDecision('sn2_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:result.reason},30000);
-      }
-      // An already-qualified durable watch remains eligible after restart or
-      // interrupted admission even when the cache has no new quote revision.
-      // The transactional entry revalidates on a new independently fresh book.
-      if(result?.ok!==true||result?.watch?.status!=='WATCHING'||result.watch.qualified!==true)continue;
-      ready++;
-      if(!['SIMULATION','LIVE'].includes(s.mode))continue;
-      const batch=await runScarletNeedleCapitalSequentialSeats(result.watch,{
-        isCurrent:()=>this.running&&!this.shuttingDown&&this.settings?.engineActive===true
-          &&this.settings?.scarletNeedleCapitalEnabled===true&&this.settings?.mode===s.mode
-          &&String(this.settings.systemName)===String(s.systemName)
-          &&String(this.settings.ownerId)===String(s.ownerId)
-          &&Number(this.settings.resetTimestampMs||0)===Number(s.resetTimestampMs||0),
-        attempt:()=>this.executeScarletNeedleCapitalCapitalSeat(result.watch,q),
-      });
-      simOpened+=batch.opened;
-      if(batch.pending){
-        // A pending/uncertain broker order is not a failed admission. Never
-        // mislabel it as denied; retain the distinct reconciliation obligation.
-        await this.recordScarletNeedleCapitalDecision('sn2_live_pending_reconciliation',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats});
-      }else if(batch.blocked){
-        simBlocked++;
-        await this.recordScarletNeedleCapitalDecision('sn2_capital_denied',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats,
-            ...(batch.denialEvidence||{})},15000);
-      }else if(batch.opened>0){
-        await this.recordScarletNeedleCapitalDecision('sn2_seat_executed',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,seatsOpened:batch.opened,
-            maximumSeats:batch.maximumSeats});
-      }
-      if(batch.opened>0&&batch.opened<batch.maximumSeats)simPartial++;
-    }
-    this.scarletNeedleCapitalObserverStatus={version:'SN2-OBSERVATION-SIM3',atMs:Date.now(),
-      scanned:page.length,advanced,qualifiedSignals:ready,quotesUnavailable:unavailable,
-      simOpened,simBlocked,simPartial,directRefreshes,capitalAdmission:s.mode==='SIMULATION'?'SN_SIM_CAPITAL_ADMISSION':'SN_LIVE_PENDING_INTENT_PROTECTED_DISPATCH' };
-    return this.scarletNeedleCapitalObserverStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
 
@@ -5375,28 +3644,9 @@ export class SagittariusEngine {
       queueMicrotask(()=>{void this.runPegasusRyuSeiKenCapitalObserver({immediate:true});});
   }
   async runPegasusRyuSeiKenCapitalObserver({immediate=false}={}){
-    if(this.pegasusRyuSeiKenCapitalObserverInFlight)return;
-    const ids=immediate?[...this.pegasusRyuSeiKenCapitalWakeIds].slice(0,16):[];
-    const tickers=immediate?[...this.pegasusRyuSeiKenCapitalWakeTickers].slice(0,8):[];
-    if(immediate&&!ids.length&&!tickers.length)return;
-    this.pegasusRyuSeiKenCapitalObserverInFlight=true;
-    try{
-      await this.observePegasusRyuSeiKenCapitalWatches({priorityWatchIds:ids,priorityTickers:tickers});
-      this.pegasusRyuSeiKenCapitalLastObserverSuccessMs=Date.now();
-      for(const id of ids)this.pegasusRyuSeiKenCapitalWakeIds.delete(id);
-      for(const ticker of tickers)this.pegasusRyuSeiKenCapitalWakeTickers.delete(ticker);
-    }catch(error){
-      // No unbounded immediate error loop. The periodic scheduler and durable
-      // watch table remain the recovery mechanism after a transient failure.
-      for(const id of ids)this.pegasusRyuSeiKenCapitalWakeIds.delete(id);
-      for(const ticker of tickers)this.pegasusRyuSeiKenCapitalWakeTickers.delete(ticker);
-      this.pegasusRyuSeiKenCapitalObserverStatus={atMs:Date.now(),error:String(error?.message||error),capitalAdmission:'DENIED'};
-      this.queueRuntimeDiagnostic(()=>this.recordPegasusRyuSeiKenCapitalDecision('pr3_observer_failed',{reason:String(error?.message||error)},5000));
-    }finally{
-      this.pegasusRyuSeiKenCapitalObserverInFlight=false;
-      if(this.pegasusRyuSeiKenCapitalWakeIds.size||this.pegasusRyuSeiKenCapitalWakeTickers.size)
-        setImmediate(()=>{void this.runPegasusRyuSeiKenCapitalObserver({immediate:true});});
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** Restart recovery for a Lightning close that committed before its GH callback.
@@ -5404,46 +3654,9 @@ export class SagittariusEngine {
    * Restarting the process merely starts the idempotent scan again.
    */
   async replayPegasusRyuSeiKenCapitalMissedParents(){
-    if(!this.running||this.shuttingDown||this.settings?.pegasusRyuSeiKenCapitalEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const settings=this.settings,cursor=this.pegasusRyuSeiKenCapitalReplayCursor||null;
-    const scopeKey=[settings.systemName,settings.ownerId,settings.mode,settings.resetTimestampMs].map(String).join('|');
-    const before=cursor?.scopeKey===scopeKey?cursor:null;
-    const page=await this.db.pegasusRyuSeiKenCapitalMissingParentPage(settings,{limit:8,
-      beforeClosedMs:before?.closedAtMs??Number.MAX_SAFE_INTEGER,beforeId:before?.id??'\uffff'});
-    let created=0,rejected=0,failed=0,lastFailure=null;
-    for(const p of page){
-      // A malformed legacy parent, transient database failure, or competing
-      // process must not poison the entire eight-parent replay page. Continue
-      // in durable keyset order and allow the next sweep to retry failures.
-      try{
-        const result=await this.db.armPegasusRyuSeiKenCapitalWatchFromClosedScarletNeedleRecovery(p.id);
-        if(result?.ok){
-          if(result.status==='WATCHING_CREATED')created++;
-          if(result.status==='WATCHING_CREATED'||result.status==='WATCH_ALREADY_PRESENT'){
-            this.pegasusRyuSeiKenCapitalPriorityTickers.add(String(p.ticker||''));
-            this.queuePegasusRyuSeiKenCapitalWake({watchId:result.watchId,ticker:p.ticker});
-          }
-        }else{
-          rejected++;
-          await this.recordPegasusRyuSeiKenCapitalDecision('pr3_parent_denied',{parentId:p.id,ticker:p.ticker,
-            systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,
-            resetEpoch:settings.resetTimestampMs||0,reason:result?.reason||'unknown',source:'replay'},30000);
-        }
-      }catch(error){
-        failed++;lastFailure=String(error?.message||error).slice(0,240);
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_parent_arm_failed',{parentId:p.id,
-          ticker:p.ticker,systemName:settings.systemName,ownerId:settings.ownerId,
-          mode:settings.mode,resetEpoch:settings.resetTimestampMs||0,
-          reason:lastFailure,source:'replay'},30000);
-      }
-    }
-    const last=page[page.length-1];
-    this.pegasusRyuSeiKenCapitalReplayCursor=last&&page.length===8?{scopeKey,closedAtMs:last.closedAtMs,id:last.id}:null;
-    this.pegasusRyuSeiKenCapitalReplayStatus={version:'PR3-ROOT1-RESILIENT-REPLAY',atMs:Date.now(),checked:page.length,
-      created,rejected,failed,lastFailure,more:!!this.pegasusRyuSeiKenCapitalReplayCursor,
-      capitalAdmission:'RECOVERY_REPLAY_ONLY'};
-    return this.pegasusRyuSeiKenCapitalReplayStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** PR3 SIM-owned fill or LIVE durable pending intent per independently
@@ -5451,145 +3664,9 @@ export class SagittariusEngine {
    * Financial exits and broker reconciliation never depend on that entry gate.
    */
   async executePegasusRyuSeiKenCapitalCapitalSeat(watch,priorQuote){
-    const s=structuredClone(this.settings||{});
-    const safetyRevision=this.runtimeSettingsSafetyRevision||0;
-    // SIM reset must drain GH capital mutations exactly as it drains every
-    // other financial mutation. Capture the reset token BEFORE the REST await.
-    const live=s.mode==='LIVE';
-    // A tested code path is not evidence of a native PostgreSQL / Railway
-    // release. Keep unverified real-money GH BUYs OFF by default. This gate
-    // never applies to existing financial protection, reconciliation or exits.
-    const simulationToken=live?null:this.simulationMutationGate?.capture?.();
-    if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
-      return {ok:false,reason:'pr_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.pegasusRyuSeiKenCapitalEnabled!==true
-      ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
-      return {ok:false,reason:'pr_sim_operator_or_signal_disabled'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent)return {ok:false,reason:'pr_sim_parent_missing'};
-    // The stop-time websocket quote is a wake hint, not a BUY price limit.
-    // Obtain one current verified REST market+book snapshot, then size and
-    // compute the executable limit from THAT SAME snapshot. This also allows
-    // a 38c losing exit to recover at a fresh 39c executable ask.
-    const verified=await preparePegasusRyuSeiKenCapitalExecutionBook({market:this.market,watch,
-      stakeCents:Number(s.pegasusRyuSeiKenCapitalStakeCents||0),maxAgeMs:s.infinityBreakMaximumBookAgeMs});
-    if(!verified.ok)return verified;
-    const {quote,plan}=verified;
-    const occupied=await this.db.pool.query('select seat from sag_pegasus_ryu_sei_ken_recovery_seats_v1 where watch_id=$1 order by seat',[watch.id]);
-    // Use the existing canonical seat-ledger integrity proof before choosing a
-    // free seat. An invalid/duplicate seat cannot be silently ignored while
-    // a parent recovery group is executing. Valid per-parent Multiply is intact.
-    const seatPlan=pegasusRyuSeiKenCapitalSeatPlan(watch,occupied.rows);
-    if(!seatPlan.ok)return {ok:false,reason:seatPlan.reason};
-    const seat=seatPlan.free[0];
-    if(!seat)return {ok:false,reason:'pr_sim_multiply_fully_consumed'};
-    if(live){
-      const pending=await this.db.pool.query(`select 1 from sag_pegasus_ryu_sei_ken_recovery_seats_v1 x
-        join sag_entries e on e.id=x.position_id where x.watch_id=$1
-        and x.status='RECONCILE' and e.status='entry_pending' limit 1`,[watch.id]);
-      if(pending.rowCount)return {ok:false,reason:'pr_live_previous_order_unreconciled'};
-    }
-    // SIM must not reuse the same visible best-ask liquidity for every Multiply
-    // seat. Pool all positions already consumed by this parent recovery group,
-    // including closed seats, against a fresh full-depth book at the entry limit.
-    const priorVolume=await this.db.pool.query(`select coalesce(sum(e.count),0)::double precision as contracts
-      from sag_pegasus_ryu_sei_ken_recovery_seats_v1 x join sag_entries e on e.id=x.position_id
-      where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
-    const previouslyConsumed=Number(priorVolume.rows?.[0]?.contracts||0);
-    const depth=pegasusRyuSeiKenCapitalAskDepth(plan.executionEvidence?.book,Number(quote.yesAsk));
-    const plannedAvailable=Number(plan.verifiedAvailableAtLimitCount);
-    if(!depth.ok||!Number.isSafeInteger(plannedAvailable)||plannedAvailable!==depth.count
-      ||!Number.isFinite(previouslyConsumed)||previouslyConsumed<0
-      ||(!live&&!Number.isSafeInteger(previouslyConsumed))
-      ||depth.count<(live?0:previouslyConsumed)+Number(plan.count||0))
-      return {ok:false,reason:'pr_sim_cumulative_executable_depth_insufficient',
-        depthReason:!depth.ok?depth.reason:plannedAvailable!==depth.count
-          ?'pr_book_changed_after_snapshot':'pr_available_whole_contracts_exhausted',
-        availableAtLimitCount:depth.count,plannedAvailableAtLimitCount:plannedAvailable,
-        previouslyConsumedCount:previouslyConsumed,requestedCount:Number(plan.count||0)};
-    plan.existingGroupQuantity=previouslyConsumed;
-    plan.availableAtLimitCount=depth.count;
-    const current=()=>{const c=this.settings;
-      return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
-        &&c?.pegasusRyuSeiKenCapitalEnabled===true&&String(c.systemName)===String(s.systemName)
-        &&String(c.ownerId)===String(s.ownerId)
-        &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
-        &&JSON.stringify(['pegasusRyuSeiKenCapitalMultiply','pegasusRyuSeiKenCapitalStakeCents','pegasusRyuSeiKenCapitalMinEntryCents',
-          'pegasusRyuSeiKenCapitalMaxEntryCents','pegasusRyuSeiKenCapitalMinCrashCents','pegasusRyuSeiKenCapitalMinReboundCents',
-          'pegasusRyuSeiKenCapitalMinUpwardTicks','pegasusRyuSeiKenCapitalObservationMinutes','pegasusRyuSeiKenCapitalLinkEnabled',
-          'pegasusRyuSeiKenCapitalParentEntryRiseCents','pegasusRyuSeiKenCapitalAuroraDamageControlPercent',
-          'pegasusRyuSeiKenCapitalMinProfitNetPerOriginalContractCents','pegasusRyuSeiKenCapitalAthenaX1Enabled',
-          'pegasusRyuSeiKenCapitalMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>c[k]))===
-          JSON.stringify(['pegasusRyuSeiKenCapitalMultiply','pegasusRyuSeiKenCapitalStakeCents','pegasusRyuSeiKenCapitalMinEntryCents',
-          'pegasusRyuSeiKenCapitalMaxEntryCents','pegasusRyuSeiKenCapitalMinCrashCents','pegasusRyuSeiKenCapitalMinReboundCents',
-          'pegasusRyuSeiKenCapitalMinUpwardTicks','pegasusRyuSeiKenCapitalObservationMinutes','pegasusRyuSeiKenCapitalLinkEnabled',
-          'pegasusRyuSeiKenCapitalParentEntryRiseCents','pegasusRyuSeiKenCapitalAuroraDamageControlPercent',
-          'pegasusRyuSeiKenCapitalMinProfitNetPerOriginalContractCents','pegasusRyuSeiKenCapitalAthenaX1Enabled',
-          'pegasusRyuSeiKenCapitalMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>s[k]));};
-    if(!current())return {ok:false,reason:'pr_sim_card_changed_during_book_refresh'};
-    const clientOrderId=live?this.kalshi?.buildClientOrderId?.(s.ownerId,
-      'PR3-'+watch.id+'-'+seat,'entry'):null;
-    const planned=createPegasusRyuSeiKenCapitalCapitalEntry({watch,parent,quote,plan,settings:s,seat,clientOrderId});
-    if(!planned.ok)return planned;
-    if(live)planned.entry.entryConfig.pegasusRyuSeiKenCapitalOperatorRevision=safetyRevision;
-    if(live){
-      if(typeof this.kalshi?.ensureExchangeBalance!=='function')return {ok:false,reason:'pr_live_exchange_preflight_missing'};
-      const funding=liveRecoveryCollateralRequirement(planned.entry);
-      if(!funding.ok)return {ok:false,reason:funding.reason};
-      const balance=await this.kalshi.ensureExchangeBalance({ticker:watch.ticker,
-        exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
-      if(!balance?.ok)return {ok:false,reason:balance?.reason||'pr_live_exchange_preflight_denied'};
-      planned.entry.entryConfig.brokerRouting={version:'PR3-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
-      const witness=createQ17LiveCashWitness(planned.entry,balance);
-      if(!witness.ok)return {ok:false,reason:witness.reason};
-      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
-    }
-    // Enter the SIM reset gate immediately before the PostgreSQL financial
-    // transaction. An in-progress reset rejects admission; an admitted
-    // transaction completes or rolls back BEFORE reset can archive records.
-    const releaseSimulation=live?()=>{}:this.simulationMutationGate?.enter?.(simulationToken);
-    if(!releaseSimulation)return {ok:false,reason:'pr_sim_reset_in_progress'};
-    let brokerUnlock=null;
-    try{
-      if(live){
-        if(typeof s.ownerId!=='string'||!s.ownerId.trim()||s.ownerId!==s.ownerId.trim())
-          return {ok:false,reason:'pr_live_broker_mutation_owner_scope_missing'};
-        // Broker inventory is shared by owner across system instances.
-        brokerUnlock=await this.db.acquireHunterTickerLock(s.ownerId,`broker:${watch.ticker}`);
-        if(!brokerUnlock)return {ok:false,reason:'pr_live_broker_mutation_lock_busy'};
-      }
-      const saved=live?await this.db.insertPegasusRyuSeiKenCapitalLiveEntry(planned.entry,{quote,isCurrent:current})
-        :await this.db.insertPegasusRyuSeiKenCapitalSimulationEntry(planned.entry,{quote,isCurrent:current});
-      if(live){
-        const receipt=await dispatchPegasusRyuSeiKenCapitalLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
-          readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
-          audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
-        return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
-      }
-      try{this.strategy.onHunterOpened?.(planned.entry);}catch{}
-      try{this.profitGuard?.registerInfinityBreakFastWake?.(planned.entry,s);}catch{}
-      await this.recordPegasusRyuSeiKenCapitalDecision('pr3_sim_capital_entry_committed',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),id:planned.entry.id,
-        watchId:watch.id,parentId:parent.id,seat,ticker:watch.ticker,
-        count:planned.entry.count,entryPriceCents:planned.entry.entryPriceCents,
-        auroraDangerPriceCents:planned.entry.stopPriceCents});
-      return {ok:true,id:saved.entry.id,seat,count:saved.entry.count};
-    }catch(error){
-      const reason=String(error?.message||error);
-      await this.recordPegasusRyuSeiKenCapitalDecision('pr3_sim_seat_admission_blocked',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),
-        watchId:watch.id,parentId:parent.id,ticker:watch.ticker,seat,reason});
-      return {ok:false,reason};
-    }finally{
-      if(brokerUnlock)try{await brokerUnlock();}catch{}
-      releaseSimulation();
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** PR3-SIM3: each eligible recovery group can consume all remaining
@@ -5599,108 +3676,9 @@ export class SagittariusEngine {
    * seats and never count a failed/unknown broker outcome as a fill.
    */
   async observePegasusRyuSeiKenCapitalWatches({priorityWatchIds=[],priorityTickers=[]}={}){
-    if(!this.running||this.shuttingDown||this.settings?.pegasusRyuSeiKenCapitalEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const s=this.settings;
-    const page=await this.db.pegasusRyuSeiKenCapitalObservationPage(s,{limit:16,priorityWatchIds,priorityTickers});
-    const prioritized=new Set(priorityWatchIds.map(String));
-    const priorityMarkets=new Set(priorityTickers.map(String));
-    let advanced=0,ready=0,unavailable=0,simOpened=0,simBlocked=0,simPartial=0;
-    let directRefreshes=0;
-    const refreshedThisPage=new Map();
-    for(const watch of page){
-      if(!this.running||this.shuttingDown||this.settings?.engineActive!==true)break;
-      if(watch.ticker && !this.pegasusRyuSeiKenCapitalPriorityTickers.has(watch.ticker)){
-        this.pegasusRyuSeiKenCapitalPriorityTickers.add(watch.ticker);
-        const wanted=new Set(this.market?.wanted||[]);wanted.add(watch.ticker);
-        this.market?.setWanted?.([...wanted]);
-      }
-      let q=this.market?.getQuote?.(watch.ticker);
-      const age=Date.now()-Number(q?.quoteAtMs||0);
-      const maxAge=5000; // recovery observation; admission keeps operator book age
-      const needsFresh=!q||!Number.isFinite(age)||age>maxAge
-        ||Number(q.quoteAtMs)<Number(watch.armedAtMs)
-        ||q.bookInvalid===true||q.status!=='active';
-      // Recovery WATCHING state must not depend on a prior scanner retaining
-      // the ticker in RAM. Bound REST refreshes and coalesce by exact ticker;
-      // stale/missing quotes NEVER become fabricated fills or signal evidence.
-      if(needsFresh){
-        const ticker=String(watch.ticker);
-        if(refreshedThisPage.has(ticker))q=refreshedThisPage.get(ticker)||q;
-        else if(directRefreshes<4 && Date.now()-Number(this.pegasusRyuSeiKenCapitalLastDirectRefreshMs.get(ticker)||0)>=2000){
-          directRefreshes++;
-          this.pegasusRyuSeiKenCapitalLastDirectRefreshMs.set(ticker,Date.now());
-          while(this.pegasusRyuSeiKenCapitalLastDirectRefreshMs.size>256)
-            this.pegasusRyuSeiKenCapitalLastDirectRefreshMs.delete(this.pegasusRyuSeiKenCapitalLastDirectRefreshMs.keys().next().value);
-          const fresh=typeof this.market?.refreshTickerVerified==='function'
-            ?await this.market.refreshTickerVerified(ticker).catch(()=>null)
-            :typeof this.market?.refreshTicker==='function'
-              ?{quote:await this.market.refreshTicker(ticker).catch(()=>null)}:null;
-          const checked=fresh?.marketFresh===false||fresh?.bookFresh===false?null:fresh?.quote||null;
-          refreshedThisPage.set(ticker,checked);
-          if(checked)q=checked;
-        }
-      }
-      if(!q){
-        unavailable++;
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_quote_waiting',{watchId:watch.id,parentId:watch.parentEntryId,
-          ticker:watch.ticker,reason:'pr3_quote_missing',mode:watch.mode,ownerId:watch.ownerId},30000);
-        continue;
-      }
-      const result=await this.db.pegasusRyuSeiKenCapitalObserve(watch.id,stampLiveEpoch(q,this.market?.quoteEpoch));
-      if(result?.changed){
-        advanced++;
-        await this.recordPegasusRyuSeiKenCapitalDecision(result.signalQualified?'pr3_watch_qualified':'pr3_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,mode:watch.mode,
-            ownerId:watch.ownerId,reason:result.reason,quoteAtMs:q.quoteAtMs,
-            bidCents:q.yesBid,askCents:q.yesAsk,watchRevision:result.revision},
-          result.signalQualified?0:15000);
-      }else if(result?.reason&&result.reason!=='pr3_duplicate_or_out_of_order_quote'){
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:result.reason},30000);
-      }
-      // An already-qualified durable watch remains eligible after restart or
-      // interrupted admission even when the cache has no new quote revision.
-      // The transactional entry revalidates on a new independently fresh book.
-      if(result?.ok!==true||result?.watch?.status!=='WATCHING'||result.watch.qualified!==true)continue;
-      ready++;
-      if(!['SIMULATION','LIVE'].includes(s.mode))continue;
-      const batch=await runPegasusRyuSeiKenCapitalSequentialSeats(result.watch,{
-        isCurrent:()=>this.running&&!this.shuttingDown&&this.settings?.engineActive===true
-          &&this.settings?.pegasusRyuSeiKenCapitalEnabled===true&&this.settings?.mode===s.mode
-          &&String(this.settings.systemName)===String(s.systemName)
-          &&String(this.settings.ownerId)===String(s.ownerId)
-          &&Number(this.settings.resetTimestampMs||0)===Number(s.resetTimestampMs||0),
-        attempt:()=>this.executePegasusRyuSeiKenCapitalCapitalSeat(result.watch,q),
-      });
-      simOpened+=batch.opened;
-      if(batch.pending){
-        // A pending/uncertain broker order is not a failed admission. Never
-        // mislabel it as denied; retain the distinct reconciliation obligation.
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_live_pending_reconciliation',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats});
-      }else if(batch.blocked){
-        simBlocked++;
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_capital_denied',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats,
-            ...(batch.denialEvidence||{})},15000);
-      }else if(batch.opened>0){
-        await this.recordPegasusRyuSeiKenCapitalDecision('pr3_seat_executed',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,seatsOpened:batch.opened,
-            maximumSeats:batch.maximumSeats});
-      }
-      if(batch.opened>0&&batch.opened<batch.maximumSeats)simPartial++;
-    }
-    this.pegasusRyuSeiKenCapitalObserverStatus={version:'PR3-OBSERVATION-SIM3',atMs:Date.now(),
-      scanned:page.length,advanced,qualifiedSignals:ready,quotesUnavailable:unavailable,
-      simOpened,simBlocked,simPartial,directRefreshes,capitalAdmission:s.mode==='SIMULATION'?'PR_SIM_CAPITAL_ADMISSION':'PR_LIVE_PENDING_INTENT_PROTECTED_DISPATCH' };
-    return this.pegasusRyuSeiKenCapitalObserverStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
 
@@ -5740,28 +3718,9 @@ export class SagittariusEngine {
       queueMicrotask(()=>{void this.runCrystalWallObserver({immediate:true});});
   }
   async runCrystalWallObserver({immediate=false}={}){
-    if(this.crystalWallRecoveryObserverInFlight)return;
-    const ids=immediate?[...this.crystalWallRecoveryWakeIds].slice(0,16):[];
-    const tickers=immediate?[...this.crystalWallRecoveryWakeTickers].slice(0,8):[];
-    if(immediate&&!ids.length&&!tickers.length)return;
-    this.crystalWallRecoveryObserverInFlight=true;
-    try{
-      await this.observeCrystalWallWatches({priorityWatchIds:ids,priorityTickers:tickers});
-      this.crystalWallRecoveryLastObserverSuccessMs=Date.now();
-      for(const id of ids)this.crystalWallRecoveryWakeIds.delete(id);
-      for(const ticker of tickers)this.crystalWallRecoveryWakeTickers.delete(ticker);
-    }catch(error){
-      // No unbounded immediate error loop. The periodic scheduler and durable
-      // watch table remain the recovery mechanism after a transient failure.
-      for(const id of ids)this.crystalWallRecoveryWakeIds.delete(id);
-      for(const ticker of tickers)this.crystalWallRecoveryWakeTickers.delete(ticker);
-      this.crystalWallRecoveryObserverStatus={atMs:Date.now(),error:String(error?.message||error),capitalAdmission:'DENIED'};
-      this.queueRuntimeDiagnostic(()=>this.recordCrystalWallDecision('cw1_observer_failed',{reason:String(error?.message||error)},5000));
-    }finally{
-      this.crystalWallRecoveryObserverInFlight=false;
-      if(this.crystalWallRecoveryWakeIds.size||this.crystalWallRecoveryWakeTickers.size)
-        setImmediate(()=>{void this.runCrystalWallObserver({immediate:true});});
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** Restart recovery for a GreatHorn close that committed before its GH callback.
@@ -5769,46 +3728,9 @@ export class SagittariusEngine {
    * Restarting the process merely starts the idempotent scan again.
    */
   async replayCrystalWallMissedParents(){
-    if(!this.running||this.shuttingDown||this.settings?.crystalWallRecoveryEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const settings=this.settings,cursor=this.crystalWallRecoveryReplayCursor||null;
-    const scopeKey=[settings.systemName,settings.ownerId,settings.mode,settings.resetTimestampMs].map(String).join('|');
-    const before=cursor?.scopeKey===scopeKey?cursor:null;
-    const page=await this.db.crystalWallRecoveryMissingParentPage(settings,{limit:8,
-      beforeClosedMs:before?.closedAtMs??Number.MAX_SAFE_INTEGER,beforeId:before?.id??'\uffff'});
-    let created=0,rejected=0,failed=0,lastFailure=null;
-    for(const p of page){
-      // A malformed legacy parent, transient database failure, or competing
-      // process must not poison the entire eight-parent replay page. Continue
-      // in durable keyset order and allow the next sweep to retry failures.
-      try{
-        const result=await this.db.armCrystalWallWatchFromClosedGreatHorn(p.id);
-        if(result?.ok){
-          if(result.status==='WATCHING_CREATED')created++;
-          if(result.status==='WATCHING_CREATED'||result.status==='WATCH_ALREADY_PRESENT'){
-            this.crystalWallRecoveryPriorityTickers.add(String(p.ticker||''));
-            this.queueCrystalWallWake({watchId:result.watchId,ticker:p.ticker});
-          }
-        }else{
-          rejected++;
-          await this.recordCrystalWallDecision('cw1_parent_denied',{parentId:p.id,ticker:p.ticker,
-            systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,
-            resetEpoch:settings.resetTimestampMs||0,reason:result?.reason||'unknown',source:'replay'},30000);
-        }
-      }catch(error){
-        failed++;lastFailure=String(error?.message||error).slice(0,240);
-        await this.recordCrystalWallDecision('cw1_parent_arm_failed',{parentId:p.id,
-          ticker:p.ticker,systemName:settings.systemName,ownerId:settings.ownerId,
-          mode:settings.mode,resetEpoch:settings.resetTimestampMs||0,
-          reason:lastFailure,source:'replay'},30000);
-      }
-    }
-    const last=page[page.length-1];
-    this.crystalWallRecoveryReplayCursor=last&&page.length===8?{scopeKey,closedAtMs:last.closedAtMs,id:last.id}:null;
-    this.crystalWallRecoveryReplayStatus={version:'CW1-ROOT1-RESILIENT-REPLAY',atMs:Date.now(),checked:page.length,
-      created,rejected,failed,lastFailure,more:!!this.crystalWallRecoveryReplayCursor,
-      capitalAdmission:'RECOVERY_REPLAY_ONLY'};
-    return this.crystalWallRecoveryReplayStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** CW1 SIM-owned fill or LIVE durable pending intent per independently
@@ -5816,144 +3738,9 @@ export class SagittariusEngine {
    * Financial exits and broker reconciliation never depend on that entry gate.
    */
   async executeCrystalWallCapitalSeat(watch,priorQuote){
-    const s=structuredClone(this.settings||{});
-    const safetyRevision=this.runtimeSettingsSafetyRevision||0;
-    // SIM reset must drain Crystal Wall capital mutations, including REST preparation.
-    // Capture reset token BEFORE any asynchronous execution-book request.
-    const live=s.mode==='LIVE';
-    // New Crystal Wall LIVE BUYs remain fail-closed until native database and
-    // Railway/broker release verification. Existing positions retain exits.
-    const simulationToken=live?null:this.simulationMutationGate?.capture?.();
-    if(!live&&(!simulationToken||this.simulationMutationGate?.blocked===true))
-      return {ok:false,reason:'cw_sim_reset_gate_unavailable'};
-    if(!['SIMULATION','LIVE'].includes(s.mode)||(live&&!this.isLiveReadyForQ17Recovery())||s.engineActive!==true||s.crystalWallRecoveryEnabled!==true
-      ||!this.running||this.shuttingDown||!watch?.qualified||!this.strategy?.prepareEntryExecution)
-      return {ok:false,reason:'cw_sim_operator_or_signal_disabled'};
-    const parent=await this.db.entryById(watch.parentEntryId);
-    if(!parent)return {ok:false,reason:'cw_sim_parent_missing'};
-    // The stop-time websocket quote is a wake hint, not a BUY price limit.
-    // Obtain one current verified REST market+book snapshot, then size and
-    // compute the executable limit from THAT SAME snapshot. This also allows
-    // a 38c losing exit to recover at a fresh 39c executable ask.
-    const verified=await prepareCrystalWallExecutionBook({market:this.market,watch,
-      stakeCents:Number(s.crystalWallRecoveryStakeCents||0),maxAgeMs:s.infinityBreakMaximumBookAgeMs});
-    if(!verified.ok)return verified;
-    const {quote,plan}=verified;
-    const occupied=await this.db.pool.query('select seat from sag_crystal_wall_recovery_seats_v1 where watch_id=$1 order by seat',[watch.id]);
-    // Use the existing canonical seat-ledger integrity proof before choosing a
-    // free seat. An invalid/duplicate seat cannot be silently ignored while
-    // a parent recovery group is executing. Valid per-parent Multiply is intact.
-    const seatPlan=crystalWallRecoverySeatPlan(watch,occupied.rows);
-    if(!seatPlan.ok)return {ok:false,reason:seatPlan.reason};
-    const seat=seatPlan.free[0];
-    if(!seat)return {ok:false,reason:'cw_sim_multiply_fully_consumed'};
-    if(live){
-      const pending=await this.db.pool.query(`select 1 from sag_crystal_wall_recovery_seats_v1 x
-        join sag_entries e on e.id=x.position_id where x.watch_id=$1
-        and x.status='RECONCILE' and e.status='entry_pending' limit 1`,[watch.id]);
-      if(pending.rowCount)return {ok:false,reason:'cw_live_previous_order_unreconciled'};
-    }
-    // SIM must not reuse the same visible best-ask liquidity for every Multiply
-    // seat. Pool all positions already consumed by this parent recovery group,
-    // including closed seats, against a fresh full-depth book at the entry limit.
-    const priorVolume=await this.db.pool.query(`select coalesce(sum(e.count),0)::double precision as contracts
-      from sag_crystal_wall_recovery_seats_v1 x join sag_entries e on e.id=x.position_id
-      where x.watch_id=$1 and x.status in ('FILLED','CLOSED','SUBMITTED','RECONCILE')`,[watch.id]);
-    const previouslyConsumed=Number(priorVolume.rows?.[0]?.contracts||0);
-    const depth=crystalWallRecoveryAskDepth(plan.executionEvidence?.book,Number(quote.yesAsk));
-    const plannedAvailable=Number(plan.verifiedAvailableAtLimitCount);
-    if(!depth.ok||!Number.isSafeInteger(plannedAvailable)||plannedAvailable!==depth.count
-      ||!Number.isFinite(previouslyConsumed)||previouslyConsumed<0
-      ||(!live&&!Number.isSafeInteger(previouslyConsumed))
-      ||depth.count<(live?0:previouslyConsumed)+Number(plan.count||0))
-      return {ok:false,reason:'cw_sim_cumulative_executable_depth_insufficient',
-        depthReason:!depth.ok?depth.reason:plannedAvailable!==depth.count
-          ?'cw_book_changed_after_snapshot':'cw_available_whole_contracts_exhausted',
-        availableAtLimitCount:depth.count,plannedAvailableAtLimitCount:plannedAvailable,
-        previouslyConsumedCount:previouslyConsumed,requestedCount:Number(plan.count||0)};
-    plan.existingGroupQuantity=previouslyConsumed;
-    plan.availableAtLimitCount=depth.count;
-    const current=()=>{const c=this.settings;
-      return (this.runtimeSettingsSafetyRevision||0)===safetyRevision
-        &&this.running&&!this.shuttingDown&&c?.mode===s.mode&&(!live||this.isLiveReadyForQ17Recovery())&&c?.engineActive===true
-        &&c?.crystalWallRecoveryEnabled===true&&String(c.systemName)===String(s.systemName)
-        &&String(c.ownerId)===String(s.ownerId)
-        &&Number(c.resetTimestampMs||0)===Number(s.resetTimestampMs||0)
-        &&JSON.stringify(['crystalWallRecoveryMultiply','crystalWallRecoveryStakeCents','crystalWallRecoveryMinEntryCents',
-          'crystalWallRecoveryMaxEntryCents','crystalWallRecoveryMinCrashCents','crystalWallRecoveryMinReboundCents',
-          'crystalWallRecoveryMinUpwardTicks','crystalWallRecoveryObservationMinutes','crystalWallRecoveryLinkEnabled',
-          'crystalWallRecoveryParentEntryRiseCents','crystalWallRecoveryAuroraDamageControlPercent',
-          'crystalWallRecoveryMinProfitNetPerOriginalContractCents','crystalWallRecoveryAthenaX1Enabled',
-          'crystalWallRecoveryMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>c[k]))===
-          JSON.stringify(['crystalWallRecoveryMultiply','crystalWallRecoveryStakeCents','crystalWallRecoveryMinEntryCents',
-          'crystalWallRecoveryMaxEntryCents','crystalWallRecoveryMinCrashCents','crystalWallRecoveryMinReboundCents',
-          'crystalWallRecoveryMinUpwardTicks','crystalWallRecoveryObservationMinutes','crystalWallRecoveryLinkEnabled',
-          'crystalWallRecoveryParentEntryRiseCents','crystalWallRecoveryAuroraDamageControlPercent',
-          'crystalWallRecoveryMinProfitNetPerOriginalContractCents','crystalWallRecoveryAthenaX1Enabled',
-          'crystalWallRecoveryMaxSpreadCents',
-          'simFeeCents','maxPositions','startingCapitalCents','liveArmed'].map(k=>s[k]));};
-    if(!current())return {ok:false,reason:'cw_sim_card_changed_during_book_refresh'};
-    const clientOrderId=live?this.kalshi?.buildClientOrderId?.(s.ownerId,
-      'CW1-'+watch.id+'-'+seat,'entry'):null;
-    const planned=createCrystalWallCapitalEntry({watch,parent,quote,plan,settings:s,seat,clientOrderId});
-    if(!planned.ok)return planned;
-    if(live)planned.entry.entryConfig.crystalWallRecoveryOperatorRevision=safetyRevision;
-    if(live){
-      if(typeof this.kalshi?.ensureExchangeBalance!=='function')return {ok:false,reason:'cw_live_exchange_preflight_missing'};
-      const funding=liveRecoveryCollateralRequirement(planned.entry);
-      if(!funding.ok)return {ok:false,reason:funding.reason};
-      const balance=await this.kalshi.ensureExchangeBalance({ticker:watch.ticker,
-        exchangeIndex:quote.exchangeIndex,requiredCents:funding.requiredCents});
-      if(!balance?.ok)return {ok:false,reason:balance?.reason||'cw_live_exchange_preflight_denied'};
-      planned.entry.entryConfig.brokerRouting={version:'CW1-SHARD-PREFLIGHT',exchangeIndex:balance.exchangeIndex??null};
-      const witness=createQ17LiveCashWitness(planned.entry,balance);
-      if(!witness.ok)return {ok:false,reason:witness.reason};
-      planned.entry.entryConfig.q17LiveCashWitness=witness.witness;
-    }
-    // Enter the SIM reset gate immediately before the PostgreSQL financial
-    // transaction. An in-progress reset rejects admission; an admitted
-    // transaction completes or rolls back BEFORE reset can archive records.
-    const releaseSimulation=live?()=>{}:this.simulationMutationGate?.enter?.(simulationToken);
-    if(!releaseSimulation)return {ok:false,reason:'cw_sim_reset_in_progress'};
-    let brokerUnlock=null;
-    try{
-      if(live){
-        if(typeof s.ownerId!=='string'||!s.ownerId.trim()||s.ownerId!==s.ownerId.trim())
-          return {ok:false,reason:'cw_live_broker_mutation_owner_scope_missing'};
-        // Broker inventory is shared by owner across system instances.
-        brokerUnlock=await this.db.acquireHunterTickerLock(s.ownerId,`broker:${watch.ticker}`);
-        if(!brokerUnlock)return {ok:false,reason:'cw_live_broker_mutation_lock_busy'};
-      }
-      const saved=live?await this.db.insertCrystalWallLiveEntry(planned.entry,{quote,isCurrent:current})
-        :await this.db.insertCrystalWallSimulationEntry(planned.entry,{quote,isCurrent:current});
-      if(live){
-        const receipt=await dispatchCrystalWallLiveIntent({entry:planned.entry,settings:s,db:this.db,kalshi:this.kalshi,
-          market:this.market,strategy:this.strategy,isLiveReady:()=>this.isLiveReadyForQ17Recovery(),readSettings:()=>this.settings,
-          readSafetyRevision:()=>this.runtimeSettingsSafetyRevision||0,
-          audit:(event,data)=>this.db.audit('warning',event,data).catch(()=>{})});
-        return {...receipt,seat,watchId:watch.id,id:planned.entry.id};
-      }
-      try{this.strategy.onHunterOpened?.(planned.entry);}catch{}
-      try{this.profitGuard?.registerInfinityBreakFastWake?.(planned.entry,s);}catch{}
-      await this.recordCrystalWallDecision('cw1_sim_capital_entry_committed',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),id:planned.entry.id,
-        watchId:watch.id,parentId:parent.id,seat,ticker:watch.ticker,
-        count:planned.entry.count,entryPriceCents:planned.entry.entryPriceCents,
-        auroraDangerPriceCents:planned.entry.stopPriceCents});
-      return {ok:true,id:saved.entry.id,seat,count:saved.entry.count};
-    }catch(error){
-      const reason=String(error?.message||error);
-      await this.recordCrystalWallDecision('cw1_sim_seat_admission_blocked',{
-        systemName:s.systemName,ownerId:s.ownerId,mode:s.mode,
-        resetEpoch:Number(s.resetTimestampMs||0),
-        watchId:watch.id,parentId:parent.id,ticker:watch.ticker,seat,reason});
-      return {ok:false,reason};
-    }finally{
-      if(brokerUnlock)try{await brokerUnlock();}catch{}
-      releaseSimulation();
-    }
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   /** CW1-SIM3: each eligible recovery group can consume all remaining
@@ -5963,108 +3750,9 @@ export class SagittariusEngine {
    * seats and never count a failed/unknown broker outcome as a fill.
    */
   async observeCrystalWallWatches({priorityWatchIds=[],priorityTickers=[]}={}){
-    if(!this.running||this.shuttingDown||this.settings?.crystalWallRecoveryEnabled!==true
-      ||this.settings?.engineActive!==true)return {status:'OFF'};
-    const s=this.settings;
-    const page=await this.db.crystalWallRecoveryObservationPage(s,{limit:16,priorityWatchIds,priorityTickers});
-    const prioritized=new Set(priorityWatchIds.map(String));
-    const priorityMarkets=new Set(priorityTickers.map(String));
-    let advanced=0,ready=0,unavailable=0,simOpened=0,simBlocked=0,simPartial=0;
-    let directRefreshes=0;
-    const refreshedThisPage=new Map();
-    for(const watch of page){
-      if(!this.running||this.shuttingDown||this.settings?.engineActive!==true)break;
-      if(watch.ticker && !this.crystalWallRecoveryPriorityTickers.has(watch.ticker)){
-        this.crystalWallRecoveryPriorityTickers.add(watch.ticker);
-        const wanted=new Set(this.market?.wanted||[]);wanted.add(watch.ticker);
-        this.market?.setWanted?.([...wanted]);
-      }
-      let q=this.market?.getQuote?.(watch.ticker);
-      const age=Date.now()-Number(q?.quoteAtMs||0);
-      const maxAge=5000; // recovery observation; admission keeps operator book age
-      const needsFresh=!q||!Number.isFinite(age)||age>maxAge
-        ||Number(q.quoteAtMs)<Number(watch.armedAtMs)
-        ||q.bookInvalid===true||q.status!=='active';
-      // Recovery WATCHING state must not depend on a prior scanner retaining
-      // the ticker in RAM. Bound REST refreshes and coalesce by exact ticker;
-      // stale/missing quotes NEVER become fabricated fills or signal evidence.
-      if(needsFresh){
-        const ticker=String(watch.ticker);
-        if(refreshedThisPage.has(ticker))q=refreshedThisPage.get(ticker)||q;
-        else if(directRefreshes<4 && Date.now()-Number(this.crystalWallRecoveryLastDirectRefreshMs.get(ticker)||0)>=2000){
-          directRefreshes++;
-          this.crystalWallRecoveryLastDirectRefreshMs.set(ticker,Date.now());
-          while(this.crystalWallRecoveryLastDirectRefreshMs.size>256)
-            this.crystalWallRecoveryLastDirectRefreshMs.delete(this.crystalWallRecoveryLastDirectRefreshMs.keys().next().value);
-          const fresh=typeof this.market?.refreshTickerVerified==='function'
-            ?await this.market.refreshTickerVerified(ticker).catch(()=>null)
-            :typeof this.market?.refreshTicker==='function'
-              ?{quote:await this.market.refreshTicker(ticker).catch(()=>null)}:null;
-          const checked=fresh?.marketFresh===false||fresh?.bookFresh===false?null:fresh?.quote||null;
-          refreshedThisPage.set(ticker,checked);
-          if(checked)q=checked;
-        }
-      }
-      if(!q){
-        unavailable++;
-        await this.recordCrystalWallDecision('cw1_quote_waiting',{watchId:watch.id,parentId:watch.parentEntryId,
-          ticker:watch.ticker,reason:'cw1_quote_missing',mode:watch.mode,ownerId:watch.ownerId},30000);
-        continue;
-      }
-      const result=await this.db.crystalWallRecoveryObserve(watch.id,stampLiveEpoch(q,this.market?.quoteEpoch));
-      if(result?.changed){
-        advanced++;
-        await this.recordCrystalWallDecision(result.signalQualified?'cw1_watch_qualified':'cw1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,mode:watch.mode,
-            ownerId:watch.ownerId,reason:result.reason,quoteAtMs:q.quoteAtMs,
-            bidCents:q.yesBid,askCents:q.yesAsk,watchRevision:result.revision},
-          result.signalQualified?0:15000);
-      }else if(result?.reason&&result.reason!=='cw1_duplicate_or_out_of_order_quote'){
-        await this.recordCrystalWallDecision('cw1_signal_blocked',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:result.reason},30000);
-      }
-      // An already-qualified durable watch remains eligible after restart or
-      // interrupted admission even when the cache has no new quote revision.
-      // The transactional entry revalidates on a new independently fresh book.
-      if(result?.ok!==true||result?.watch?.status!=='WATCHING'||result.watch.qualified!==true)continue;
-      ready++;
-      if(!['SIMULATION','LIVE'].includes(s.mode))continue;
-      const batch=await runCrystalWallSequentialSeats(result.watch,{
-        isCurrent:()=>this.running&&!this.shuttingDown&&this.settings?.engineActive===true
-          &&this.settings?.crystalWallRecoveryEnabled===true&&this.settings?.mode===s.mode
-          &&String(this.settings.systemName)===String(s.systemName)
-          &&String(this.settings.ownerId)===String(s.ownerId)
-          &&Number(this.settings.resetTimestampMs||0)===Number(s.resetTimestampMs||0),
-        attempt:()=>this.executeCrystalWallCapitalSeat(result.watch,q),
-      });
-      simOpened+=batch.opened;
-      if(batch.pending){
-        // A pending/uncertain broker order is not a failed admission. Never
-        // mislabel it as denied; retain the distinct reconciliation obligation.
-        await this.recordCrystalWallDecision('cw1_live_pending_reconciliation',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats});
-      }else if(batch.blocked){
-        simBlocked++;
-        await this.recordCrystalWallDecision('cw1_capital_denied',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,reason:batch.reason,
-            opened:batch.opened,maximumSeats:batch.maximumSeats,
-            ...(batch.denialEvidence||{})},15000);
-      }else if(batch.opened>0){
-        await this.recordCrystalWallDecision('cw1_seat_executed',
-          {watchId:watch.id,parentId:watch.parentEntryId,ticker:watch.ticker,
-            mode:watch.mode,ownerId:watch.ownerId,seatsOpened:batch.opened,
-            maximumSeats:batch.maximumSeats});
-      }
-      if(batch.opened>0&&batch.opened<batch.maximumSeats)simPartial++;
-    }
-    this.crystalWallRecoveryObserverStatus={version:'CW1-OBSERVATION-SIM3',atMs:Date.now(),
-      scanned:page.length,advanced,qualifiedSignals:ready,quotesUnavailable:unavailable,
-      simOpened,simBlocked,simPartial,directRefreshes,capitalAdmission:s.mode==='SIMULATION'?'CW_SIM_CAPITAL_ADMISSION':'CW_LIVE_PENDING_INTENT_PROTECTED_DISPATCH' };
-    return this.crystalWallRecoveryObserverStatus;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   operationalTick(){
@@ -6333,8 +4021,11 @@ export class SagittariusEngine {
   // Quote-triggered ticker protection has a different completion scope and
   // must never reset this timer or suppress the next mandatory full sweep.
   markProtection() {
+    const wasStale=!this.health.lastProtectionMs || Date.now()-this.health.lastProtectionMs>PROTECTION_FRESH_MS;
     this.health.lastProtectionMs = Date.now();
     this.recomputeHealth();
+    if(wasStale&&this.settings?.mode==='LIVE'&&this.settings?.liveArmed===true)
+      this.r17?.onLiveAdmissionRestored?.();
   }
 
   markQuoteProtection() {
@@ -6432,7 +4123,10 @@ export class SagittariusEngine {
     this.invalidateStateSnapshot?.();
     this.queueGoldenEyeEvaluation?.(ticker);
     this.queueLightningScaleInWake?.({parent:entry});
-    try{this.tradingLivenessRecorder().confirmedFill(entry,s);}catch{}
+    try{this.tradingLivenessRecorder().confirmedFill(entry,s);
+      if(entry.mode==='LIVE'&&entry.entryConfig?.entryFillProof?.authoritative===true&&Number(entry.entryConfig.entryFillProof.filledCount)>0&&entry.entryOrderId)
+        this.recordTradingFunnelStage({candidateId:entry.id,parentEntryId:entry.entryConfig?.goldenSaintR17?.parentEntryId,ticker:entry.ticker,eventTicker:entry.eventTicker,stage:'live_order_broker_confirmed',status:'progress'});
+    }catch{}
     const metrics=this.protectionWakeMetrics;
     if(metrics){metrics.confirmedFillWakes++;metrics.lastConfirmedFillAtMs=Date.now();}
     // The fresh cached book is evaluated immediately. If it is unavailable,
@@ -6527,11 +4221,8 @@ export class SagittariusEngine {
     if (!this.shadowEntryGate().allowed) return;
     const simulationToken=this.settings?.mode==='SIMULATION'?this.simulationMutationGate.capture():null;
     const entryWorkRevision=this.runtimeSettingsSafetyRevision||0;
-    // EAC2 is the quote-event authority boundary. R57's scanner path used EAC1
-    // but this centralized quote path bypassed it, allowing A8/Athena FIRE to
-    // run before a later createHunter() Game Clock rejection. No expensive
-    // intelligence is queued unless a current lane is clock-admissible or has
-    // earned one bounded authority probe.
+    // R28: regular-capital timing cannot veto non-capital Athena observations.
+    // Existing per-ticker queue coalescing bounds work without dropping siblings.
     if(!this.shouldQueueInitialExposure(ticker,{allowProbe:true}))return;
     if (this.athenaOpportunityTimers.has(ticker)) return;
     const timer=setTimeout(()=>{
@@ -6568,25 +4259,15 @@ export class SagittariusEngine {
     if(!(this.athenaDecisionInFlight instanceof Set))this.athenaDecisionInFlight=new Set();
     if(!this.entryDecisionDedupStats||typeof this.entryDecisionDedupStats!=='object')this.entryDecisionDedupStats={athenaEvaluated:0,athenaUnchangedSuppressed:0,athenaInFlightSuppressed:0,athenaChangedStateRetries:0};
     const s=this.settings, now=Date.now();
-    // EAC3 defense-in-depth: prove the hard clock/window boundary before any
-    // DB fanout, Cosmos GREEN work, or Athena ranking.
-    // A PROBE is resolved once through the authoritative GCA2 refresh and then
-    // re-evaluated; failure remains upstream and never turns into a post-FIRE
-    // Game Clock choke.
     const candidates=[];
-    for(const [ticker,original] of marketMap||[]){
-      if(onlyTicker&&ticker!==onlyTicker)continue;
-      const q=original;if(!q)continue;
-      let admission=this.entryChainAdmissionForQuote(q,{lane:'ANY',now:Date.now()});
-      if(admission.action==='PROBE'){
-        const refreshed=await this.refreshGameClockForQuote(q,{forceFresh:true}).catch(()=>null);
-        if(refreshed?.gameClockState)admission=this.entryChainAdmissionForQuote(q,{lane:'ANY',now:Date.now()});
-        else admission={action:'BLOCK',reason:'game_clock_probe_failed',stage:admission.stage||null,lane:admission.lane||null};
-      }
+    for(const [ticker,q] of marketMap||[]){
+      if((onlyTicker&&ticker!==onlyTicker)||!q)continue;
+      const admission=this.entryChainAdmissionForQuote(q,{lane:'ANY',now});
       if(admission.action!=='ALLOW'){
-        await this.db.audit('info','entry_chain_upstream_admission_blocked',{ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,reason:admission.reason,stage:admission.stage||null,lane:admission.lane||null,lastEligibleAtMs:admission.lastEligibleAtMs||null,readyAtMs:admission.readyAtMs||null}).catch(()=>{});
+        this.noteEntryAdmission(admission.reason,'blockedBeforeQueue');
         continue;
       }
+      this.recordTradingFunnelStage({candidateId:`shadow:${q.ticker}:${q.quoteObservation?.epoch||''}:${q.quoteObservation?.revision||q.quoteAtMs||q.updatedAtMs||0}`,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'shadow_signal_candidate',status:'progress'});
       candidates.push(q);
     }
     if(!candidates.length)return[];
@@ -6659,8 +4340,8 @@ export class SagittariusEngine {
       if(atbAdmission.action==='ALLOW')bolt=await this.atomicThunderBolt.detect(q,{cosmos,crashSignal,crashState,recoveryContext,fieldContext:preliminaryFieldContext,now});
       else await this.db.audit('info','atomic_thunder_green_admission_blocked',{ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,reason:atbAdmission.reason,stage:atbAdmission.stage||null,lastEligibleAtMs:atbAdmission.lastEligibleAtMs||null,readyAtMs:atbAdmission.readyAtMs||null}).catch(()=>{});
       if(!bolt)continue;
-      // COSMO_GREEN earns only a Bolt, never clock authority. Re-prove fresh
-      // GCA2 authorization before Athena so a stale/final event cannot FIRE.
+      // Recheck non-capital lifecycle only. Regular capital will independently
+      // prove actual start and fresh LIVE evidence at its execution boundary.
       const postBoltAdmission=await this.resolveEntryChainAdmission(q,{lane:'POST_BOLT',forceProbe:true});
       if(postBoltAdmission.action!=='ALLOW'){
         await this.db.audit('info','post_bolt_clock_admission_blocked',{boltId:bolt.id,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,reason:postBoltAdmission.reason,lastEligibleAtMs:postBoltAdmission.lastEligibleAtMs||null}).catch(()=>{});
@@ -6805,7 +4486,17 @@ export class SagittariusEngine {
     while(map.size>limit){const first=map.keys().next().value;map.delete(first);}
   }
 
+  recordTradingFunnelStage(event={}){
+    this.linkedTradingFunnel ||= new TradingFunnel();
+    return this.linkedTradingFunnel.record(event,this.settings);
+  }
+  tradingFunnelSnapshot(){
+    this.linkedTradingFunnel ||= new TradingFunnel();
+    return this.linkedTradingFunnel.snapshot(this.settings);
+  }
+
   recordEntryCandidateStage(event={}){
+    try{this.recordTradingFunnelStage(event);}catch{}
     const candidateId=String(event.candidateId||event.preBoltId||'');if(!candidateId)return null;
     // Keep the telemetry hook safe for focused/unit harnesses that construct an
     // Engine from its prototype, and for any future recovery path that invokes
@@ -6882,80 +4573,30 @@ export class SagittariusEngine {
 
   entryAdmissionSnapshot(){
     const stats=this.entryAdmissionStats||{};
-    return{version:ENTRY_ADMISSION_CONTROL.version,role:ENTRY_ADMISSION_CONTROL.role,unknownProbeIntervalMs:ENTRY_ADMISSION_CONTROL.unknownProbeIntervalMs,preBoltExecutionMarginMs:ENTRY_ADMISSION_CONTROL.preBoltExecutionMarginMs,trackedProbeEvents:this.entryAdmissionProbeAt?.size||0,allowed:Number(stats.allowed||0),blockedBeforeQueue:Number(stats.blockedBeforeQueue||0),probeAllowed:Number(stats.probeAllowed||0),probeCoalesced:Number(stats.probeCoalesced||0),byReason:{...(stats.byReason||{})}};
+    return{version:ENTRY_ADMISSION_CONTROL.version,role:ENTRY_ADMISSION_CONTROL.role,allowed:Number(stats.allowed||0),blockedBeforeQueue:Number(stats.blockedBeforeQueue||0),byReason:{...(stats.byReason||{})},clock:this.eventClockRuntime?.snapshot?.()||null};
   }
 
-  entryChainAdmissionForQuote(q,{lane='ANY',now=Date.now()}={}){
-    const ticker=String(q?.ticker||'');
-    const activeBolt=this.atomicThunderBolt?.activeByTicker?.get?.(ticker)||null;
-    const activeBoltReady=activeBolt&&Number(activeBolt.expiresAtMs||0)>=Number(now);
-    const common={quote:q,mode:this.settings.mode,minGameMinutes:this.settings.minGameMinutes,maxGameMinutes:this.settings.maxGameMinutes,now,executionMarginMs:ENTRY_ADMISSION_CONTROL.preBoltExecutionMarginMs};
-    const stage=(lane==='POST_BOLT'||lane==='POST_ATB2')?'POST_BOLT':activeBoltReady?'POST_BOLT':'ATOMIC_GREEN';
-    return entryChainAdmissionDecision({...common,stage});
+  entryChainAdmissionForQuote(q,{lane='ANY'}={}){
+    return entryChainAdmissionDecision({quote:q,stage:['POST_BOLT','POST_ATB2'].includes(lane)?'POST_BOLT':'ATOMIC_GREEN'});
   }
 
-  async resolveEntryChainAdmission(q,{lane='ANY',forceProbe=true}={}){
-    let decision=this.entryChainAdmissionForQuote(q,{lane,now:Date.now()});
-    if(decision.action==='PROBE'&&forceProbe){
-      const refreshed=await this.refreshGameClockForQuote(q,{forceFresh:true}).catch(()=>null);
-      if(refreshed?.gameClockState)decision=this.entryChainAdmissionForQuote(q,{lane,now:Date.now()});
-      else decision={action:'BLOCK',reason:'game_clock_probe_failed',stage:decision.stage||null,lane};
-    }
-    return decision;
+  async resolveEntryChainAdmission(q,{lane='ANY'}={}){
+    return this.entryChainAdmissionForQuote(q,{lane});
   }
 
-  shouldQueueInitialExposure(ticker,{allowProbe=true}={}){
+  shouldQueueInitialExposure(ticker){
     const q=this.market?.getQuote?.(ticker);if(!q)return false;
-    const now=Date.now();
-    if(!(this.admissionBlockMemo instanceof Map))this.admissionBlockMemo=new Map();
-    const memo=this.admissionBlockMemo.get(ticker);
-    if(memo && now<memo.untilMs){this.noteEntryAdmission(memo.reason,'blockedBeforeQueue');return false;}
-    const decision=this.entryChainAdmissionForQuote(q,{lane:'ANY',now});
-    if(decision.action==='BLOCK'){
-      const permanent=decision.reason==='game_final'||decision.reason==='maximum_game_time_exceeded';
-      const timed=decision.reason==='observed_activity_aging_wait'||decision.reason==='minimum_game_time_wait';
-      if(permanent||timed){
-        const eligibleAt=Number(decision.nextEligibleAtMs);
-        const until=permanent?now+60_000:(Number.isFinite(eligibleAt)?Math.min(eligibleAt,now+30_000):now+15_000);
-        if(until>now+500)this.admissionBlockMemo.set(ticker,{reason:decision.reason,untilMs:until});
-      }
-    }
-    if(decision.action==='ALLOW'){this.noteEntryAdmission(decision.reason,'allowed');return true;}
-    if(decision.action==='BLOCK'){this.noteEntryAdmission(decision.reason,'blockedBeforeQueue');return false;}
-    if(!allowProbe){this.noteEntryAdmission(decision.reason,'blockedBeforeQueue');return false;}
-    const event=String(q.eventTicker||q.ticker||ticker),last=Number(this.entryAdmissionProbeAt.get(event)||0);
-    if(last>0&&now-last<ENTRY_ADMISSION_CONTROL.unknownProbeIntervalMs){this.noteEntryAdmission('clock_probe_throttled','probeCoalesced');return false;}
-    this.entryAdmissionProbeAt.set(event,now);
-    while(this.entryAdmissionProbeAt.size>ENTRY_ADMISSION_CONTROL.maximumTrackedEvents){const first=this.entryAdmissionProbeAt.keys().next().value;this.entryAdmissionProbeAt.delete(first);}
-    this.noteEntryAdmission(decision.reason,'probeAllowed');return true;
+    const decision=this.entryChainAdmissionForQuote(q);
+    this.noteEntryAdmission(decision.reason,decision.action==='ALLOW'?'allowed':'blockedBeforeQueue');
+    return decision.action==='ALLOW';
   }
 
-  admittedInitialExposureMap(marketMap,{allowProbe=false}={}){
+  admittedInitialExposureMap(marketMap){
     const admitted=new Map();
-    const now=Date.now();
-    if(!(this.admissionBlockMemo instanceof Map))this.admissionBlockMemo=new Map();
     for(const [ticker,q] of marketMap||[]){
-      const memo=this.admissionBlockMemo.get(ticker);
-      if(memo && now<memo.untilMs){
-        this.noteEntryAdmission(memo.reason,'blockedBeforeQueue');
-        continue;
-      }
-      const decision=this.entryChainAdmissionForQuote(q,{lane:'ANY',now});
-      if(decision.action==='ALLOW'){admitted.set(ticker,q);this.noteEntryAdmission(decision.reason,'allowed');continue;}
-      if(decision.action==='PROBE'&&allowProbe&&this.shouldQueueInitialExposure(ticker,{allowProbe:true})){admitted.set(ticker,q);continue;}
-      this.noteEntryAdmission(decision.reason,'blockedBeforeQueue');
-      // Permanent or slow-changing blocks do not need to be recomputed on
-      // every 450ms fast-phase tick. This does not change the decision.
-      const permanent=decision.reason==='game_final'||decision.reason==='maximum_game_time_exceeded';
-      const timed=decision.reason==='observed_activity_aging_wait'||decision.reason==='minimum_game_time_wait';
-      if(permanent||timed){
-        const eligibleAt=Number(decision.nextEligibleAtMs);
-        const until=permanent?now+60_000:(Number.isFinite(eligibleAt)?Math.min(eligibleAt,now+30_000):now+15_000);
-        if(until>now+500){
-          this.admissionBlockMemo.set(ticker,{reason:decision.reason,untilMs:until});
-          if(this.admissionBlockMemo.size>4000){const first=this.admissionBlockMemo.keys().next().value;this.admissionBlockMemo.delete(first);}
-        }
-      }
+      const decision=this.entryChainAdmissionForQuote(q);
+      this.noteEntryAdmission(decision.reason,decision.action==='ALLOW'?'allowed':'blockedBeforeQueue');
+      if(decision.action==='ALLOW')admitted.set(ticker,q);
     }
     return admitted;
   }
@@ -7154,36 +4795,19 @@ export class SagittariusEngine {
 
 
   async acceptCommittedShadowStop(parentId,scope) {
-    const record=await this.db.verifiedShadowStop(parentId,scope);
-    if(!record)throw new Error('shadow_stop_authority_unavailable');
-    const family=executionMarketFamilyExclusion(record.watch?.ticker,this.settings,{concept:record.watch?.parentConcept});
-    if(family.blocked){
-      void this.db?.audit?.('info','starlight_shadow_stop_market_family_blocked',{parentId,ticker:record.watch?.ticker,reason:family.reason,primaryRule:family.primaryRule}).catch?.(()=>{});
-      return null;
-    }
-    if(!sameShadowScope(this.settings,scope))throw new Error('shadow_stop_authority_unavailable');
-    const stats=this.starlightRecoveryRuntime(),watch=record.watch,id=watch.authorizationId;
-    if(!this.starlightKnownParents.has(id)){
-      this.starlightKnownParents.add(id);stats.armed++;
-    }
-    const active=this.starlightRecoveryWatches.get(id);
-    if(!['CONSUMED','EXPIRED','BLOCKED'].includes(watch.status) && (!active||Number(active.revision)<=watch.revision)){
-      this.starlightRecoveryWatches.set(id,watch);
-      this.recoveryPriorityTickers?.add(watch.ticker);
-      if(this.settings.crashRecoveryHunterLinkEnabled===true)this.queueStarlightRecovery(id);
-    }
-    await this.db.markShadowStopDelivered(parentId,record.proofHash,scope);
-    // R46-R6: arm independent Plasma and Arrow watches from the Athena stop.
-    // Each has its own geometry and reacts to the Athena loss directly.
-    if(watch?.parentEntryId){
-      this.armIndependentRecovery({id:watch.parentEntryId,ticker:watch.ticker,
-        eventTicker:watch.eventTicker,sport:watch.sport,
-        exitPriceCents:watch.stopPriceCents,closedAtMs:watch.armedAtMs},'Lightning Plasma');
-      this.armIndependentRecovery({id:watch.parentEntryId,ticker:watch.ticker,
-        eventTicker:watch.eventTicker,sport:watch.sport,
-        exitPriceCents:watch.stopPriceCents,closedAtMs:watch.armedAtMs},'Sagittarius Arrow Recovery');
-    }
-    return record;
+    if(!sameShadowScope(this.settings,scope))throw new Error('shadow_stop_scope_changed');
+    // The R17 repository validates Athena's authenticated immutable close
+    // and scoped settings INSIDE its watch-insert transaction. The retired
+    // Starlight authorization reader must not be consulted here at all.
+    const armed=await this.db.goldenSaintStore.armAthena(parentId,this.settings);
+    if(armed?.ok!==true||!armed.proofHash)
+      throw new Error(armed?.reason||'r17_athena_watch_persist_failed');
+    if(!sameShadowScope(this.settings,scope))throw new Error('shadow_stop_scope_changed_after_arm');
+    if(this.r17){this.r17.stats.armed+=Number(armed.created||0);this.r17.requestTick();}
+    // R17 watches are committed before acknowledging the shadow outbox.
+    // Failure leaves the PENDING proof for idempotent replay after restart.
+    await this.db.markShadowStopDelivered(parentId,armed.proofHash,scope);
+    return {parentEntryId:parentId,proofHash:armed.proofHash,...armed};
   }
 
   // R13: parent-open/quote wake is NOT capital authority. It only causes the
@@ -7269,6 +4893,29 @@ export class SagittariusEngine {
     const token=settings.mode==='SIMULATION'?this.simulationMutationGate?.capture():null;
     const isCurrent=()=>this.shadowStopping!==true&&sameShadowScope(this.settings,settings);
     let scope,hadError=false,sweepOpenEntries=0;
+    const denyParentLocally=async(parentId,error)=>{
+      const reason=String(error?.message||error).slice(0,200);
+      if(!['r17_authenticated_athena_proof_required','r17_not_verified_athena_loss',
+        'r17_athena_proof_lineage_mismatch','r17_athena_time_market_invalid',
+        'r17_athena_scope_mismatch'].includes(reason))return false;
+      // One invalid parent's capital authority is refused, not the entire
+      // shadow worker. Real database/protection failures still fail closed.
+      stats.errors++;stats.parentProofDenials=Number(stats.parentProofDenials||0)+1;
+      stats.lastParentProofDenial={parentId:String(parentId).slice(0,256),reason,atMs:Date.now()};
+      // A durable invalid proof can be replayed repeatedly until addressed.
+      // Limit optional audit IO; never weaken the authority check.
+      this.shadowProofAuditThrottle ||= new Map();
+      const last=Number(this.shadowProofAuditThrottle.get(parentId)||0),at=Date.now();
+      if(at-last>=60_000){
+        this.shadowProofAuditThrottle.delete(parentId);
+        this.shadowProofAuditThrottle.set(parentId,at);
+        if(this.shadowProofAuditThrottle.size>128)
+          this.shadowProofAuditThrottle.delete(this.shadowProofAuditThrottle.keys().next().value);
+        await this.db.audit('warning','r17_athena_parent_proof_denied',
+          {parentId,reason,scope}).catch(()=>{});
+      }
+      return true;
+    };
     try{
       scope=await this.db.captureShadowScope(settings);
       const rows=await this.db.openShadowEntriesPage(scope,{limit:32});
@@ -7297,6 +4944,20 @@ export class SagittariusEngine {
           if(!result.ok){stats.conflicts++;continue;}
           if(result.closed){
             stats.closed++;
+            // The just-committed Athena proof must wake the ten R17 watches
+            // immediately, not wait for an unrelated Starlight watcher or
+            // the next periodic pending-outbox scan. A failed post-commit arm
+            // remains PENDING for the durable retry; never undo the close.
+            if(result.entry?.conceptName==='Athena Exclamation'&&result.proofHash&&isCurrent()){
+              try{await this.acceptCommittedShadowStop(result.entry.id,scope);stats.armed++;}
+              catch(error){
+                if(!(await denyParentLocally(result.entry.id,error))){
+                  hadError=true;stats.errors++;stats.lastError=String(error?.message||error).slice(0,500);
+                  await this.db.audit('error','r17_athena_post_close_arm_failed',{
+                    parentId:result.entry.id,reason:stats.lastError}).catch(()=>{});
+                }
+              }
+            }
             if(this.settings?.sagittariusArrowEnabled===true){
               const id=String(result.entry?.id||entry.id);
               void Promise.resolve({ok:false,reason:'sa1_arms_on_open'}).then(armed=>{
@@ -7322,11 +4983,23 @@ export class SagittariusEngine {
         }finally{release?.();}
       }
       if(isCurrent()){
-        const pending=await this.db.pendingShadowStops(scope,{limit:32});
+        const replayScope=JSON.stringify([scope.systemName,scope.ownerId,scope.mode,scope.resetEpoch]);
+        if(this.shadowPendingCursorScope!==replayScope){
+          this.shadowPendingCursorScope=replayScope;this.shadowPendingCursor=null;
+        }
+        const pending=await this.db.pendingShadowStops(scope,{limit:32,after:this.shadowPendingCursor});
+        // The page cursor is not acknowledgement. A failed parent remains
+        // PENDING, and will be visited again after the bounded cursor wraps.
+        this.shadowPendingCursor=pending.length===32?pending[pending.length-1]:null;
         sweepOpenEntries+=pending.length;
         for(const parentId of pending){
           if(!isCurrent())break;
-          await this.acceptCommittedShadowStop(parentId,scope);stats.armed++;
+          try{
+            await this.acceptCommittedShadowStop(parentId,scope);stats.armed++;
+          }catch(error){
+            if(await denyParentLocally(parentId,error))continue;
+            throw error;
+          }
         }
       }
       if(!hadError&&isCurrent()){stats.lastSuccessAtMs=Date.now();stats.lastSuccessScope=shadowScope(settings);stats.lastError=null;}
@@ -7370,211 +5043,15 @@ export class SagittariusEngine {
   }
 
   async sweepLightningPlasmaScaleIn(){
-    if(this.lightningPlasmaScaleInPromise)return this.lightningPlasmaScaleInPromise;
-    const pending=this._sweepLightningPlasmaScaleIn().catch((error)=>{
-      const stats=this.lightningPlasmaScaleInRuntime();
-      stats.lastError=String(error?.message||error);
-      stats.lastEvent={status:'BLOCKED',reason:'lp_scalein_sweep_error',message:stats.lastError,atMs:Date.now()};
-      this.queueRuntimeDiagnostic(()=>this.db?.audit?.('error','lightning_plasma_scalein_failed',{message:stats.lastError}));
-      return 0;
-    }).finally(()=>{if(this.lightningPlasmaScaleInPromise===pending)this.lightningPlasmaScaleInPromise=null;});
-    this.lightningPlasmaScaleInPromise=pending;
-    return pending;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async _sweepLightningPlasmaScaleIn(){
-    const s=this.settings||{};
-    const stats=this.lightningPlasmaScaleInRuntime();
-    // Retain the latest 64 actual parent decisions across idle/blocked sweeps.
-    // Clearing on every tick erased the sole persisted reason why a verified
-    // LIVE parent was not admitted. Diagnostics never create trading signals.
-    if(!Array.isArray(stats.lastChecks))stats.lastChecks=[];
-    const observe=(parent,reason,data={})=>{
-      const row={parentStarlightId:String(parent?.id||''),ticker:String(parent?.ticker||''),parentState:parent?.lpContinuation?.state||null,parentRevision:parent?.lpContinuation?.revision??null,reason,atMs:Date.now(),...data};
-      stats.lastChecks.push(row);
-      if(stats.lastChecks.length>64)stats.lastChecks.shift();
-      return row;
-    };
-    if(s.lightningPlasmaEnabled!==true){this.lightningPriorityTickers?.clear?.();this.lpV5ParentsByTicker?.clear?.();this.lpV5Geometry?.clear?.();this.lpV5WakeSignals?.clear?.();return 0;}
-    const thr=Number(s.lightningPlasmaStarlightScaleInCents);
-    if(!Number.isFinite(thr)||thr<=0)return 0;
-    const gate=this.entryExecutionGate?.();
-    if(gate && gate.allowed!==true){stats.lastEvent={status:'BLOCKED',reason:gate.reason||'gate',atMs:Date.now()};return 0;}
-    let starlights=[];
-    try{
-      if(typeof this.db?.lightningMonitorParents!=='function')throw new Error('lp_v3_durable_monitor_unavailable');
-      starlights=await this.db.lightningMonitorParents(s,{limit:64});
-      // Fair database-backed pagination. Missing marks or exhausted seats must
-      // not starve later parents, and a process restart must not reset priority.
-      await this.db.touchLightningMonitorParents(s,starlights.map(e=>e.id));
-    }catch(error){stats.lastError=String(error?.message||error);stats.lastEvent={status:'BLOCKED',reason:'lp_v3_durable_monitor_unavailable',atMs:Date.now()};return 0;}
-    const scopeKey=JSON.stringify([s.systemName,s.ownerId,s.mode,s.resetTimestampMs||0]);
-    if(this.lightningPriorityScope!==scopeKey){this.lightningPriorityScope=scopeKey;this.lightningPriorityTickers=new Map();this.lpV5Geometry=new Map();this.lpV5WakeSignals=new Map();this.lpV5ParentsByTicker=new Map();}
-    const lpParentIndex=new Map();
-    let activeOpenParents=0;
-    for(const parent of starlights){
-      if(lightningParentEligibility(parent,s).ok){
-        activeOpenParents++;
-        this.lightningPriorityTickers.delete(parent.ticker);this.lightningPriorityTickers.set(parent.ticker,Date.now());
-        if(!lpParentIndex.has(parent.ticker))lpParentIndex.set(parent.ticker,[]);
-        lpParentIndex.get(parent.ticker).push(parent);
-        if(!this.lpV5Geometry.has(parent.id)&&parent.lpObservation)
-          this.lpV5Geometry.set(parent.id,parent.lpObservation);
-      }
-    }
-    this.lpV5ParentsByTicker=lpParentIndex;
-    for(const id of this.lpV5Geometry.keys())if(!starlights.some(p=>p.id===id))this.lpV5Geometry.delete(id);
-    for(const id of this.lpV5WakeSignals?.keys()||[])if(!starlights.some(p=>p.id===id))this.lpV5WakeSignals.delete(id);
-    // This is only a bounded quote-cache hint. The complete durable monitor
-    // remains in PostgreSQL; REST rotation also covers watches outside the hint.
-    // Expire cache hints, not durable monitoring authority. Closed/revoked parents
-    // must not occupy subscriptions forever after leaving the current DB page.
-    for(const [ticker,seen] of this.lightningPriorityTickers)if(Date.now()-seen>60000)this.lightningPriorityTickers.delete(ticker);
-    while(this.lightningPriorityTickers.size>512)this.lightningPriorityTickers.delete(this.lightningPriorityTickers.keys().next().value);
-    await this.refreshLightningContinuationQuotes(starlights,{maximum:6});
-    if(!starlights.length)return 0;
-    if(!(this.lightningPlasmaScaleInInFlight instanceof Set))this.lightningPlasmaScaleInInFlight=new Set();
-    for(const star of starlights){
-      const parentId=String(star.id||'');
-      if(!parentId||this.lightningPlasmaScaleInInFlight.has(parentId))continue;
-      const cachedQuote=this.market?.getQuote?.(star.ticker)||null;
-      if(cachedQuote?.ticker===star.ticker&&['finalized','settled','determined','closed'].includes(String(cachedQuote.status||'').toLowerCase())){
-        await this.db.terminateLightningMonitor(star,'lp_market_terminal');
-        this.lightningPriorityTickers?.delete(star.ticker);observe(star,'lp_market_terminal');continue;
-      }
-      const eligibility=lightningParentEligibility(star,s);
-      if(!eligibility.ok){observe(star,eligibility.reason);continue;}
-      let existing,seatPlan;
-      try{
-        seatPlan=lightningCapitalSeatPlan(await this.db.lightningPlasmaSeatRows(parentId,s),s,parentId);
-        if(!seatPlan.ok)throw new Error(seatPlan.reason);
-        existing=seatPlan.occupied;
-      }
-      catch(error){
-        const message=String(error?.message||error);
-        stats.lastError=message;
-        observe(star,'durable_seat_query_unavailable',{message});
-        this.queueRuntimeDiagnostic(()=>this.db?.audit?.('error','lightning_plasma_scalein_seat_query_failed',{parentStarlightId:parentId,message}));
-        continue;
-      }
-      // Live quote only. Never invent a mark or a status.
-      const quote=this.market?.getQuote?.(star.ticker)||null;
-      if(!quote || !(Number(quote.yesBid)>0) || !(Number(quote.yesAsk)>0) || String(quote.status||'').toLowerCase()!=='active'){
-        stats.examined=(stats.examined||0)+1;
-        observe(star,'quote_unavailable_or_inactive',{existing});
-        continue;
-      }
-      const localGeometry=observePlasmaGeometry(this.lpV5Geometry?.get(star.id)||star.lpObservation||null,quote,star.entryPriceCents);
-      if(localGeometry)this.lpV5Geometry.set(star.id,localGeometry);
-      let observed=null;
-      try{
-        if(localGeometry)await this.db.persistLightningPlasmaObservation(star,localGeometry,s);
-        observed=await this.db.lightningPlasmaObservationByParent(star.id);
-      }catch(error){observe(star,'lp_v5_observation_persistence_unavailable',{message:String(error?.message||error)});continue;}
-      const decision=lightningPlasmaScaleInDecision({
-        starlight:star,quote,settings:s,observation:observed,
-        existingPlasmaForParent:existing,
-        thresholdCents:thr,
-      });
-      stats.examined=(stats.examined||0)+1;
-      if(!decision.ok){observe(star,decision.reason,{existing,profitCents:decision.profitCents??null,thresholdCents:thr});continue;}
-      const ask=Number(quote.yesAsk);
-      if(s.lightningPlasmaLinkEnabled!==true&&(ask<Number(s.lightningPlasmaMinEntryCents)||ask>Number(s.lightningPlasmaMaxEntryCents))){
-        observe(star,'lightning_own_entry_band',{askCents:ask,existing,profitCents:decision.profitCents});
-        continue;
-      }
-      this.lightningPlasmaScaleInInFlight.add(parentId);
-      try{
-        const stake=Number(s.lightningPlasmaFieldStakeCents||0);
-        const availableSeats=seatPlan.seats;
-        const want=availableSeats.length;
-        let openedCount=0,pendingCount=0;
-        const multiplySeatAudits=[];
-        // Bound recent per-seat evidence to the existing diagnostic runtime
-        // snapshot; the normal ledger export already includes this object.
-        const rememberMultiplySeats=()=>{
-          if(!multiplySeatAudits.length)return;
-          const history=Array.isArray(stats.lastMultiplySeats)?stats.lastMultiplySeats:[];
-          history.push(...multiplySeatAudits);
-          if(history.length>32)history.splice(0,history.length-32);
-          stats.lastMultiplySeats=history;
-        };
-        for(let n=0;n<want;n+=1){
-          const {seat,attemptGeneration}=availableSeats[n];
-          const startedAtMs=Date.now();
-          const seatWitness=s.mode==='LIVE' && decision.multiply>1?{}:null;
-          let opened=null,seatError=null;
-          try{
-            opened=await this.strategy.createHunter('Lightning Plasma',quote,stake,0,{
-              sourceTradeId:parentId,
-              parentStarlightId:parentId,
-              lightningPlasmaScaleIn:true,
-              lightningAttemptGeneration:attemptGeneration,
-              stackSeat:decision.multiply>1,
-              stackIndex:seat,
-              ...(seatWitness?{multiplySeatDiagnostic:seatWitness}:{}),
-            });
-          }catch(error){seatError=error;}
-          stats.attempted=(stats.attempted||0)+1;
-          if(seatWitness){
-            const after=this.market?.getQuote?.(star.ticker)||null;
-            const rejected=seatWitness.blocked||null;
-            // An OPEN/PENDING/REJECTED row is a local return state, never a
-            // claim of broker fill. Write evidence after all seats are
-            // attempted, so logging I/O cannot delay the next LIVE BUY.
-            multiplySeatAudits.push({
-              version:'LP-MULTIPLY-FORENSIC-V1',parentStarlightId:parentId,
-              ticker:star.ticker,seatIndex:seat,multiply:decision.multiply,
-              existingSeatsBeforeSweep:existing,
-              startedAtMs,finishedAtMs:Date.now(),
-              signalBidCents:Number(quote.yesBid),signalAskCents:Number(quote.yesAsk),
-              finalObservedBidCents:after?Number(after.yesBid):null,
-              finalObservedAskCents:after?Number(after.yesAsk):null,
-              finalQuoteAtMs:after?Number(after.quoteAtMs||after.updatedAtMs||0):null,
-              result:seatError?'ERROR':!opened?'BLOCKED':String(opened.status||'UNKNOWN'),
-              stage:rejected?.stage||seatWitness.stage||null,
-              reason:rejected?.reason||seatWitness.reason||(seatError?'strategy_exception':!opened?'unclassified_entry_refusal':null),
-              entryId:opened?.id||null,
-            });
-          }
-          if(seatError){
-            rememberMultiplySeats();
-            // Preserve the original fail-closed sweep behavior. The audit is
-            // best-effort and cannot manufacture or retry an uncertain order.
-            for(const row of multiplySeatAudits)this.queueRuntimeDiagnostic(()=>this.db?.audit?.('info','lightning_plasma_multiply_seat_result',row));
-            throw seatError;
-          }
-          if(!opened){
-            stats.blocked=(stats.blocked||0)+1;
-            observe(star,seatWitness?.blocked?.reason||'entry_guards_or_order_blocked',
-              {existing,seatIndex:seat,stage:seatWitness?.blocked?.stage||seatWitness?.stage||null,profitCents:decision.profitCents});
-            break;
-          }
-          if(opened.status==='open'){
-            openedCount+=1;stats.opened=(stats.opened||0)+1;
-          }else if(opened.status==='entry_pending'){
-            pendingCount+=1;stats.pending=(stats.pending||0)+1;
-          }else{
-            stats.blocked=(stats.blocked||0)+1;
-            observe(star,'lp_v5_no_send_or_rejected',{seatIndex:seat,attemptGeneration,status:opened.status});
-          }
-        }
-        // Outside the BUY loop: mandatory execution gates take precedence
-        // over diagnostics, and audit-write errors never influence entries.
-        rememberMultiplySeats();
-        for(const row of multiplySeatAudits)this.queueRuntimeDiagnostic(()=>this.db?.audit?.('info','lightning_plasma_multiply_seat_result',row));
-        if(openedCount||pendingCount){
-          stats.lastEvent={status:pendingCount?'PENDING_OR_OPEN':'OPENED',atMs:Date.now(),parentStarlightId:parentId,ticker:star.ticker,profitCents:decision.profitCents,seats:openedCount,pendingSeats:pendingCount};
-          observe(star,stats.lastEvent.status,{existing,profitCents:decision.profitCents,openedCount,pendingCount});
-        }
-      }catch(error){
-        stats.lastError=String(error?.message||error);
-        this.queueRuntimeDiagnostic(()=>this.db?.audit?.('error','lightning_plasma_scalein_failed',{parentStarlightId:parentId,message:stats.lastError}));
-      }finally{
-        this.lightningPlasmaScaleInInFlight.delete(parentId);
-      }
-    }
-    return activeOpenParents;
+    // R17: retired new-capital attack; historical fills/exits use independent
+    // reconciliation and protection services. No new order may be minted.
+    return {ok:false,reason:'r17_retired_legacy_capital_path'};
   }
 
   async refreshLightningContinuationQuotes(parents,{maximum=6}={}){
@@ -7670,10 +5147,6 @@ export class SagittariusEngine {
         if(!this.shadowSweepPromise && nowIdle-(this.lastShadowSweepAtMs||0)>=(this.shadowSweepIdle?30_000:0)){
           this.lastShadowSweepAtMs=nowIdle;
           void this.sweepShadowSaints().then(result=>{this.shadowSweepIdle=!(Number(result?.sweepOpenEntries)>0);}).catch(e=>this.recordError('shadow_worker_failure',e));
-        }
-        if(!this.lightningPlasmaScaleInPromise && nowIdle-(this.lastLightningSweepAtMs||0)>=(this.lightningSweepIdle?30_000:0)){
-          this.lastLightningSweepAtMs=nowIdle;
-          void this.sweepLightningPlasmaScaleIn().then(n=>{this.lightningSweepIdle=!(Number(n)>0);}).catch(e=>this.recordError('lightning_worker_failure',e));
         }
         // R10: never await lower-priority DB/research work on this watchdog.
         // The maintenance task preserves its original sequence and single-flight.
@@ -7785,19 +5258,62 @@ export class SagittariusEngine {
     return { version:'EMI1', allowed:engineActive&&!resetBlocked&&!overloaded, reason:!engineActive?'engine_disabled':resetBlocked?'simulation_reset_in_progress':overloaded?'operational_backpressure':'engine_active' };
   }
 
-  // Diagnostic-only explanation of the existing readiness veto; this adds no
-  // permission and does not remove any existing health or broker checks.
+  // A qualified R17 WATCH has already passed the COMPLETE owner doctrine.
+  // The global display-health composite and unrelated research/scan queues
+  // have no new-BUY veto authority. This boundary still demands current LIVE
+  // owner authority, native durability, authenticated broker account proof,
+  // and successful fresh funded-position protection.
+  goldSaintLiveAdmission({settings=this.settings,prospectiveArm=false}={}) {
+    let unsafe=true;
+    try{unsafe=this.operational?.sentinel?.unsafe?.()===true;}catch{unsafe=true;}
+    // Missing optional watchdog returns false; a real watchdog exception must
+    // never be silently accepted.
+    if(!this.operational?.sentinel)unsafe=false;
+    return qualifiedGoldSaintLiveAdmission({
+      settings,prospectiveArm,running:this.running===true,
+      stopping:this.shuttingDown===true,deploymentAllowed:env.allowLiveTrading===true,
+      cloneBound:this.cloneIdentity?.deploymentBound===true,
+      credentialsAvailable:Boolean(this.credentials),
+      databaseAvailable:Boolean(this.db&&this.db.dbInterrupted!==true),
+      accountProof:this.operational?.accountStatus?.(settings)||null,
+      protectionOk:this.profitGuard?.protectionOk===true,
+      lastProtectionAtMs:Number(this.health?.lastProtectionMs||0),
+      protectionFreshMs:PROTECTION_FRESH_MS,
+      fatalReason:this.operational?.fatal||null,watchdogUnsafe:unsafe,
+    });
+  }
+
+  isGoldSaintLiveReady(){return this.goldSaintLiveAdmission().ok===true;}
+
+  // Arming only tests actual LIVE execution invariants. The immediately
+  // preceding authenticated test, broker ownership reconciliation and full
+  // protection sweep must already have succeeded. A research/scan worker
+  // cannot deny authorization for an authoritative downstream WATCH.
   liveArmHealthDenials(settings=this.settings) {
-    const checks=[['restOk','rest'],['websocketFresh','websocket'],
-      ['reconciliationOk','broker_reconciliation'],['protectionOk','protection'],
-      ['protectionFresh','protection_freshness'],['goldenEyeOk','golden_eye'],
-      ['scannerFresh','scanner_freshness'],['shadowSchemaReady','shadow_schema'],
-      ['shadowWorkerFresh','shadow_worker_freshness'],['shadowWorkerOk','shadow_worker'],
-      ['dbOk','database']];
-    const reasons=checks.filter(([key])=>this.health?.[key]===false).map(([,name])=>name);
-    const operational=this.operational?.entryReasons?.(settings,this.operationalQueues?.()||[])||[];
-    for(const reason of operational)if(typeof reason==='string'&&reason.length<100)reasons.push(reason);
-    return [...new Set(reasons)].slice(0,12);
+    // In SIM, report eligibility for a prospective LIVE transition rather
+    // than treating SIM itself as a failed LIVE admission condition.
+    const result=this.goldSaintLiveAdmission({settings:{...settings,mode:'LIVE'},prospectiveArm:true});
+    return result.ok?[]:[result.reason];
+  }
+
+  // A bounded, non-blocking account refresh closes the gap after an expired
+  // account proof without discarding the qualified durable WATCH. This is
+  // NEVER an automatic LIVE arm or broker order, and honors pacing cooldowns.
+  requestGoldSaintAccountRefresh(){
+    if(this.settings?.mode!=='LIVE'||this.settings?.liveArmed!==true
+      ||this.settings?.engineActive!==true||!this.running||this.shuttingDown
+      ||this.operational?.accountStatus?.(this.settings)?.ok===true
+      ||this.goldSaintAccountRefreshPromise)return false;
+    const now=Date.now();
+    if(now-Number(this.lastGoldSaintAccountRefreshAtMs||0)<15_000)return false;
+    const pacing=this.kalshi?.localBalancePacingSnapshot?.()||{};
+    if(pacing.fleetSafeActive===true || now-Number(pacing.last429AtMs||0)<15_000)return false;
+    this.lastGoldSaintAccountRefreshAtMs=now;
+    const task=Promise.resolve().then(()=>this.reconcileBroker())
+      .then(ok=>{if(ok===true)this.r17?.onLiveAdmissionRestored?.();return ok;})
+      .catch(error=>{this.health.lastGoldSaintAccountRefreshError=String(error?.message||error).slice(0,120);return false;})
+      .finally(()=>{if(this.goldSaintAccountRefreshPromise===task)this.goldSaintAccountRefreshPromise=null;});
+    this.goldSaintAccountRefreshPromise=task;return true;
   }
 
   isLiveReady() {
@@ -7899,18 +5415,11 @@ export class SagittariusEngine {
       await this.runProtectionSweep('live_restart_rearm_check');
       this.recomputeHealth();
 
-      if (this.health.degraded) {
-        const reason = [
-          !this.health.restOk && 'rest',
-          !this.health.websocketFresh && 'websocket',
-          !this.health.reconciliationOk && 'reconciliation',
-          !this.health.protectionOk && 'protection',
-          !this.health.protectionFresh && 'protection_freshness',
-          !this.health.goldenEyeOk && 'golden_eye',
-          !this.health.scannerFresh && 'scanner_freshness',
-        ].filter(Boolean).join(',') || 'health_degraded';
-        if (reason !== this.liveAutoRearmLastReason) {
-          this.liveAutoRearmLastReason = reason;
+      const admission=this.goldSaintLiveAdmission({settings:{...this.settings,mode:'LIVE'},prospectiveArm:true});
+      if(!admission.ok){
+        const reason=admission.reason;
+        if(reason!==this.liveAutoRearmLastReason){
+          this.liveAutoRearmLastReason=reason;
           await this.db.audit?.('warning','live_restart_rearm_waiting',{release:RELEASE,reason,mode:this.settings.mode,allowLiveTrading:true}).catch(()=>{});
         }
         return false;
@@ -7919,14 +5428,13 @@ export class SagittariusEngine {
       // Final race check: a concurrent operator switch to SIMULATION must win.
       if (!this.running || !this.startupLiveResumeRequested || this.settings.mode !== 'LIVE' || !this.deploymentAllowsLiveTrading()
         || safetyRevision!==(this.runtimeSettingsSafetyRevision||0)) return false;
-      if(this.db?.shadowArchitectureRequired===true && (this.db.shadowSchemaReady!==true || this.shadowSaintStats?.degraded || !this.shadowSaintStats?.lastSuccessAtMs))
-        throw new Error('Shadow architecture has not completed a healthy monitoring cycle');
       // The SQL admission/pre-dispatch fence reads persisted liveArmed. Restoring
       // only the in-memory arm would look ready but block every new LIVE entry.
       const committed=await this.persistRuntimeSettings({...this.settings,liveArmed:true},{safetyRevision,changedKeys:['liveArmed']});
       if(committed.superseded || !this.running || !this.startupLiveResumeRequested || this.settings.mode!=='LIVE' || !this.settings.liveArmed)return false;
       this.liveAutoRearmLastReason = null;
       this.cancelLiveAutoRearm();
+      this.r17?.onLiveAdmissionRestored?.();
       this.invalidateStateSnapshot();
       // Re-evaluate current market state immediately after the safe arm is
       // restored instead of waiting for the normal five-minute scan cadence.
@@ -8085,15 +5593,19 @@ export class SagittariusEngine {
         const reconciled=await this.reconcileBroker({authorityMode:'LIVE',balanceProof:{value:tested.balance,
           atMs:tested.balanceObservedAtMs,generation:this.operational?.accountGeneration||0,
         brokerGeneration:tested.balanceGeneration}});
-        if(reconciled!==true)throw new Error('broker_reconciliation_not_clean');
+        if(reconciled!==true){
+          const detail=this.health?.lastReconciliationReason||this.liveFinancialOrphans?.status||'reconciliation_not_clean';
+          const err=new Error('broker_reconciliation_not_clean:'+detail);
+          err.code='broker_reconciliation_not_clean';
+          err.reconciliationReason=String(detail).slice(0,100);
+          throw err;
+        }
         await this.runProtectionSweep('live_arm_check');
         this.recomputeHealth();
         // A mode-switch is not committed yet: evaluate readiness against its
         // prepared LIVE scope rather than the stale SIM account-scope key.
         const denials=this.liveArmHealthDenials(prospectiveLiveScope);
-        if(denials.length)throw new Error('live_arm_health_blocked:'+denials.join(','));
-        if(this.db?.shadowArchitectureRequired===true && (this.db.shadowSchemaReady!==true || this.shadowSaintStats?.degraded || !this.shadowSaintStats?.lastSuccessAtMs))
-          throw new Error('Shadow architecture has not completed a healthy monitoring cycle');
+        if(denials.length)throw new Error('live_arm_actual_execution_safety_denied:'+denials.join(','));
         if(safetyRevision!==(this.runtimeSettingsSafetyRevision||0))throw new Error('live_arm_superseded_by_safety_control');
       }
       // Reauthorizing the SAME LIVE mode after a safe restart must not hide
@@ -8109,6 +5621,7 @@ export class SagittariusEngine {
       this.health.lastLiveModeAttempt={atMs:Date.now(),requestedMode:m,result:'committed',
         mode:this.settings.mode,liveArmed:this.settings.liveArmed===true};
       if(m==='LIVE'){
+        this.r17?.onLiveAdmissionRestored?.();
         this.requestScan();
         await Promise.resolve(this.db.audit?.('info','live_arm_committed',{
           mode:'LIVE',liveArmed:true,engineActive:this.settings.engineActive===true,
@@ -8120,14 +5633,18 @@ export class SagittariusEngine {
     }).catch(async error=>{
       // The financial-ledger ZIP may omit the general audit table. Retain the
       // latest actual refusal on its already-exported health surface as well.
+      const denialCode=String(error?.code||error?.message||'mode_change_denied').slice(0,180);
+      const reconciliationSubreason=error?.code==='broker_reconciliation_not_clean'
+        ?String(error?.reconciliationReason||this.health.lastReconciliationReason||'reconciliation_not_clean').slice(0,100)
+        :null;
       this.health.lastLiveModeAttempt={atMs:Date.now(),requestedMode:m,result:'denied',
         mode:this.settings.mode,liveArmed:this.settings.liveArmed===true,
-        reason:String(error?.code||error?.message||'mode_change_denied').slice(0,180),
+        reason:denialCode,reconciliationSubreason,
         brokerRequestFailure:error?.brokerFailure||null};
       await Promise.resolve(this.db.audit?.('warning','live_mode_change_denied',{
         requestedMode:m,mode:this.settings?.mode,liveArmed:this.settings?.liveArmed===true,
         engineActive:this.settings?.engineActive===true,
-        reason:String(error?.code||error?.message||'mode_change_denied').slice(0,180),
+        reason:denialCode,reconciliationSubreason,
         brokerRequestFailure:error?.brokerFailure||null
       })).catch(()=>{});
       throw error;
@@ -8156,11 +5673,12 @@ export class SagittariusEngine {
     }
     const numeric = new Set(EDITABLE_NUMERIC_SETTINGS);
     const booleans = new Set(EDITABLE_BOOLEAN_SETTINGS);
-    const allowed = new Set([...numeric, ...booleans, 'systemName', 'andromedaThunderWaveLevel', 'factoryTradingProfile20261005Applied', 'athenaArrowCloneApplied', 'winningCard20261005Applied', 'card20261006Applied', 'card20261006SessionApplied', 'card20261007LiveApplied', 'card20261008Applied']);
+    const allowed = new Set([...numeric, ...booleans, 'systemName', 'andromedaThunderWaveLevel', 'goldenSaints', 'factoryTradingProfile20261005Applied', 'athenaArrowCloneApplied', 'winningCard20261005Applied', 'card20261006Applied', 'card20261006SessionApplied', 'card20261007LiveApplied', 'card20261008Applied']);
     const unknown = Object.keys(patch || {}).filter((k) => !allowed.has(k));
     if (unknown.length) throw new Error(`Unknown or retired setting: ${unknown.join(', ')}`);
 
     let next = { ...this.settings };
+    if(Object.hasOwn(patch,'goldenSaints'))next.goldenSaints=applyGoldenSaintCardPatch(this.settings.goldenSaints,patch.goldenSaints);
     for (const k of numeric) {
       if (!Object.hasOwn(patch, k)) continue;
       const raw=patch[k];
@@ -8445,7 +5963,7 @@ export class SagittariusEngine {
       const task=Promise.resolve().then(async()=>{
         if(this.profitGuard?.tickerExitLocks?.has?.(candidate.ticker))
           return {closed:false,skipped:'priority_live_broker_mutation'};
-        const owned=await this.db.liveOpenHunterEntries(this.settings.ownerId);
+        const owned=await this.db.liveOpenHunterEntries(this.settings.ownerId,this.settings.systemName);
         if(owned.some(e=>e.ticker===candidate.ticker
           &&['open','exit_pending','pending_recovery'].includes(e.status)
           &&Number(e.remainingCount)>0))
@@ -8481,7 +5999,15 @@ export class SagittariusEngine {
       this.recomputeHealth();
       return requestedMode==='SIMULATION';
     }
-    this.health.reconciliationOk=false;
+    // A healthy 30-second authenticated account proof stays valid while its
+    // replacement is IN FLIGHT. The previous implementation withdrew LIVE
+    // entry authority on every normal refresh, even if the proof was current,
+    // causing 5-20 second gaps during the same broker/DB reads. All mutation,
+    // scope-change, expiry and error invalidations still fail closed through
+    // OperationalMonitor.accountStatus + final broker/ledger fences.
+    const reconciliationSettings={...originalScope,mode:requestedMode};
+    const previouslyVerified=this.operational?.accountStatus?.(reconciliationSettings)?.ok===true;
+    if(!previouslyVerified)this.health.reconciliationOk=false;
     this.recomputeHealth();
     if (!this.credentials) {
       this.operational?.invalidateAccount('credentials_unavailable');
@@ -8489,7 +6015,6 @@ export class SagittariusEngine {
       this.recomputeHealth();
       return this.health.reconciliationOk;
     }
-    const reconciliationSettings={...originalScope,mode:requestedMode};
     let accountStartedAtMs=Date.now();
     let accountGeneration=this.operational?.accountGeneration||0;
     const reusedProof=balanceProof&&balanceProof.value&&balanceProof.generation===accountGeneration
@@ -8513,7 +6038,8 @@ export class SagittariusEngine {
       let positions=initialPositions;
       let orders=accountOrders;
       this.brokerPositions = positions;
-      let owned = await this.db.liveOpenHunterEntries(this.settings.ownerId);
+      this.health.brokerPositionsAtMs = Date.now();
+      let owned = await this.db.liveOpenHunterEntries(this.settings.ownerId,this.settings.systemName);
       // These funded LIVE rows were quarantined by earlier releases without
       // financial closure. Do not count them as active exposure or let them
       // disappear from the account's proof obligations.
@@ -8624,12 +6150,12 @@ export class SagittariusEngine {
         // agree AGAIN after applying an authenticated settlement receipt.
         [positions,orders,owned,financialOrphans,economicClosures]=await Promise.all([
           this.kalshi.getPositions(),this.kalshi.getOpenOrders(),
-          this.db.liveOpenHunterEntries(this.settings.ownerId),
+          this.db.liveOpenHunterEntries(this.settings.ownerId,this.settings.systemName),
           this.db.liveFundedOrphanEntries(this.settings.ownerId,this.settings.systemName),
           this.db.liveUnresolvedBrokerFlatEntries(this.settings.ownerId,this.settings.systemName),
         ]);
         validateRestingOrders(orders);
-        this.brokerPositions=positions;
+        this.brokerPositions=positions;this.health.brokerPositionsAtMs=Date.now();
       }
 
       const summarize=(positionRows,ownedRows)=>{
@@ -8640,11 +6166,16 @@ export class SagittariusEngine {
           if(t)byTicker.set(t,(byTicker.get(t)||0)+qty);
         }
         let ok=true;
+        const invalidOwned=[];
         const requiredByTicker=new Map();
         const entriesByTicker=new Map();
         for(const e of ownedRows||[]){
           const disposition=q17LiveOwnedPositionDisposition(e);
-          if(!disposition.ok){ok=false;continue;}
+          if(!disposition.ok){
+            ok=false;
+            invalidOwned.push({ticker:String(e.ticker||''),reason:String(disposition.reason||'owned_position_unverified')});
+            continue;
+          }
           // A durable pending BUY has no authoritative inventory yet. Its
           // collateral remains reserved by the entry-scoped admission fence;
           // do not interpret it as a missing funded contract on this ticker.
@@ -8659,7 +6190,7 @@ export class SagittariusEngine {
           const broker=byTicker.get(ticker)||0;
           if(broker+1e-6<required){ok=false;shortages.push({ticker,required,broker,entries:entriesByTicker.get(ticker)||[]});}
         }
-        return{ok,byTicker,requiredByTicker,shortages};
+        return{ok,byTicker,requiredByTicker,shortages,invalidOwned};
       };
 
       let summary=summarize(positions,owned);
@@ -8679,10 +6210,16 @@ export class SagittariusEngine {
           // Reconciliation is clean only if fresh broker truth covers the fresh
           // owner-wide active ledger after that durable state transition.
           positions=await this.kalshi.getPositions();
-          this.brokerPositions=positions;
-          owned=await this.db.liveOpenHunterEntries(this.settings.ownerId);
+          this.brokerPositions=positions;this.health.brokerPositionsAtMs=Date.now();
+          owned=await this.db.liveOpenHunterEntries(this.settings.ownerId,this.settings.systemName);
           summary=summarize(positions,owned);
         }
+      }
+      // Lane C. Historical settlement attribution. Never a trading gate and
+      // never awaited on the LIVE authorization path. A slow backfill must
+      // not delay arming, balance, or protective exits.
+      if(typeof this.profitGuard?.reconcileBrokerFlatSettlements==='function'){
+        void this.profitGuard.reconcileBrokerFlatSettlements().catch(()=>{});
       }
 
       // Settlement or an ownership repair changes both authorities. Refresh then.
@@ -8693,10 +6230,10 @@ export class SagittariusEngine {
         accountGeneration=this.operational?.accountGeneration||0;
         [positions,orders,accountBalance,owned,financialOrphans]=await Promise.all([
           this.kalshi.getPositions(),this.kalshi.getOpenOrders(),this.kalshi.getBalance(),
-          this.db.liveOpenHunterEntries(this.settings.ownerId),
+          this.db.liveOpenHunterEntries(this.settings.ownerId,this.settings.systemName),
           this.db.liveFundedOrphanEntries(this.settings.ownerId,this.settings.systemName)]);
         validateBalance(accountBalance);validateRestingOrders(orders);
-        this.brokerPositions=positions;summary=summarize(positions,owned);
+        this.brokerPositions=positions;this.health.brokerPositionsAtMs=Date.now();summary=summarize(positions,owned);
       }
 
       if(summary.shortages.length){
@@ -8719,22 +6256,56 @@ export class SagittariusEngine {
       // Until actual broker-backed financial closure, legacy funded
       // quarantines are an outstanding account discrepancy, not permission to
       // resume fresh capital entries.
-      if(financialOrphans.length)summary.ok=false;
-      this.liveFinancialOrphans={count:financialOrphans.length,
-        tickers:[...new Set(financialOrphans.map(e=>e.ticker))].slice(0,20),
-        status:'requires_verified_broker_closure'};
       // Other clone broker orders are classified exclusively from authenticated
       // exact order identity and this installation's own durable ledger.
       const orderIssues=ownOrderIssues(orders,owned,{localTag:this.cloneIdentity?.tag});
+      const ownClaimedTickers=[...new Set((owned||[])
+        .filter(e=>q17LiveOwnedPositionDisposition(e)?.requiresInventory===true)
+        .map(e=>String(e.ticker||'')).filter(Boolean))];
+      const arming=liveArmingReconciliationDecision({
+        baseReconciliationOk:summary.ok===true,
+        invalidOwned:summary.invalidOwned||[],
+        financialOrphans,positions,orders,
+        shortages:summary.shortages||[],orderIssues,
+        scopeChanged:scopeKey(this.settings)!==scopeKey(originalScope),
+        generationChanged:(this.operational?.accountGeneration||0)!==accountGeneration,
+        ownClaimedTickers,
+      });
+      // The arming decision is the authority for new LIVE admission.
+      // summary.ok may be false solely because of broker-flat historical
+      // rows; those are non-blocking once the decision has classified them.
+      // Genuine exposure, shortages, conflicts, and drift still return
+      // arming.ok false and keep the account closed.
+      summary.ok=arming.ok===true;
+      summary.armingReason=arming.reason;
+      // Preserve the exact owner-disposition sub-reasons without logging
+      // broker payloads or raw ownership identifiers. The earlier release
+      // dropped this forensic evidence behind one generic boolean.
+      this.health.lastReconciliationDetails={
+        version:'R17-R6-RECONCILIATION-DETAILS-1',
+        invalidOwnedCount:Number(arming.invalidOwnedCount||0),
+        invalidOwnedReasons:Array.isArray(arming.invalidOwnedReasons)
+          ?arming.invalidOwnedReasons.slice(0,8):[],
+        shortageCount:Number(arming.shortageCount||summary.shortages.length||0),
+        unknownRestingOrders:Number(orderIssues.unknownOnOwned||0),
+        ownershipConflicts:Number(orderIssues.ownershipConflicts||0),
+        flatOrphanCount:Number(arming.flatOrphanCount||0),
+        activeOrphanCount:Array.isArray(arming.activeOrphanTickers)
+          ?arming.activeOrphanTickers.length:0,
+        scopeChanged:scopeKey(this.settings)!==scopeKey(originalScope),
+        generationChanged:(this.operational?.accountGeneration||0)!==accountGeneration,
+      };
+      this.liveFinancialOrphans={count:financialOrphans.length,
+        tickers:[...new Set(financialOrphans.map(e=>e.ticker))].slice(0,20),
+        activeOrphanTickers:arming.activeOrphanTickers||[],
+        flatOrphanCount:arming.flatOrphanCount||0,
+        status:summary.ok?(financialOrphans.length?'unsettled_historical_broker_flat_obligations':'none'):'requires_verified_broker_closure'};
       // Resting own orders and unidentified orders on an owned ticker require
       // reconciliation, not additional entries. Known other-system inventory
       // keeps the original shared-account ownership semantics.
-      if(orderIssues.unknownOnOwned||orderIssues.ownershipConflicts)summary.ok=false;
       // Exact known owned resting orders are still reserved in their ledger
       // rows. A known order does not contaminate unrelated market admission.
       // Unidentified/conflicting resting orders remain hard failures.
-      if(scopeKey(this.settings)!==scopeKey(originalScope))summary.ok=false;
-      if((this.operational?.accountGeneration||0)!==accountGeneration)summary.ok=false;
       // An in-flight exact broker mutation is not itself a failed account
       // reconciliation: its client ID and collateral remain durable. However,
       // any account-generation change *during* this snapshot still invalidates
@@ -8744,14 +6315,18 @@ export class SagittariusEngine {
       // transport readiness. No redundant extra balance GET is necessary.
       this.health.restOk=true;
       this.health.lastRestOkMs=Date.now();
-      const accountFailReason=!summary.ok?(financialOrphans.length?'funded_orphans_unclosed':summary.shortages?.length?'ownership_shortage':orderIssues.unknownOnOwned||orderIssues.ownershipConflicts?'order_ownership':(this.operational?.accountGeneration||0)!==accountGeneration?'account_generation_changed':'reconciliation_not_clean'):null;
+      const accountFailReason=!summary.ok?(arming.reason||'reconciliation_not_clean'):null;
       this.operational?.setAccount({settings:reconciliationSettings,startedAtMs:accountStartedAtMs,
         ok:summary.ok,reason:accountFailReason,balance:accountBalance,orders,ownIssues:orderIssues});
       this.health.reconciliationOk=summary.ok === true;
+      this.health.lastReconciliationReason=accountFailReason;
       this.recomputeHealth();
       // Financial recovery is intentionally NOT awaited. A slow or missing
       // archival endpoint cannot make an otherwise healthy LIVE clone choke.
-      if(summary.ok===true)this.scheduleHistoricalBrokerFlatRecovery(economicClosures,recordSettlementProbe,owned);
+      if(summary.ok===true){
+        this.scheduleHistoricalBrokerFlatRecovery(economicClosures,recordSettlementProbe,owned);
+        if(this.settings?.mode==='LIVE'&&this.settings?.liveArmed===true)this.r17?.onLiveAdmissionRestored?.();
+      }
       return summary.ok;
     } catch (e) {
       this.operational?.invalidateAccount('broker_reconciliation_failed');
@@ -8801,6 +6376,7 @@ export class SagittariusEngine {
     // changed. Merge current cached quotes for every open ticker, then retain
     // all of those required rows plus the best non-entered observation rows.
     const candidatesByTicker = new Map((markets || []).map((q) => [q.ticker, q]));
+    for(const q of markets||[])this.recordTradingFunnelStage({candidateId:`market:${q.ticker}`,ticker:q.ticker,eventTicker:q.eventTicker||q.ticker,stage:'market_discovered',status:'observed'});
     for (const ticker of requiredTickers) {
       if (candidatesByTicker.has(ticker)) continue;
       const cached = this.market?.getQuote?.(ticker);
@@ -8816,8 +6392,15 @@ export class SagittariusEngine {
       return distance(a.yesAsk) - distance(b.yesAsk);
     });
     const required = ranked.filter((q) => requiredTickers.has(q.ticker));
-    const optional = ranked.filter((q) => !requiredTickers.has(q.ticker)).slice(0, Math.max(0, 50 - required.length));
-    const selected = [...required, ...optional];
+    // R29: reserve at most six existing tracker slots for near-scheduled
+    // pregame scouts; otherwise the previous price/activity ranking would
+    // discard them before GameClockAuthority could learn the negative status.
+    // Funded/watch priority remains first. This is observation, not entry.
+    const clockScouts=ranked.filter(q=>!requiredTickers.has(q.ticker)
+      &&q.clockProbeOnly===true).slice(0,Math.min(6,Math.max(0,50-required.length)));
+    const optional = ranked.filter(q=>!requiredTickers.has(q.ticker)
+      &&q.clockProbeOnly!==true).slice(0,Math.max(0,50-required.length-clockScouts.length));
+    const selected = [...required, ...clockScouts, ...optional];
     const keep = new Set([...requiredTickers, ...selected.map((q) => q.ticker)]);
 
     // Discovery/live classification is deliberately broad and remains useful
@@ -8860,21 +6443,18 @@ export class SagittariusEngine {
     // reserved for already-open exposure-chain tickers; normal candidates use
     // the lighter milestone + live-data path. Endpoint calls are cached and
     // bounded in KalshiClient, so optional enrichment cannot dominate a scan.
-    const gameStatsEventTickers = new Set(selected.filter((q) => entered.has(q.ticker)).map((q) => q.eventTicker || q.ticker));
-    const resolvedClockStates = await this.gameClock.resolveBatch(selected, priorClockStates, now, {
-      gameStatsEventTickers,
-      allowObservedActivityClock: true,
-      minimumElapsedMs: Math.max(0, Number(this.settings.minGameMinutes || 0)) * 60 * 1000,
+    const gameStatsEventTickers = new Set(selected.filter((q) => entered.has(q.ticker) || (q.gameClockState?.phase==='LIVE_START_UNKNOWN')).map((q) => q.eventTicker || q.ticker));
+    const clockRows=await mapLimit(eventTickers,GAME_CLOCK_AUTHORITY.maxConcurrency,async eventTicker=>{
+      const state=await this.resolveClockForEvent(eventTicker,selected.filter(q=>(q.eventTicker||q.ticker)===eventTicker),{
+        priorState:priorClockStates.get(eventTicker),allowGameStats:gameStatsEventTickers.has(eventTicker),forceFresh:false});
+      return [eventTicker,state||priorClockStates.get(eventTicker)||null];
     });
-    const clockStates = new Map(priorClockStates);
-    for (const [eventTicker, state] of resolvedClockStates) {
-      clockStates.set(eventTicker, state);
-      if (typeof this.db.upsertGameClockState === 'function') {
-        const prior=priorClockStates.get(eventTicker);
-        const same=prior && prior.startTimeMs===state?.startTimeMs && prior.status===state?.status && prior.version===state?.version;
-        if(!same)await this.db.upsertGameClockState(this.settings.systemName, eventTicker, state);
-      }
-    }
+    const clockStates=new Map(clockRows);
+    this.market?.observeClockScoutSchedules?.(this.gameClock?.seriesMilestoneCache,Date.now());
+    // Noncritical, strictly bounded (max two series per FIVE-MINUTE full
+    // scan) public provider-milestone enrichment for quiet discovery candidates.
+    // Never await it on an entry/exit/DB/broker safety critical path.
+    this.scheduleClockScoutHintWarming?.();
 
     const trackerRows=[];
     for (const q of selected) {
@@ -8894,83 +6474,140 @@ export class SagittariusEngine {
     return new Map((await this.db.trackers(this.settings.systemName, 2000)).map((x) => [x.ticker, x]));
   }
 
-  async refreshGameClockForQuote(candidate, { forceFresh = false } = {}) {
-    const ticker = String(candidate?.ticker || '');
-    const eventTicker = String(candidate?.eventTicker || ticker);
-    if (!ticker || !eventTicker || !this.gameClock) return null;
-    // Pre-execution calls force a fresh exact market REST/book observation
-    // before resolving the clock. This prevents the weaker occurrence fallback
-    // from being authorized by a stale cached activity classification.
-    if (forceFresh && typeof this.market?.refreshTicker === 'function') {
-      await this.market.refreshTicker(ticker).catch(() => null);
-      // Broad scan activity is intentionally not trusted at the executable
-      // boundary. Refresh the exact ticker's last-five-minute trades so the
-      // occurrence fallback cannot inherit a stale `recentTrades` count.
-      const tradeProbe = typeof this.kalshi?.getRecentTradesForTicker === 'function'
-        ? await this.kalshi.getRecentTradesForTicker(ticker, 5).catch(() => null)
-        : null;
-      const refreshedQuote = this.market?.getQuote?.(ticker);
-      if (refreshedQuote) {
-        refreshedQuote.recentTradesObservedAtMs = tradeProbe ? Number(tradeProbe.observedAtMs || Date.now()) : 0;
-        if (tradeProbe) {
-          refreshedQuote.recentTrades = Number(tradeProbe.count || 0);
-          if (Number(tradeProbe.lastPriceCents || 0) > 0) refreshedQuote.lastPrice = Number(tradeProbe.lastPriceCents);
-        }
+  // R32: R31 cached schedule hints for only already-observed active
+  // series. Production: SGT-2 had 140 hint entries but ZERO matched any quiet
+  // pregame scout. Learn the quiet series via no more than TWO existing
+  // public milestone series queries per FULL discovery scan, independent of
+  // trading/balance/protection; never create an order or authorize kickoff.
+  scheduleClockScoutHintWarming(){
+    if(this.shuttingDown===true||this.clockScoutWarmPromise)return false;
+    const cache=this.gameClock?.seriesMilestoneCache;
+    const get=this.gameClock?.seriesMilestonesForSeries?.bind(this.gameClock);
+    const sources=Array.isArray(this.market?.pregameScoutCandidateSeries)
+      ?this.market.pregameScoutCandidateSeries.slice(0,80):[];
+    if(!(cache instanceof Map)||!get||!sources.length)return false;
+    const now=Date.now(),cursor=Number(this.clockScoutWarmCursor||0)%sources.length;
+    const chosen=[];let visited=0;
+    for(let i=0;i<sources.length&&chosen.length<2;i++){
+      const series=String(sources[(cursor+i)%sources.length]||'');
+      visited++;
+      if(!series)continue;
+      const age=now-Number(cache.get(series)?.observedAtMs||0);
+      // An empty/error provider response is also evidence: never hammer
+      // stale/failing series every scan. Fresh rows revalidate naturally
+      // through the normal GameClock lookup if needed.
+      if(cache.has(series)&&age>=-2000&&age<20*60_000)continue;
+      chosen.push(series);
+    }
+    this.clockScoutWarmCursor=(cursor+visited)%sources.length;
+    const metrics=this.market.pregameScoutScheduleWarmStats||
+      (this.market.pregameScoutScheduleWarmStats={attempted:0,completed:0,errors:0,rows:0,lastCompletedAtMs:0});
+    metrics.seriesCandidates=sources.length;
+    if(!chosen.length)return false;
+    metrics.attempted+=chosen.length;
+    const task=Promise.allSettled(chosen.map(series=>get(series))).then(results=>{
+      for(const item of results){
+        if(item.status==='fulfilled'){
+          metrics.completed++;
+          if(item.value?.error)metrics.errors++;
+          metrics.rows+=Array.isArray(item.value?.rows)?item.value.rows.length:0;
+        }else metrics.errors++;
       }
-    }
-    const now = Date.now();
-    const current = this.market?.getQuote?.(ticker) || candidate;
-    if (!current || String(current.eventTicker || current.ticker || '') !== eventTicker) {
-      await Promise.resolve(this.db.audit?.('info', 'game_clock_refresh_event_identity_blocked', {
-        ticker, eventTicker, freshEventTicker: current ? String(current.eventTicker || current.ticker || '') : null,
-      })).catch(() => {});
-      return null;
-    }
-    const siblings = [];
-    const seen = new Set();
-    const add = (q) => {
-      if (!q?.ticker || seen.has(q.ticker)) return;
-      if (String(q.eventTicker || q.ticker) !== eventTicker) return;
-      seen.add(q.ticker);
-      const liveStatus = computeLiveStatus({
-        tradeCount: q.recentTrades, yesBid: q.yesBid, yesAsk: q.yesAsk,
-        prevYesBid: q.prevYesBid || 0, prevYesAsk: q.prevYesAsk || 0,
-        occurrenceTimeMs: q.occurrenceTimeMs, closeTimeMs: q.closeTimeMs,
-        volume24h: q.volume24h, now,
-      });
-      siblings.push({ ...q, liveStatus });
-    };
-    add(current);
-    for (const q of this.lastScanMarkets || []) add(q);
-    if (!siblings.length) return null;
-    const priorMap = typeof this.db.gameClockStates === 'function'
-      ? await this.db.gameClockStates(this.settings.systemName, [eventTicker])
-      : new Map();
-    const prior = priorMap.get(eventTicker) || candidate?.gameClockState || null;
-    const state = await this.gameClock.resolveEvent({
-      eventTicker,
-      quotes: siblings,
-      priorState: prior,
-      now,
-      allowGameStats: true,
-      forceFresh,
-      allowObservedActivityClock: true,
-      minimumElapsedMs: Math.max(0, Number(this.settings.minGameMinutes || 0)) * 60 * 1000,
+      metrics.lastCompletedAtMs=Date.now();
+      if(this.shuttingDown!==true)
+        this.market?.observeClockScoutSchedules?.(cache,Date.now());
+    }).catch(()=>{metrics.errors++;}).finally(()=>{
+      if(this.clockScoutWarmPromise===task)this.clockScoutWarmPromise=null;
     });
-    if (typeof this.db.upsertGameClockState === 'function') {
-      await this.db.upsertGameClockState(this.settings.systemName, eventTicker, state);
+    this.clockScoutWarmPromise=task;
+    return true;
+  }
+
+  clockRuntime(){
+    this.eventClockRuntime ||= new EventClockRuntime();
+    this.eventClockRuntime.useScope(this.settings);
+    return this.eventClockRuntime;
+  }
+
+  currentGameClockState(eventTicker){return this.clockRuntime().current(String(eventTicker));}
+
+  publishGameClockState(eventTicker,state,quotes=[]){
+    if(!state||String(state.eventTicker)!==String(eventTicker))return;
+    const seen=new Set(),apply=q=>{
+      if(!q||seen.has(q)||String(q.eventTicker||q.ticker)!==String(eventTicker))return;
+      seen.add(q);q.gameClockState=state;
+      q.gameStartTimeMs=isConfirmedGameClockState(state,eventTicker)?Number(state.actualStartMs):null;
+    };
+    for(const q of quotes)apply(q);
+    for(const q of this.lastScanMarkets||[])apply(q);
+    for(const q of this.market?.quotes?.values?.()||[])apply(q);
+    for(const q of quotes)apply(this.market?.getQuote?.(q.ticker));
+    // Wake the existing bounded reader; no sibling waits for another price tick.
+    this.r17?.onGameClockEvidence?.(eventTicker);
+  }
+
+  async resolveClockForEvent(eventTicker,quotes,{priorState=null,forceFresh=false,allowGameStats=true}={}){
+    const runtime=this.clockRuntime(),systemName=this.settings.systemName,generation=runtime.generation;
+    const currentScope=()=>{runtime.useScope(this.settings);return generation===runtime.generation;};
+    const exact=raw=>{const state=normalizeGameClockState(raw,eventTicker);return state?.eventTicker===String(eventTicker)?state:null;};
+    const state=await runtime.resolve(eventTicker,{forceFresh,allowGameStats},async memory=>{
+      let prior=latestSameEventClockState(eventTicker,memory,priorState,
+        ...(quotes||[]).map(q=>q?.gameClockState));
+      if(!prior&&typeof this.db?.gameClockStates==='function'){
+        const rows=await this.db.gameClockStates(systemName,[eventTicker]);
+        if(!currentScope())return null;
+        prior=exact(rows.get(eventTicker));
+      }
+      const next=exact(await this.gameClock.resolveEvent({eventTicker,quotes,priorState:prior,
+        now:Date.now(),allowGameStats,forceFresh,allowObservedActivityClock:false,
+        minimumElapsedMs:Math.max(0,Number(this.settings.minGameMinutes||0))*60000}));
+      if(!currentScope()||!next)return null;
+      // A same-event FINAL is sticky; a late older result cannot be persisted
+      // before the in-memory adoption check notices that it was superseded.
+      let selected=latestSameEventClockState(eventTicker,runtime.current(eventTicker),prior,next);
+      if(typeof this.db?.upsertGameClockState==='function'){
+        const persisted=await runtime.persist(eventTicker,selected,prior,value=>this.db.upsertGameClockState(systemName,eventTicker,value),Date.now(),generation);
+        selected=exact(persisted?.state);
+        if(!selected)return null;
+      }
+      if(!currentScope())return null;
+      if(typeof this.gameClock.auditTransition==='function'){
+        const report=()=>this.gameClock.auditTransition(eventTicker,prior,selected,quotes);
+        if(typeof this.queueRuntimeDiagnostic==='function')this.queueRuntimeDiagnostic(report);
+      }
+      return selected;
+    });
+    if(!currentScope())return null;
+    if(state){
+      this.publishGameClockState(eventTicker,state,quotes);
+      const evidence={candidateId:`clock:${eventTicker}`,eventTicker,
+        stage:state.actualStartConfidence==='proven'?'actual_start_proven':
+          state.phase==='BOUNDED'?'actual_start_bounded':
+          state.phase==='SCHEDULE_LIVE'?'scheduled_reference_not_actual_start':'actual_start_unknown',
+        status:'observed',reason:state.reason};
+      this.recordTradingFunnelStage(evidence);
+      if(state.milestoneId)this.recordTradingFunnelStage({...evidence,stage:'sporting_milestone_matched'});
+      this.recordTradingFunnelStage({...evidence,stage:isEntryAuthorizedGameClockState(state,eventTicker,Date.now())?'fresh_live_evidence':'live_evidence_not_authorized'});
     }
-    const gameStartTimeMs = isConfirmedGameClockState(state, eventTicker) ? Number(state.startTimeMs) : null;
-    candidate.gameClockState = state || {};
-    candidate.gameStartTimeMs = gameStartTimeMs;
-    candidate.liveStatus = siblings.find((q) => q.ticker === ticker)?.liveStatus || candidate.liveStatus;
-    const cached = this.market?.getQuote?.(ticker);
-    if (cached) {
-      cached.gameClockState = state || {};
-      cached.gameStartTimeMs = gameStartTimeMs;
-      cached.liveStatus = candidate.liveStatus;
-    }
-    return { gameClockState: state || {}, gameStartTimeMs, liveStatus: candidate.liveStatus };
+    return state;
+  }
+
+  async refreshGameClockForQuote(candidate,{forceFresh=false}={}){
+    const ticker=String(candidate?.ticker||''),eventTicker=String(candidate?.eventTicker||ticker);
+    if(!ticker||!eventTicker||!this.gameClock)return null;
+    // Clock-only requests use official sporting data. Executable book/cash
+    // validation remains in the order path; trades can never prove kickoff.
+    const current=this.market?.getQuote?.(ticker)||candidate;
+    if(String(current?.eventTicker||current?.ticker||'')!==eventTicker)return null;
+    const siblings=[],seen=new Set();
+    const add=q=>{if(q?.ticker&&!seen.has(q.ticker)&&String(q.eventTicker||q.ticker)===eventTicker){seen.add(q.ticker);siblings.push(q);}};
+    add(current);for(const q of this.market?.quotes?.values?.()||[])add(q);
+    for(const q of this.lastScanMarkets||[])add(q);
+    const state=await this.resolveClockForEvent(eventTicker,siblings,{forceFresh,allowGameStats:true,
+      priorState:candidate.gameClockState||null});
+    if(!state)return null;
+    this.publishGameClockState(eventTicker,state,[candidate,current]);
+    return {gameClockState:state,gameStartTimeMs:candidate.gameStartTimeMs,liveStatus:candidate.liveStatus};
   }
 
   async evaluateEntryChain(markets, trackerMap, marketMap) {
@@ -9068,6 +6705,21 @@ export class SagittariusEngine {
     await step('duration_learning',()=>this.learning.learnDurations(quotes));
   }
 
+  r17WatchPriorityTickers(maximum=48) {
+    // Only active, enabled, matching-fingerprint R17 WATCHING tickers appear
+    // here. The MarketHub owns the stable 30-second subscription cohort.
+    // This discovery subset cannot evict live positions or rotate the
+    // websocket membership on every full/fast scan.
+    const all=[...(this.r17?.activeTickers||[])].filter(Boolean);
+    if(!all.length){this.r17WatchPriorityCursor=0;return [];}
+    const count=Math.min(48,Math.max(1,Math.trunc(Number(maximum)||48)),all.length);
+    const begin=Number(this.r17WatchPriorityCursor||0)%all.length;
+    const chosen=[];
+    for(let i=0;i<count;i++)chosen.push(all[(begin+i)%all.length]);
+    this.r17WatchPriorityCursor=(begin+count)%all.length;
+    return chosen;
+  }
+
   async fullScan() {
     const start = Date.now();
     this.speed = { ...this.speed, mode: 'fullScan', lastLoopMs: start, checksCompleted: 0, closedThisLoop: 0, fetchFailures: 0 };
@@ -9075,14 +6727,18 @@ export class SagittariusEngine {
       const openTickers = await this.openMemoryPriorityTickers();
       await this.refreshRecoveryPriorityTickers();
       this.refreshCrashPriorityTickers();
-      const watchTickers=[...this.recoveryPriorityTickers,...this.sagittariusArrowPriorityTickers,
+      const r17WatchTickers=this.r17WatchPriorityTickers(48);
+      const watchTickers=[...r17WatchTickers,...this.recoveryPriorityTickers,...this.sagittariusArrowPriorityTickers,
         ...this.scarletNeedleCapitalPriorityTickers,...this.pegasusRyuSeiKenCapitalPriorityTickers,
         ...this.greatHornPriorityTickers,...this.crystalWallRecoveryPriorityTickers,
         ...this.crashPriorityTickers,...(this.lightningPriorityTickers?.keys?.()||[])];
       // The DB's openEntryTickers includes SHADOW rows. Pin all of them for
       // continuity, but prioritize only ProfitGuard-verified capital exposure.
       this.market?.setProtectionPriority?.([...this.protectedTickers],[...openTickers,...watchTickers]);
-      const priority = [...new Set([...openTickers, ...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers,...(this.lightningPriorityTickers?.keys?.()||[])])];
+      const priority = [...new Set([...openTickers,...r17WatchTickers, ...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers,...(this.lightningPriorityTickers?.keys?.()||[])])];
+      // Pure observation retention bound derived from this clone's saved owner
+      // window. Does not change entry admission, game age, or broker authority.
+      this.market.clockScoutOwnerMaxGameMinutes=Number(this.settings?.maxGameMinutes||0);
       const markets = await this.market.discover(priority);
       for (const q of markets) if (!q.quoteAtMs) q.quoteAtMs = Number(q.updatedAtMs || 0) || Date.now();
       this.lastScanMarkets = markets;
@@ -9094,7 +6750,7 @@ export class SagittariusEngine {
         const q = this.market.getQuote(t);
         if (q) this.market.sample(q.ticker, Date.now());
       }
-      const trackerMap = await this.persistTrackers(markets, [...new Set([...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers])]);
+      const trackerMap = await this.persistTrackers(markets, [...new Set([...r17WatchTickers,...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers])]);
       const map = new Map(markets.map((x) => [x.ticker, x]));
       for (const t of priority) {
         if (!map.has(t)) {
@@ -9163,13 +6819,14 @@ export class SagittariusEngine {
           const openTickers = await this.openMemoryPriorityTickers();
           await this.refreshRecoveryPriorityTickers();
           this.refreshCrashPriorityTickers();
-          const watchTickers=[...this.recoveryPriorityTickers,...this.sagittariusArrowPriorityTickers,
+          const r17WatchTickers=this.r17WatchPriorityTickers(48);
+          const watchTickers=[...r17WatchTickers,...this.recoveryPriorityTickers,...this.sagittariusArrowPriorityTickers,
             ...this.scarletNeedleCapitalPriorityTickers,...this.pegasusRyuSeiKenCapitalPriorityTickers,
             ...this.greatHornPriorityTickers,...this.crystalWallRecoveryPriorityTickers,...this.crashPriorityTickers];
           // The DB's openEntryTickers includes SHADOW rows. Pin all of them for
       // continuity, but prioritize only ProfitGuard-verified capital exposure.
       this.market?.setProtectionPriority?.([...this.protectedTickers],[...openTickers,...watchTickers]);
-          const requiredTickers = new Set([...openTickers, ...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers]);
+          const requiredTickers = new Set([...openTickers,...r17WatchTickers, ...this.recoveryPriorityTickers, ...this.sagittariusArrowPriorityTickers, ...this.scarletNeedleCapitalPriorityTickers, ...this.pegasusRyuSeiKenCapitalPriorityTickers, ...this.greatHornPriorityTickers, ...this.crystalWallRecoveryPriorityTickers, ...this.crashPriorityTickers]);
           const requiredTrackers = trackers.filter((tr) => requiredTickers.has(tr.ticker));
           const optionalTrackers = trackers.filter((tr) => !requiredTickers.has(tr.ticker)).slice(0, Math.max(0, 50 - requiredTrackers.length));
           const activeTrackers = [...requiredTrackers, ...optionalTrackers];
@@ -9385,7 +7042,7 @@ export class SagittariusEngine {
       periodsComplete:c.periodsComplete,byAttack:report.byAttack,legacyCapitalPerformance,accountExecutionSummary:report.combined,reportingVersion:LIGHTNING_REPORT_VERSION,asOfMs:now,
       reportingScope:{systemName:settings.systemName,ownerId:settings.ownerId,mode:settings.mode,resetTimestampMs:Number(settings.resetTimestampMs||0),dashboardStartMs:Number((settings.mode==='LIVE'?settings.liveDashboardStartMs:settings.simulationDashboardStartMs)||0),conceptName:'Lightning Plasma',executionClass:'CAPITAL'},
       feederRealizedCents:0,feederUnrealizedCents:feederUnrealized,portfolioValueCents,simulationCashCents,conceptAggregate,operationalHistory:!!snapshot,
-      shadowSaints:rows.filter(isShadowSaintEntry),crystalWallOpenDashboardRows:crystalWallOpen.slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),crystalWallClosedDashboardRows:crystalWallClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),greatHornOpenDashboardRows:greatHornOpen.slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),greatHornClosedDashboardRows:greatHornClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),legacyClosedDashboardRows:legacyClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),closedDashboardRows:closed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows)};
+      shadowSaints:rows.filter(isShadowSaintEntry),crystalWallOpenDashboardRows:crystalWallOpen.slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),crystalWallClosedDashboardRows:crystalWallClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),greatHornOpenDashboardRows:greatHornOpen.slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),greatHornClosedDashboardRows:greatHornClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),legacyClosedDashboardRows:legacyClosed.sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows),closedDashboardRows:closedRows.filter(e=>R17_GOLDEN_CAPITAL_CONCEPTS.includes(e.conceptName)&&executionScopeMatches(e,settings)&&e.status==='closed').concat(closed).sort((a,b)=>Number(b.closedAtMs||0)-Number(a.closedAtMs||0)).slice(0,OPERATOR_PLANE_ISOLATION.maximumClosedRows)};
   }
 
   buildAuroraSummary(entries = []) {
@@ -9539,6 +7196,7 @@ export class SagittariusEngine {
       researchDeferred:this.resourceResearchDeferred===true,tradingAuthority:RUNTIME_RESOURCE_GOVERNOR.tradingAuthority,
       authority:'TELEMETRY_AND_NON_AUTHORITY_CACHE_GOVERNANCE',
       tradingLiveness:this.tradingLiveness?.snapshot?.()||null,
+      linkedTradingFunnel:this.tradingFunnelSnapshot(),
       diagnosticWriter:this.runtimeDiagnosticReporter?.snapshot?.()||null,
       quoteProtectionResearch:this.quoteProtectionResearchReporter?.snapshot?.()||null,
       cpuPercent,uptimeSeconds:process.uptime(),pid:process.pid,
@@ -9806,7 +7464,7 @@ export class SagittariusEngine {
       const target=Array.isArray(conceptStats)?conceptStats.find(x=>x.name===name||x.conceptName===name):conceptStats[name];
       if(target)Object.assign(target,a);
     }
-    const financialRows=entries.filter(e=>lightningCapital(e)&&executionScopeMatches(e,p.reportingScope));
+    const financialRows=entries.filter(e=>R17_GOLDEN_CAPITAL_CONCEPTS.includes(e.conceptName)&&executionScopeMatches(e,p.reportingScope));
     const auroraExecution = {...this.buildAuroraSummary(financialRows),reportingScope:p.reportingScope,coverage:'retained_lightning_rows_not_full_history'};
     const infinityBreak = {...this.buildInfinityBreakSummary(financialRows),reportingScope:p.reportingScope,coverage:'retained_lightning_rows_not_full_history'};
     const atomicThunderBolt={...this.atomicThunderBolt?.summary?.(),episodes:opportunitySummary};
@@ -9900,6 +7558,7 @@ export class SagittariusEngine {
         intelligenceHydration:{...(this.intelligenceHydration||{}),tradingBlocked:false},
         athenaHistoricalMemoryLoad:{...(this.athenaCommander?.memoryLoad||{}),entryAuthorityBlockedUntilLoaded:false},
         historicalIntelligenceBlocksTrading:false,
+        settingsUpgradeEvidence:this.settingsUpgradeEvidence||null,
         settingsPersistence:{...(this.settingsPersistence||{version:'SETTINGS-PERSISTENCE-R1',lastVerifiedAtMs:0,lastKeys:[],lastValues:{},lastError:null})},
         brokerOwnershipReconciliation:BROKER_OWNERSHIP_RECONCILIATION.version,
         brokerOwnershipReconciliationPolicyRevision:BROKER_OWNERSHIP_RECONCILIATION.policyRevision,
@@ -9922,26 +7581,26 @@ export class SagittariusEngine {
         gameClockStrongSources: ['kalshi_live_data', 'kalshi_game_stats'],
         gameClockMilestoneDiscovery: ['related_event_ticker', 'events_with_milestones_exact_primary_or_related'],
         gameClockUnknownCandidateForceFreshBeforeClockGate: true,
-        gameClockFallback: 'occurrence_passed_plus_broad_live_or_pbp_current_official_window',
+        gameClockFallback: 'none_for_capital_entry_actual_start_required',
         gameClockPersistenceScope: 'event_ticker',
         gameClockFreshEntryAuthorizationRequired: true,
         gameClockEntryAuthorizationMaxAgeMs: GAME_CLOCK_AUTHORITY.entryAuthorizationMaxAgeMs,
-        gameClockObservedActivityFallback: 'LIVE_SIM_SHARED',
-        gameClockObservedActivityLiveAuthority: true,
+        gameClockObservedActivityFallback: 'observation_only',
+        gameClockObservedActivityLiveAuthority: false,
         gameClockObservedActivityMaximumGapMs: GAME_CLOCK_AUTHORITY.observedActivityMaxGapMs,
         gameClockMilestoneSeriesBulkCacheMs: GAME_CLOCK_AUTHORITY.seriesMilestoneCacheMs,
         gameClockMilestoneForceRefreshMinIntervalMs: GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs,
         gameClockExactActiveMarketRevalidation: true,
-        gameClockFallbackFreshTradeEvidenceRequired: true,
-        gameClockPbpEntryAuthorization: 'requires_fresh_exact_trade_plus_current_official_window',
+        gameClockFallbackFreshTradeEvidenceRequired: false,
+        gameClockPbpEntryAuthorization: 'explicit_opening_start_plus_fresh_official_live_status',
         entryAdmissionControl: ENTRY_ADMISSION_CONTROL.version,
         entryAdmissionRole: ENTRY_ADMISSION_CONTROL.role,
-        entryAdmissionUnknownProbeIntervalMs: ENTRY_ADMISSION_CONTROL.unknownProbeIntervalMs,
-        entryAdmissionPrequeueMinimumGameTimeGate: true,
-        entryAdmissionPrequeueMaximumGameTimeGate: true,
-        entryAdmissionImmediateGreenFeasibilityGate: true,
-        entryAdmissionPreBoltExecutionMarginMs: ENTRY_ADMISSION_CONTROL.preBoltExecutionMarginMs,
-        entryAdmissionPostBoltFreshClockGate: true,
+        entryAdmissionUnknownProbeIntervalMs: 0,
+        entryAdmissionPrequeueMinimumGameTimeGate: false,
+        entryAdmissionPrequeueMaximumGameTimeGate: false,
+        entryAdmissionImmediateGreenFeasibilityGate: false,
+        entryAdmissionPreBoltExecutionMarginMs: 0,
+        entryAdmissionPostBoltFreshClockGate: false,
         postFireStrategicCooldownVeto: false,
         entryTimeWindow:'ETW1',
         minimumGameMinutes:Number(this.settings.minGameMinutes||0),
@@ -10330,8 +7989,11 @@ export class SagittariusEngine {
       balance: this.balance,
       brokerContext: this.brokerPositions,
       brokerLedgerGaps: this.brokerLedgerGaps || brokerLedgerGaps(this.brokerPositions, []),
+      goldenSaintRuntime:this.r17?.snapshot?.()||{version:'R17',available:false},
       performance: {
-        reportingVersion:p.reportingVersion,asOfMs:p.asOfMs,scope:p.reportingScope,byAttack:{'Lightning Plasma':p.byAttack['Lightning Plasma']},
+        reportingVersion:p.reportingVersion,asOfMs:p.asOfMs,scope:p.reportingScope,
+        goldenSaintArchitecture:'R17-TWELVE-SAINTS',
+        byAttack:Object.fromEntries(R17_GOLDEN_CAPITAL_CONCEPTS.map(name=>[name,p.byAttack[name]])),
         valuationComplete:p.valuationComplete,missingValuations:p.missingValuations,knownUnrealizedCents:p.knownUnrealizedCents,periodsComplete:p.periodsComplete,pending:p.pendingHunters,unverifiedBuyIntents:p.unverifiedBuyIntents,
         portfolioValueCents: this.settings.mode==='LIVE' && kalshiAccountSnapshot(this.balance) ? kalshiAccountSnapshot(this.balance).portfolioCents : p.portfolioValueCents,
         kalshiPortfolioCents: this.settings.mode==='LIVE' ? kalshiAccountSnapshot(this.balance)?.portfolioCents ?? null : null,
@@ -10710,7 +8372,7 @@ export class SagittariusEngine {
     const [trackedMarkets,patterns,sports,snapshots,audit,crashEpisodes,fullOpenEntries,greatHornDiagnostics,crystalWallRecoveryDiagnostics]=await mapLimit(detailJobs,STATE_DB_FANOUT_MAX,(job)=>job()).catch(()=>[base.trackedMarkets||[],[],[],[],base.audit||[],[],[],{available:false,reason:'gh1_diagnostic_query_failed'},{available:false,reason:'cw1_diagnostic_query_failed'}]);
     const feederSignalIntelligence={version:FEEDER_SIGNAL_INTELLIGENCE.version,role:FEEDER_SIGNAL_INTELLIGENCE.role,runtime:'DISABLED_R60_SHADOW_TABLE_REPLACES_QUOTE_RATE_FSI',healthy:true,records:[],recordsIncluded:0,recordsAvailable:0,summary:{signals:0,tracking:0,complete:0}};
     const diagnosticOpenHunters=(fullOpenEntries||[]).filter((e)=>PORTFOLIO_CONCEPTS.has(e.conceptName)&&!isShadowSaintEntry(e)).map((e)=>this.decorateEntry(e));
-    const boundedBase={...base,trackedMarkets,patterns,sports,snapshots,audit,crashEpisodes,athena:this.athena?.summary?.()||base.athena,crashLearning:this.learning?.crashLearningSummary?.()||base.crashLearning,entryPipeline:this.strategy?.entryPipelineSummary?.()||base.entryPipeline,entryCandidateFunnel:this.entryCandidateFunnelSummary(),starlightRecovery:this.starlightRecoveryDiagnostics(),openHunters:diagnosticOpenHunters,closedHunters:Array.isArray(base.closedHunters)?base.closedHunters.slice(0,150):[]};
+    const boundedBase={...base,trackedMarkets,patterns,sports,snapshots,audit,crashEpisodes,athena:this.athena?.summary?.()||base.athena,crashLearning:this.learning?.crashLearningSummary?.()||base.crashLearning,entryPipeline:this.strategy?.entryPipelineSummary?.()||base.entryPipeline,entryCandidateFunnel:this.entryCandidateFunnelSummary(),linkedTradingFunnel:this.tradingFunnelSnapshot(),starlightRecovery:this.starlightRecoveryDiagnostics(),openHunters:diagnosticOpenHunters,closedHunters:Array.isArray(base.closedHunters)?base.closedHunters.slice(0,150):[]};
     return {...boundedBase,feederSignalIntelligence,greatHornDiagnostics:greatHornDiagnostics||{available:false,reason:'not_collected'},crystalWallRecoveryDiagnostics:crystalWallRecoveryDiagnostics||{available:false,reason:'not_collected'},diagnosticExport:{version:'DX2',hardMaximumBytes:2_000_000,targetMaximumBytes:1_850_000,serialization:'compact_json',priority:'safety_runtime_performance_open_positions_stop_guard_then_recent_research',operationalStateHistoricalRows:false,onDemandResearch:true,closedHuntersIncluded:boundedBase.closedHunters?.length||0,closedHuntersAvailable:base.closedHunters?.length||0,fsiRecordsIncluded:feederSignalIntelligence?.recordsIncluded||0,fsiRecordsAvailable:feederSignalIntelligence?.recordsAvailable||0}};
   }
 
@@ -10779,6 +8441,7 @@ export class SagittariusEngine {
     this.market?.stop?.();
     for(const queue of this.operationalQueues())queue.closeAdmission();
     this.stopStarlightRecoveryMaintenance();
+    this.r17?.stop();
     if(this.resourceGovernorTimer)clearInterval(this.resourceGovernorTimer);
     this.resourceGovernorTimer=null;
     this.memoryTelemetry?.close?.();
@@ -10798,7 +8461,7 @@ export class SagittariusEngine {
     this.lightningPlasmaRerunRequested=false;
     for (const timer of this.crashRecoveryEvaluationTimers.values()) clearTimeout(timer);
     this.crashRecoveryEvaluationTimers.clear();
-    this.entryAdmissionProbeAt?.clear?.();
+    this.eventClockRuntime?.useScope?.(this.settings);
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
     // Optional finance probe is not part of order protection and cannot be
     // started after shutdown begins. Never cancel broker mutations here.

@@ -297,8 +297,12 @@ function updateShadowProfitPolicies(state, entry, observation){
   return {...state,shadow};
 }
 
-export function advanceProfitLearningState(priorState, entry, observation={}, now=Date.now()){
-  const state=priorState&&priorState.version===PROFIT_LEARNING_INTELLIGENCE.version?structuredClone(priorState):initialProfitLearningState(entry,observation.sport||'Unknown',now);
+function advanceProfitLearningStateCore(priorState, entry, observation, now, copyPrior){
+  // Do not expose the owned-state fast path outside the buffer's synchronous
+  // observation reducer; public callers retain the original copy contract.
+  const state=priorState&&priorState.version===PROFIT_LEARNING_INTELLIGENCE.version
+    ?(copyPrior?structuredClone(priorState):priorState)
+    :initialProfitLearningState(entry,observation.sport||'Unknown',now);
   const observedAtMs=Math.max(1,n(observation.observedAtMs,now));
   state.lastObservedAtMs=observedAtMs;
   if(!observation.fullExecutable||!Number.isFinite(Number(observation.executableBidCents))||!Number.isFinite(Number(observation.executableNetCents)))return state;
@@ -322,6 +326,10 @@ export function advanceProfitLearningState(priorState, entry, observation={}, no
     state.observations=[...obs,{t:observedAtMs,bidCents:bid,netCents:net,full:true}].slice(-PROFIT_LEARNING_INTELLIGENCE.maximumTimelinePoints);
   }
   return updateShadowProfitPolicies(state,entry,{...observation,observedAtMs,executableBidCents:bid,executableNetCents:net,fullExecutable:true});
+}
+
+export function advanceProfitLearningState(priorState, entry, observation={}, now=Date.now()){
+  return advanceProfitLearningStateCore(priorState, entry, observation, now, true);
 }
 
 export function profitEpisodeMetrics(state={}){
@@ -348,11 +356,13 @@ export function profitEpisodeMetrics(state={}){
 export const CRASH_INTELLIGENCE = Object.freeze({
   version:'CI1',
   persistenceIntervalMs:30_000,
-  persistenceRevision:'CI1-P2-KEYED-COALESCED',
+  persistenceRevision:'CI1-P3-ISOLATED-RETRY',
   maximumPersistenceConcurrency:1,
   maximumPendingTickers:2048,
   maximumPendingEpisodesPerTicker:64,
   persistenceFailureRetryMs:5_000,
+  persistenceMaximumRetryMs:300_000,
+  maximumQuarantinedRecords:512,
 });
 const CRASH_TERMINAL_STATUSES = new Set(['finalized','settled']);
 const crashNumber = (v, fallback=0) => Number.isFinite(Number(v)) ? Number(v) : fallback;
@@ -703,6 +713,11 @@ export class LearningEngine {
     this.crashPersistTotalDropped = 0;
     this.crashPersistMaxObservedPending = 0;
     this.crashPersistLastError = null;
+    this.crashPersistQuarantined = new Map();
+    this.crashPersistTotalQuarantined = 0;
+    this.crashPersistTotalSuppressed = 0;
+    this.crashPersistQuarantineEvicted = 0;
+    this.crashPersistTotalPartial = 0;
     this.goldenDragonHistory = [];
     this.profitObservationDirty=new Set();
     this.profitObservationRevision=new Map();
@@ -819,6 +834,15 @@ export class LearningEngine {
         totalDropped:this.crashPersistTotalDropped,
         maxObservedPending:this.crashPersistMaxObservedPending,
         lastError:this.crashPersistLastError,
+        retrying:[...this.crashPersistPending.values()].filter(job=>Number(job.nextAttemptAtMs||0)>Date.now()).length,
+        quarantined:this.crashPersistQuarantined.size,
+        maximumQuarantinedRecords:CRASH_INTELLIGENCE.maximumQuarantinedRecords,
+        totalQuarantined:this.crashPersistTotalQuarantined,
+        totalSuppressed:this.crashPersistTotalSuppressed,
+        quarantineEvicted:this.crashPersistQuarantineEvicted,
+        totalPartiallyPersisted:this.crashPersistTotalPartial,
+        quarantineDurability:'bounded_process_memory',
+        recentQuarantine:[...this.crashPersistQuarantined.values()].slice(-5).map(({kind,ticker,id,code,field,firstAtMs,lastAtMs,suppressed})=>({kind,ticker,id,code,field,firstAtMs,lastAtMs,suppressed})),
       },
       crashStateLimit:LEARNING_RUNTIME_LIMITS.crashStates,
       historicalCrashEpisodes:this.goldenDragonHistory.length,
@@ -1011,72 +1035,123 @@ export class LearningEngine {
     return true;
   }
 
+  async persistCrashRecord(kind,id,record,write) {
+    const ticker=String(record?.ticker||'');
+    const key=`${kind}|${ticker}|${String(id)}`;
+    const quarantined=this.crashPersistQuarantined.get(key);
+    if(quarantined){
+      // A locally identified invalid field can be retried once corrected.
+      // An unknown PostgreSQL data/constraint error requires investigation;
+      // changing only a quote timestamp must never re-arm the poison record.
+      if(quarantined.field&&Number.isFinite(Number(record?.[quarantined.field]??0))){
+        this.crashPersistQuarantined.delete(key);
+      }else{
+        quarantined.record=structuredClone(record);quarantined.lastAtMs=Date.now();
+        quarantined.suppressed++;this.crashPersistTotalSuppressed++;
+        return false;
+      }
+    }
+    try{await write();return true;}
+    catch(error){
+      const code=String(error?.code||'');
+      const deterministic=code==='CRASH_EPISODE_INVALID_PRICE'||/^22/.test(code)||['23502','23514'].includes(code);
+      if(!deterministic)throw error;
+      const now=Date.now();
+      this.crashPersistTotalFailed++;this.crashPersistTotalQuarantined++;
+      this.crashPersistLastError=String(error?.message||error).slice(0,240);
+      this.crashPersistQuarantined.set(key,{kind,ticker,id:String(id),code,
+        field:code==='CRASH_EPISODE_INVALID_PRICE'?String(error.field||''):null,
+        record:structuredClone(record),firstAtMs:now,lastAtMs:now,suppressed:0});
+      while(this.crashPersistQuarantined.size>CRASH_INTELLIGENCE.maximumQuarantinedRecords){
+        const oldest=this.crashPersistQuarantined.keys().next().value;
+        this.crashPersistQuarantined.delete(oldest);this.crashPersistQuarantineEvicted++;this.crashPersistTotalDropped++;
+      }
+      return false;
+    }
+  }
+
   async persistCrashJob(job) {
     const state=job?.state;
     if(!state?.ticker)return true;
     const now=Number(state.updatedAtMs||Date.now());
+    let complete=true;
     if(typeof this.db.upsertCrashMarketState==='function'){
-      await this.db.upsertCrashMarketState({
+      const record={
         systemName:this.systemName,ticker:state.ticker,eventTicker:state.eventTicker,marketTitle:state.marketTitle,
         sport:state.sport||'Unknown',episodeCount:Number(state.episodeCount||0),state,updatedAtMs:now,
-      });
+      };
+      complete=await this.persistCrashRecord('state',state.ticker,record,()=>this.db.upsertCrashMarketState(record))&&complete;
     }
     if(typeof this.db.upsertCrashEpisode==='function'){
       for(const episode of job.episodes?.values?.()||[]){
-        await this.db.upsertCrashEpisode({...episode,systemName:this.systemName});
+        const record={...episode,systemName:this.systemName};
+        complete=await this.persistCrashRecord('episode',episode.id,record,()=>this.db.upsertCrashEpisode(record))&&complete;
       }
     }
     if(job.finalResult&&typeof this.db.finalizeCrashEpisodes==='function'){
-      await this.db.finalizeCrashEpisodes(this.systemName,state.ticker,job.finalResult,now);
+      const record={ticker:state.ticker,finalResult:job.finalResult,updatedAtMs:now};
+      complete=await this.persistCrashRecord('final',state.ticker,record,
+        ()=>this.db.finalizeCrashEpisodes(this.systemName,state.ticker,job.finalResult,now))&&complete;
     }
-    this.crashLastPersistMs.set(String(state.ticker),now);
-    this.crashPersistLastError=null;
-    return true;
+    if(complete){
+      this.crashLastPersistMs.set(String(state.ticker),now);
+      if(!this.crashPersistQuarantined.size&&![...this.crashPersistPending.values()].some(job=>Number(job.retryFailures||0)>0))this.crashPersistLastError=null;
+    }
+    return complete;
   }
 
   startCrashPersistWorker() {
     if(this.crashPersistWorkerPromise||!this.crashPersistPending.size)return this.crashPersistWorkerPromise;
-    if(this.crashPersistRetryTimer)return null;
+    // A delayed retry belongs to its failed ticker, never to the whole lane.
+    // Newly queued healthy tickers can run while another ticker backs off.
+    if(this.crashPersistRetryTimer){clearTimeout(this.crashPersistRetryTimer);this.crashPersistRetryTimer=null;}
     this.crashPersistWorkerPromise=(async()=>{
-      let failed=false;
       while(this.crashPersistPending.size){
-        const [ticker,job]=this.crashPersistPending.entries().next().value;
+        const ready=[...this.crashPersistPending.entries()].find(([,job])=>Number(job.nextAttemptAtMs||0)<=Date.now());
+        if(!ready)break;
+        const [ticker,job]=ready;
         this.crashPersistPending.delete(ticker);
         this.crashPersistActive.add(ticker);
         try{
-          await this.persistCrashJob(job);
-          this.crashPersistTotalCompleted++;
+          const complete=await this.persistCrashJob(job);
+          if(complete)this.crashPersistTotalCompleted++;
+          else this.crashPersistTotalPartial++;
         }catch(error){
-          failed=true;this.crashPersistTotalFailed++;this.crashPersistLastError=String(error?.message||error);
-          // Merge the failed snapshot back with any newer rerun that arrived
-          // while the write was active. The latest state wins, all distinct
-          // episode IDs survive, and no quote-level Promise is retained.
+          this.crashPersistTotalFailed++;this.crashPersistLastError=String(error?.message||error).slice(0,240);
+          // Merge an in-flight failure with its latest pending observation.
+          // Preserve distinct episodes, but do not let new quote timestamps
+          // erase the failed ticker's retry budget or accelerate its retry.
           const newer=this.crashPersistPending.get(ticker)||null;
           const retry=newer||{...job,episodes:new Map(job.episodes||[])};
           if(newer){
-            for(const [id,ep] of job.episodes||[])if(!newer.episodes.has(id))newer.episodes.set(id,ep);
+            for(const [id,episode] of job.episodes||[])if(!newer.episodes.has(id))newer.episodes.set(id,episode);
             newer.important=newer.important||job.important;
             newer.finalResult=newer.finalResult||job.finalResult;
-          }else this.crashPersistPending.set(ticker,retry);
+          }
+          retry.retryFailures=Math.min(32,Math.max(Number(job.retryFailures||0),Number(retry.retryFailures||0))+1);
+          const delay=Math.min(CRASH_INTELLIGENCE.persistenceMaximumRetryMs,
+            CRASH_INTELLIGENCE.persistenceFailureRetryMs*2**Math.min(16,retry.retryFailures-1));
+          retry.nextAttemptAtMs=Date.now()+delay;
+          while(retry.episodes.size>CRASH_INTELLIGENCE.maximumPendingEpisodesPerTicker){
+            retry.episodes.delete(retry.episodes.keys().next().value);this.crashPersistTotalDropped++;
+          }
+          this.crashPersistPending.set(ticker,retry);
         }finally{this.crashPersistActive.delete(ticker);}
-        if(failed)break;
       }
     })().finally(()=>{
       this.crashPersistWorkerPromise=null;
       if(this.crashPersistPending.size){
-        if(this.crashPersistLastError){
-          if(!this.crashPersistRetryTimer){
-            this.crashPersistRetryTimer=setTimeout(()=>{this.crashPersistRetryTimer=null;this.startCrashPersistWorker();},CRASH_INTELLIGENCE.persistenceFailureRetryMs);
-            this.crashPersistRetryTimer.unref?.();
-          }
-        }else this.startCrashPersistWorker();
+        const nextAt=Math.min(...[...this.crashPersistPending.values()].map(job=>Number(job.nextAttemptAtMs||0)));
+        this.crashPersistRetryTimer=setTimeout(()=>{
+          this.crashPersistRetryTimer=null;this.startCrashPersistWorker();
+        },Math.max(1,nextAt-Date.now()));
+        this.crashPersistRetryTimer.unref?.();
       }
     });
     return this.crashPersistWorkerPromise;
   }
 
   async flushCrashPersistence(timeoutMs=2_000) {
-    if(this.crashPersistRetryTimer){clearTimeout(this.crashPersistRetryTimer);this.crashPersistRetryTimer=null;}
     const deadline=Date.now()+Math.max(0,Number(timeoutMs)||0);
     while((this.crashPersistPending.size||this.crashPersistWorkerPromise)&&Date.now()<deadline){
       this.startCrashPersistWorker();
@@ -1086,9 +1161,10 @@ export class LearningEngine {
       let timer=null;
       try{await Promise.race([worker,new Promise((resolve)=>{timer=setTimeout(resolve,remaining);})]);}
       finally{if(timer)clearTimeout(timer);}
-      if(this.crashPersistLastError)break;
+      // Shutdown must not turn an intentionally delayed retry into a hot loop.
+      if([...this.crashPersistPending.values()].every(job=>Number(job.nextAttemptAtMs||0)>Date.now()))break;
     }
-    return this.crashPersistPending.size===0&&!this.crashPersistWorkerPromise;
+    return this.crashPersistPending.size===0&&!this.crashPersistWorkerPromise&&!this.crashPersistQuarantined.size;
   }
 
   persistCrashState(state, episode = null) {
@@ -1496,10 +1572,15 @@ export class LearningEngine {
     if(old?.trackingComplete || old?.phase==='POST_EXIT_TRACKING')return false;
     const compact=profitLearningEntry(entry),sport=this.profitMeta.get(id)?.sport||old?.cohort?.sport||'Unknown';
     const prior=old||initialProfitLearningState(compact,sport,Date.now());
-    const next=advanceProfitLearningState(prior,compact,{...observation,sport},Date.now());
+    // Capture the exact original force-write comparisons before mutating the
+    // private map-owned state. No persistence timing or call contract changes.
+    const prevPeak=n(prior.maxExecutableNetCents);
+    const prevPullbacks=n(prior.oneTickPullbackCount);
+    const prevRecoveries=n(prior.oneTickRecoveryCount);
+    const next=advanceProfitLearningStateCore(prior,compact,{...observation,sport},Date.now(),false);
     this.profitStates.set(id,next);this.profitObservationEntries.set(id,compact);
     this.profitObservationRevision.set(id,(this.profitObservationRevision.get(id)||0)+1);
-    if(n(next.maxExecutableNetCents)!==n(prior.maxExecutableNetCents)||n(next.oneTickPullbackCount)!==n(prior.oneTickPullbackCount)||n(next.oneTickRecoveryCount)!==n(prior.oneTickRecoveryCount))this.profitObservationForce.add(id);
+    if(n(next.maxExecutableNetCents)!==prevPeak||n(next.oneTickPullbackCount)!==prevPullbacks||n(next.oneTickRecoveryCount)!==prevRecoveries)this.profitObservationForce.add(id);
     this.profitObservationDirty.add(id);this.scheduleProfitObservation(id);return true;
   }
 

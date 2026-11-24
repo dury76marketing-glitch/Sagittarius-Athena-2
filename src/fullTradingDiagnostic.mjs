@@ -1,5 +1,6 @@
 import { BUILD_INFO } from './authority.mjs';
 import { RELEASE } from './config.mjs';
+import { GOLDEN_SAINTS } from './goldenSaintCards.mjs';
 
 export const FULL_TRADING_DIAGNOSTIC_MAX_BYTES = 3_000_000;
 export const FULL_TRADING_DIAGNOSTIC_WINDOW_MS = 60 * 60 * 1000;
@@ -29,6 +30,16 @@ function safeSettings(settings = {}) {
     if (value == null || ['string','number','boolean'].includes(typeof value))
       out.push({ settingName: name, effectiveValue: value, source: 'runtime', scope: 'host', lastUpdatedAt: null });
   }
+  // Show each sanitized R17 persisted card control without returning nested
+  // objects, credentials, or an invented historical decision-time setting.
+  for(const saint of GOLDEN_SAINTS){
+    const card=settings?.goldenSaints?.[saint];
+    if(!card||typeof card!=='object'||Array.isArray(card))continue;
+    for(const [key,value] of Object.entries(card)){
+      if(SECRET.test(key)||!['boolean','number'].includes(typeof value)||!Number.isFinite(Number(value)))continue;
+      out.push({settingName:`goldenSaints.${saint}.${key}`,effectiveValue:value,source:'runtime',scope:'R17_OPERATOR_CARD',lastUpdatedAt:null});
+    }
+  }
   return out;
 }
 
@@ -37,13 +48,7 @@ function age(now, at) {
   return n > 0 ? now - n : null;
 }
 
-function firstReduction(funnel) {
-  const reasons = funnel?.currentByReason || {};
-  const ranked = Object.entries(reasons).sort((a, b) => b[1] - a[1]);
-  return ranked[0] ? { reason: ranked[0][0], count: ranked[0][1] } : null;
-}
-
-export function buildFullTradingDiagnostic(engine, now = Date.now()) {
+export function buildFullTradingDiagnostic(engine, now = Date.now(), nativeFunnel=null) {
   const settings = engine?.settings || {};
   const windowStart = now - FULL_TRADING_DIAGNOSTIC_WINDOW_MS;
   const watches = [...(engine?.starlightRecoveryWatches?.values?.() || [])];
@@ -64,36 +69,42 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     const key = `${e.stage || 'unknown'}:${e.status || e.reason || 'unknown'}`;
     byReason[key] = (byReason[key] || 0) + 1;
   }
-  const funnel = engine?.entryCandidateFunnelSummary?.() || null;
+  const linked=engine?.tradingFunnelSnapshot?.()||null;
+  // The record detail slice is smaller than retained history. Use the explicit
+  // full-retained-map result; no absence in the detail slice can imply success.
+  const firstObservedRefusal=linked?.earliestRetainedRefusal||null;
   const choke = {
     engineProcessing: engine?.health?.operational?.newEntriesAllowed !== false && engine?.health?.degraded !== true,
     activeStages: [...new Set(pipeline.map(e => e.stage).filter(Boolean))],
-    firstMeaningfulReduction: firstReduction(funnel) || (pipeline.find(e => e.status === 'BLOCKED') ? { reason: pipeline.find(e => e.status === 'BLOCKED').reason, count: 1 } : null),
-    configurationControlled: ['shadow_event_lifetime_cap', 'athena_starlight_below_trigger', 'maxEntriesPerTrade'],
+    firstMeaningfulReduction:firstObservedRefusal?{...firstObservedRefusal,basis:'earliest_retained_observed_refusal',historyComplete:false}:null,
+    linkedFunnelAvailable:Boolean(linked),nativeFunnelStatus:nativeFunnel?.status||'NOT_COLLECTED',
+    configurationControlled: ['shadow_event_lifetime_cap','maxEntriesPerTrade','goldenSaints_card_settings'],
     safetyControlled: ['ticker_lock', 'market_or_book_invalid', 'fee_budget_exhausts_aurora_loss_envelope', 'live_fill_unconfirmed'],
-    suspectedDefects: durable.filter(w => w.status === 'CONSUMED' && !w.recoveredChildId).slice(0, 20),
-    insufficientEvidence: ['broker_fill_not_in_memory', 'historical_setting_at_decision_time'],
+    suspectedDefects: [],
+    insufficientEvidence: ['broker_fill_not_in_memory','historical_setting_at_decision_time',...(nativeFunnel?.status==='AVAILABLE'?[]:['r17_native_evidence_unavailable'])],
     recentCandidateBlocks: pipeline.filter(e => e.status === 'BLOCKED').slice(-40),
     byReason,
-    note: 'Repeated evaluations of the same watch are not independent opportunities. A rejection is not a missed profit.',
+    r17Runtime:engine?.r17?.snapshot?.()||null,
+    r17DecisionTraceAvailable:typeof engine?.r17?.decisionTraceSnapshot==='function',
+    note: 'This legacy pipeline does not contain R17 Golden Saint entry decisions. R17 dedicated decision traces are exported separately. These are bounded evaluations, not matched SIM/LIVE tapes or independent opportunities.',
   };
+  const r17=engine?.r17?.snapshot?.()||null;
+  const r17DecisionTraces=engine?.r17?.decisionTraceSnapshot?.()||{
+    version:'R17-DECISION-TRACE-1',status:'UNAVAILABLE',events:[]};
+  const regular=GOLDEN_SAINTS.slice(0,10);
+  const recoveries=GOLDEN_SAINTS.slice(10);
+  const activeCards=GOLDEN_SAINTS.filter(name=>settings?.goldenSaints?.[name]?.enabled===true);
+  // Counts in r17.stats are process-local cumulative counters, NOT durable
+  // counts of active watches. This synchronous export must never invent a
+  // parent proof or infer zero parents from a retired Starlight cache.
   const athena = {
-    question: 'Why did Athena not produce Starlight?',
-    answer: durable.some(w => ['WATCHING','READY','EXECUTING'].includes(w.status))
-      ? 'Recovery watches exist. See watch states.'
-      : 'No active recovery watch. Starlight arms only after a verified Athena shadow hard_stop. If no hard stop occurred in this window, absence of a watch is not a code failure.',
-    openShadowEvidence: 'See athenaRows if the export included a bounded shadow page. In-memory watches are listed in watches.',
-    watches: durable.slice(0, 200),
-    modelClones: [...(engine.starlightModelClones?.values?.()||[])].slice(0, 200),
-    independentRecovery: [...(engine.independentRecoveryWatches?.values?.()||[])].slice(0, 200).map(w=>({
-      authorizationId:w.authorizationId,concept:w.concept,ticker:w.ticker,status:w.status,
-      parentEntryId:w.parentEntryId,stopPriceCents:w.stopPriceCents,peakSinceArmCents:w.peakSinceArmCents,
-      troughSinceArmCents:w.troughSinceArmCents,upwardTicks:w.upwardTicks,lastAttemptReason:w.lastAttemptReason,
-      armedAtMs:w.armedAtMs,releaseAtMs:w.releaseAtMs,revision:w.revision,childId:w.childId||null,
-    })),
-    qualifyingHardStopsInWindow: durable.filter(w => Number(w.armedAtMs || 0) >= windowStart).length,
-    parentEvidence: 'A durable recovery watch is itself the parent-stop proof. Do not infer zero parents from an empty pipeline sample.',
-    notEligible: 'A profitable Athena exit does not arm Starlight. Only hard_stop_loss of a shadow Athena arms recovery.',
+    question:'What happened after a verified Athena loss in R17?',
+    answer:r17?'R17 authorizes the ten enabled regular cards via durable PostgreSQL watches. The in-memory retired Starlight watch count is NOT the active R17 parent count.':'R17 runtime snapshot unavailable; no Athena loss count is inferred.',
+    regularAttacks:regular,recoveries,activeCards,
+    r17Runtime:r17,verifiedAthenaStopsInExportWindow:null,
+    r17DurableWatchRows:'NOT_INCLUDED_IN_SYNCHRONOUS_EXPORT',
+    parentEvidence:'Authoritative Athena loss proofs and R17 watch lineage live in PostgreSQL; inspect them with a scoped read-only query.',
+    notEligible:'A profitable or unverified Athena close never arms a Golden Saint capital attack.'
   };
   const locks = {
     tickerLock: {
@@ -142,12 +153,17 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
       };
     }) : 'UNAVAILABLE',
   };
-  const chains = {
-    chain1: 'Verified still-open CAPITAL Starlight -> qualified Lightning Plasma V5 on its own card -> verified LP net loss -> Great Horn -> verified GH net loss -> Crystal Wall.',
-    chain2: 'Verified Athena shadow-stop or confirmed CAPITAL Starlight authority -> Sagittarius Arrow on its own card -> verified Arrow net loss -> Scarlet Needle Recovery -> verified SN2 net loss -> Pegasus Ryu Sei Ken Recovery.',
-    note: 'LINK, Multiply and original-entry rise remain strategy-specific. Every LIVE parent, cash, book, fee, clock, protection and broker gate remains mandatory.',
-    starlightParentsInWindow: athena.qualifyingHardStopsInWindow,
-    childStatus: durable.length === 0 ? 'NOT_REACHED_PARENT_NOT_ELIGIBLE' : 'PARENT_WATCH_EXISTS',
+  const chains={
+    architecture:'R17-TWELVE-GOLDEN-SAINTS',
+    upstream:'Original scanners and Athena Exclamation preserved; a VERIFIED Athena shadow loss arms independent regular watches.',
+    regularAttacks:regular,
+    recovery1:{saint:'Aquarius',parent:'ANY ONE regular capital attack with verified reconciled net loss'},
+    recovery2:{saint:'Pisces',parent:'CORRESPONDING Aquarius with verified reconciled net loss'},
+    activeCards,processLocalRuntime:r17,
+    persistedWatches:'NOT_OBSERVED_IN_THIS_SYNCHRONOUS_EXPORT',
+    verifiedLossLineage:'REQUIRES_POSTGRESQL_READ',
+    retiredChains:'NO_NEW_CAPITAL_ENTRY_AUTHORITY; historical capital exits/protection must continue',
+    note:'LIVE broker admission, balance, book, fees, LINK, parent proof and fill reconciliation remain mandatory.'
   };
   const contexts=pipeline.filter(e=>e.decisionContext?.settingsHash&&e.decisionContext?.marketEventId);
   const settingsSnapshots=[...(engine?.strategy?.entryPipelineSettingsSnapshots?.values?.()||[])].slice(-32);
@@ -174,7 +190,8 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     pipelineEventsUsed: pipeline.length, watchesUsed: durable.length,
     pipelineFirstAtMs:pipeline[0]?.atMs??null,pipelineLastAtMs:pipeline.at(-1)?.atMs??null,
     historicalSettingAtDecision:contexts.length?'BOUNDED_DECISION_CONTEXTS':'NOT_AVAILABLE',
-    decisionContexts:contexts.length,settingsSnapshots:settingsSnapshots.length,maximumSettingsSnapshots:32,
+    decisionContexts:contexts.length,r17DecisionTraceEvents:r17DecisionTraces.events.length,
+    r17MatchedSimLiveTape:false,settingsSnapshots:settingsSnapshots.length,maximumSettingsSnapshots:32,
     liveness:liveness.coverage||null,financialAsOfMs:finance.asOfMs??null,
     sampled: true, fullHistory: false,
   };
@@ -190,12 +207,42 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
     readOnly: true,
     tradingUnchanged: true,
   };
+  const modeAuth = {
+    version: 'R17-MODE-AUTHORIZATION-EVIDENCE-1',
+    exportedAtMs: now,
+    mode: settings.mode || null,
+    liveArmed: settings.liveArmed === true,
+    liveOwnerAuthorized: settings.liveOwnerAuthorized === true,
+    engineActive: settings.engineActive === true,
+    lastLiveModeAttempt: engine?.health?.lastLiveModeAttempt || null,
+    lastReconciliationReason: engine?.health?.lastReconciliationReason || null,
+    lastReconciliationDetails: engine?.health?.lastReconciliationDetails || null,
+    fundedOrphans: engine?.liveFinancialOrphans
+      ? {count:Number(engine.liveFinancialOrphans.count||0),
+         flatOrphanCount:Number(engine.liveFinancialOrphans.flatOrphanCount||0),
+         status:String(engine.liveFinancialOrphans.status||'not_observed')}
+      : null,
+    controlStateDiagnostics: engine?.health?.controlStateDiagnostics || null,
+    liveArmHealthDenials: typeof engine?.liveArmHealthDenials === 'function'
+      ? engine.liveArmHealthDenials()
+      : null,
+    isLiveReady: typeof engine?.isLiveReady === 'function' ? engine.isLiveReady() : null,
+    // A healthy dashboard aggregate is not an authorization, and a degraded
+    // optional worker must not masquerade as a GOLD SAINT execution veto.
+    qualifiedGoldSaintAdmission: typeof engine?.goldSaintLiveAdmission === 'function'
+      ? engine.goldSaintLiveAdmission() : null,
+    note: 'Records separate aggregate health versus current scoped qualified Gold Saint admission; neither sends broker orders.',
+  };
   const files = {
     'diagnostic-manifest.json': manifest,
     'effective-settings.json': safeSettings(settings),
+    'live-mode-authorization.json': modeAuth,
     'trading-choke-analysis.json': choke,
     'candidate-decision-traces.json': pipeline.slice(-200),
-    'athena-starlight-lifecycle.json': athena,
+    'r17-decision-traces.json':r17DecisionTraces,
+    'linked-trading-funnel.json':engine?.tradingFunnelSnapshot?.()||{status:'UNAVAILABLE'},
+    'native-trading-funnel.json':nativeFunnel||{status:'NOT_COLLECTED',counts:null},
+    'athena-golden-saints-lifecycle.json': athena,
     'event-cap-and-ticker-locks.json': locks,
     'market-book-and-timing.json': market,
     'broker-and-fill-lifecycle.json': broker,
@@ -209,8 +256,8 @@ export function buildFullTradingDiagnostic(engine, now = Date.now()) {
   return files;
 }
 
-export function fullTradingDiagnosticFiles(engine, now = Date.now()) {
-  const files = buildFullTradingDiagnostic(engine, now);
+export function fullTradingDiagnosticFiles(engine, now = Date.now(), nativeFunnel=null) {
+  const files = buildFullTradingDiagnostic(engine, now,nativeFunnel);
   const packed = Object.entries(files).map(([name, value]) => ({
     name, data: Buffer.from(JSON.stringify(value), 'utf8'),
   }));

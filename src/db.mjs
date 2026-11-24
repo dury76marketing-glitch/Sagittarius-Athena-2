@@ -1,4 +1,6 @@
 import {isLegacyFundedQuarantine} from './liveSettlementReconciliation.mjs';
+import {GoldenSaintRepository,GOLDEN_SAINT_SCHEMA_SQL} from './goldenSaintPersistence.mjs';
+import {R17_RETIRED_NEW_CAPITAL_CONCEPTS,R17_GOLDEN_CAPITAL_CONCEPTS} from './doctrine.mjs';
 import {q17LivePendingReserveDecision} from './q17LiveCapitalAdmissibility.mjs';
 import {createLiveFundingStore,LIVE_FUNDING_JOURNAL_SQL} from './liveFundingJournal.mjs';
 import {maximumSettlementNetAdmission,frozenRecoveryEconomicTargetMatches} from './executionEconomics.mjs';
@@ -36,6 +38,19 @@ const { Pool } = pg;
 const n = (v, d=0) => Number.isFinite(Number(v)) ? Number(v) : d;
 const PORTFOLIO_CONCEPT_NAMES = Object.freeze([...PORTFOLIO_CONCEPTS]);
 const FEEDER_CONCEPT_NAMES = Object.freeze([...FEEDER_CONCEPTS]);
+
+// R28: crash research observes the same fractional-cent quotes as trackers.
+// Preserve their JS decimal representation in unconstrained PostgreSQL NUMERIC;
+// invalid nonfinite input is a record error, never a reason to round a signal.
+function crashEpisodePrice(record,field){
+  const value=Number(record?.[field]??0);
+  if(!Number.isFinite(value)){
+    const error=new TypeError(`crash_episode_invalid_price:${field}`);
+    error.code='CRASH_EPISODE_INVALID_PRICE';error.field=field;
+    throw error;
+  }
+  return value;
+}
 
 // A refreshed executable book is newer than the watch signal that admitted
 // the seat. Preserve both timestamps: dispatch must retain that admitted
@@ -159,6 +174,7 @@ const rowEntry = (r) => ({
 });
 
 const AUTHORIZED_STARLIGHT_INSERTS = new WeakSet();
+const AUTHORIZED_GOLDEN_SAINT_INSERTS = new WeakSet();
 // Independent Athena-loss capital requires a separate transaction-scoped capability.
 const AUTHORIZED_INDEPENDENT_RECOVERY_INSERTS = new WeakSet();
 const AUTHORIZED_GH_SIM_INSERTS = new WeakSet();
@@ -525,9 +541,9 @@ export class Database {
       create index if not exists sag_crash_market_state_v1_updated on sag_crash_market_state_v1(system_name,updated_at_ms desc);
       create table if not exists sag_crash_episodes_v1(
         id text primary key,system_name text not null,ticker text not null,event_ticker text,episode_index int not null,sport text not null default 'Unknown',
-        market_title text not null default '',state text not null,pre_crash_peak_cents int not null,trough_cents int not null,crash_depth_cents int not null,
+        market_title text not null default '',state text not null,pre_crash_peak_cents numeric not null,trough_cents numeric not null,crash_depth_cents numeric not null,
         crash_started_at_ms bigint not null,trough_at_ms bigint not null,rebound_confirmed_at_ms bigint,reset_at_ms bigint,stable_observations int not null default 0,
-        upward_ticks int not null default 0,rebound_cents int not null default 0,reclaim_rate double precision not null default 0,final_result text,
+        upward_ticks int not null default 0,rebound_cents numeric not null default 0,reclaim_rate double precision not null default 0,final_result text,
         dragon_signal jsonb not null default '{}'::jsonb,updated_at_ms bigint not null
       );
       alter table sag_crash_episodes_v1 add column if not exists dragon_signal jsonb not null default '{}'::jsonb;
@@ -633,6 +649,7 @@ export class Database {
     // R6: preserve fractional-cent tracker telemetry without altering any
     // LIVE execution, price-qualification or financial-valuation column.
     await this.migrateTrackerQuotePrecision();
+    await this.migrateCrashEpisodePrecision();
     this.startupStage='clone_identity';
     this.cloneIdentity=await loadOrCreateCloneIdentity(this.pool);
     this.startupStage='live_funding_schema';
@@ -680,6 +697,47 @@ export class Database {
       const after=(await inspect()).rows;
       if(after.length!==2||!names.every(n=>after.some(r=>r.column_name===n&&r.data_type==='numeric')))
         throw new Error('tracker_quote_precision_readback_failed');
+      await client.query('COMMIT');begun=false;
+      return {changed:changed.length>0,columns:changed};
+    }catch(error){
+      if(begun){try{await client.query('ROLLBACK');}catch(rollbackError){error.rollbackError=String(rollbackError?.code||rollbackError);}}
+      throw error;
+    }finally{client.release();}
+  }
+
+  async migrateCrashEpisodePrecision(){
+    // This table holds research observations, not cash, orders or positions.
+    // Widen all four related price fields together, preserving every stored
+    // integer and permitting fractional cents without a scale/rounding rule.
+    this.startupStage='crash_episode_precision';
+    const client=await this.pool.connect();
+    let begun=false;
+    try{
+      await client.query('BEGIN');begun=true;
+      await client.query("set local lock_timeout='5000ms'");
+      await client.query("set local statement_timeout='15000ms'");
+      await client.query("select pg_advisory_xact_lock(hashtextextended(current_schema()||':SAG-CRASH-EPISODE-PRECISION-R28',0))");
+      const names=['pre_crash_peak_cents','trough_cents','crash_depth_cents','rebound_cents'];
+      const inspect=()=>client.query(`select column_name,data_type,numeric_precision,numeric_scale
+        from information_schema.columns
+        where table_schema=current_schema() and table_name='sag_crash_episodes_v1'
+          and column_name=any($1::text[])`,[names]);
+      const before=(await inspect()).rows;
+      if(before.length!==names.length||!names.every(name=>before.some(row=>row.column_name===name)))
+        throw new Error('crash_episode_precision_columns_missing');
+      if(before.some(row=>!['integer','numeric'].includes(row.data_type)))
+        throw new Error('crash_episode_precision_unexpected_column_type');
+      const changed=before.filter(row=>row.data_type!=='numeric'||row.numeric_precision!=null||row.numeric_scale!=null).map(row=>row.column_name);
+      if(changed.length){
+        // Static column allowlist above; PostgreSQL rolls the complete change
+        // back on lock/statement timeout or a dependent-schema failure.
+        await client.query(`alter table sag_crash_episodes_v1 `+changed.map(name=>
+          `alter column ${name} type numeric using ${name}::numeric`).join(', '));
+      }
+      const after=(await inspect()).rows;
+      if(after.length!==names.length||!names.every(name=>after.some(row=>row.column_name===name
+        &&row.data_type==='numeric'&&row.numeric_precision==null&&row.numeric_scale==null)))
+        throw new Error('crash_episode_precision_readback_failed');
       await client.query('COMMIT');begun=false;
       return {changed:changed.length>0,columns:changed};
     }catch(error){
@@ -813,6 +871,8 @@ export class Database {
       this.startupStage='starlight_capital_schema';
       await client.query(SC1_NO_SEND_HISTORY_SQL);
       await client.query(STARLIGHT_CAPITAL_SQL);
+      this.startupStage='r17_golden_saint_schema';
+      await client.query(GOLDEN_SAINT_SCHEMA_SQL);
       this.startupStage='lightning_capital_v5_schema';
       await client.query(LP_NO_SEND_SQL);
       await client.query(LP_V5_SQL);
@@ -1818,7 +1878,7 @@ export class Database {
           and (${UNRESOLVED_FUNDED_SQL}) group by concept_name`,args);
       const closed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name=any($5::text[]) and status='closed' and count>0
-        order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Lightning Plasma'],Math.max(1,Math.min(5000,Number(limit)||150))]);
+        order by closed_at_ms desc nulls last,id limit $6`,[...args.slice(0,4),['Lightning Plasma',...R17_GOLDEN_CAPITAL_CONCEPTS],Math.max(1,Math.min(5000,Number(limit)||150))]);
       const greatHornClosed=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where ${scope} and opened_at_ms>=$4 and concept_name='Great Horn Recovery' and status='closed' and count>0
         order by closed_at_ms desc nulls last,id limit $5`,[...args.slice(0,4),Math.max(1,Math.min(5000,Number(limit)||150))]);
@@ -1952,6 +2012,7 @@ export class Database {
   }
 
   get shadowStore(){return this._shadowStore||(this._shadowStore=new ShadowStore(this,rowEntry));}
+  get goldenSaintStore(){return this._goldenSaintStore||(this._goldenSaintStore=new GoldenSaintRepository({pool:this.pool,shadowStore:this.shadowStore,entryMapper:rowEntry,entryWriter:async(e,c)=>{AUTHORIZED_GOLDEN_SAINT_INSERTS.add(c);try{return await this.insertEntry(e,c);}finally{AUTHORIZED_GOLDEN_SAINT_INSERTS.delete(c);}},simCashCalculator:(...args)=>this.simulationCashAggregate(...args)}));}
   captureShadowScope(s){return this.shadowStore.captureScope(s);}
   insertShadowEntry(e,scope,options){return this.shadowStore.insert(e,scope,options);}
   insertAthenaShadowBatch(entries,scope,options){return this.shadowStore.insertAthenaBatch(entries,scope,options);}
@@ -5084,6 +5145,16 @@ export class Database {
   }
 
   async insertEntry(e,queryClient=this.pool){
+  // R17 root replacement boundary: legacy capital authorizers are retired.
+  // This does not touch existing broker-funded positions or their SELL/settlement
+  // reconciliation. Old SHADOW scans needed by Athena are still permitted.
+  // New R17 capital inserts must carry a transaction-scoped capability.
+    if(R17_RETIRED_NEW_CAPITAL_CONCEPTS.has(String(e?.conceptName||''))
+       && !isShadowSaintEntry(e) && e?.executionClass!=='SHADOW_SAINT')
+      throw new Error('r17_retired_legacy_new_capital_order_forbidden');
+    if(R17_GOLDEN_CAPITAL_CONCEPTS.includes(String(e?.conceptName||''))
+       && !AUTHORIZED_GOLDEN_SAINT_INSERTS.has(queryClient))
+      throw new Error('r17_direct_capital_insert_forbidden');
     if(e?.conceptName==='Sagittarius Arrow Recovery'
       && !(e.mode==='SIMULATION'&&AUTHORIZED_SA_SIM_INSERTS.has(queryClient))
       && !(e.mode==='LIVE'&&AUTHORIZED_SA_LIVE_INSERTS.has(queryClient))
@@ -5116,6 +5187,7 @@ export class Database {
     if(this.shadowArchitectureRequired && e.conceptName==='Lightning Plasma' && e.entryConfig?.lightningPlasmaScaleIn && !isShadowSaintEntry(e) && !AUTHORIZED_STARLIGHT_INSERTS.has(queryClient))
       return this.insertLightningPlasmaScaleInEntry(e);
     if(this.shadowArchitectureRequired && PORTFOLIO_CONCEPTS.has(e.conceptName) && !isShadowSaintEntry(e)
+      && !(R17_GOLDEN_CAPITAL_CONCEPTS.includes(e.conceptName) && AUTHORIZED_GOLDEN_SAINT_INSERTS.has(queryClient))
       && (e.conceptName!=='Crash Recovery Hunter' || !e.entryConfig?.starlightCapital || !AUTHORIZED_STARLIGHT_INSERTS.has(queryClient))
       && (e.conceptName!=='Lightning Plasma' || !(((e.entryConfig?.lightningPlasmaScaleIn || e.entryConfig?.starlightModelClone===true) && AUTHORIZED_STARLIGHT_INSERTS.has(queryClient))
           ||(e.entryConfig?.independentRecovery?.version==='INDEPENDENT-ATHENA-LOSS-V2' && AUTHORIZED_INDEPENDENT_RECOVERY_INSERTS.has(queryClient))))
@@ -5391,14 +5463,14 @@ export class Database {
     const orderAt=isOpen?'opened_at_ms':'coalesce(closed_at_ms,opened_at_ms)';
     const stateFilter=isOpen?`(${ACTUAL_OPEN_SQL})`:`status='closed' and count>0`;
     const values=[String(systemName),String(ownerId),String(mode),Math.max(Number(resetTimestampMs),Number(dashboardStartMs)),
-      cursorPresent?Number(beforeAtMs):null,cursorPresent?beforeId:null,cutoff,lim+1];
+      cursorPresent?Number(beforeAtMs):null,cursorPresent?beforeId:null,cutoff,lim+1,EXECUTION_ATTACKS];
     const client=await this.pool.connect();
     try{
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       await client.query("set local statement_timeout='4000ms'");
       const result=await client.query(`select ${this.dashboardEntryProjectionSql()} from sag_entries
         where system_name=$1 and owner_id=$2 and mode=$3 and archived=false
-        and concept_name in ('Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery','Crash Recovery Hunter')
+        and concept_name = any($9::text[])
         and ${CAPITAL_SQL}
         and (${isOpen?'$4::bigint >= 0':'opened_at_ms >= $4'})
         and ${stateFilter} and ${orderAt} <= $7
@@ -5679,6 +5751,20 @@ export class Database {
   // proves the disposition. Select beyond reset epochs: absence of dashboard
   // history is never proof that an old economics obligation disappeared.
   // This reader does not change cash reservations, orders, or inventory.
+
+  // Read-only. Account settlement proofs already stored on any clone for this
+  // owner. Used only to attribute sibling broker-flat rows. Never writes.
+  async liveAccountSettlementProofs(ownerId,{limit=100}={}){
+    if(!ownerId)throw Error('invalid_account_settlement_scope');
+    const cap=Math.max(1,Math.min(100,Math.floor(Number(limit)||100)));
+    const r=await this.pool.query(`select ticker, exit_execution_state->'brokerSettlementProof' as proof
+      from sag_entries where owner_id=$1 and mode='LIVE' and archived=false
+      and exit_execution_state ? 'brokerSettlementProof'
+      and jsonb_typeof(exit_execution_state->'brokerSettlementProof')='object'
+      order by closed_at_ms desc nulls last limit $2`,[ownerId,cap]);
+    return r.rows.map(row=>({ticker:row.ticker,proof:row.proof}));
+  }
+
   async liveUnresolvedBrokerFlatEntries(ownerId,systemName,{limit=200}={}){
     if(!ownerId||!systemName)throw Error('invalid_closed_broker_flat_scope');
     const cap=Math.max(1,Math.min(200,Math.floor(Number(limit)||200)));
@@ -5781,7 +5867,17 @@ export class Database {
     if(r.rows.length>200)throw Error('live_funded_orphan_limit_exceeded');
     return r.rows.map(rowEntry);
   }
-  async liveOpenHunterEntries(ownerId){const r=await this.pool.query("select * from sag_entries where owner_id=$1 and archived=false and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and concept_name = any($2::text[]) and mode='LIVE' and status in ('open','entry_pending','exit_pending','pending_recovery') order by opened_at_ms asc",[ownerId,PORTFOLIO_CONCEPT_NAMES]);return r.rows.map(rowEntry);}
+  async liveOpenHunterEntries(ownerId,systemName=null){
+    const scoped=typeof systemName==='string'&&systemName.length>0;
+    const r=await this.pool.query(`select * from sag_entries where owner_id=$1
+      and archived=false and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT'
+        and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT')
+      and concept_name = any($2::text[]) and mode='LIVE'
+      and status in ('open','entry_pending','exit_pending','pending_recovery')
+      and ($3::text is null or system_name=$3)
+      order by opened_at_ms asc`,[ownerId,PORTFOLIO_CONCEPT_NAMES,scoped?systemName:null]);
+    return r.rows.map(rowEntry);
+  }
   async entryById(id){const r=await this.pool.query('select * from sag_entries where id=$1',[id]);return r.rows[0]?rowEntry(r.rows[0]):null;}
 
   // SE2-R8: Find only orphaned, executable Aurora hard-stop parents. The
@@ -6321,8 +6417,28 @@ export class Database {
     return new Map(r.rows.map(x=>[x.event_ticker,x.state&&typeof x.state==='object'?x.state:{}]));
   }
   async upsertGameClockState(systemName,eventTicker,state){
-    if(!eventTicker)return;
-    await this.pool.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms) values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update set state=excluded.state,last_updated_ms=excluded.last_updated_ms`,[systemName,eventTicker,state||{},Date.now()]);
+    if(!eventTicker)return {written:false,state:null};
+    const checkedAtMs=Number(state?.lastCheckedAtMs||0);
+    if(String(state?.eventTicker||'')!==String(eventTicker)||!Number.isSafeInteger(checkedAtMs)||checkedAtMs<=0)
+      throw new Error('game_clock_persistence_invalid_state');
+    // R28: an older process/scan must not overwrite newer durable authority.
+    // FINAL stays terminal even when a delayed LIVE response has a later local
+    // timestamp. Proven FINAL also supersedes a newer nonterminal snapshot:
+    // local receipt order cannot reopen a finished event. Persistence time is
+    // retention metadata, never sporting proof.
+    const result=await this.pool.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms)
+      values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update
+      set state=excluded.state,last_updated_ms=excluded.last_updated_ms
+      where (coalesce(sag_game_clock_authority.state->>'phase','')<>'FINAL' or excluded.state->>'phase'='FINAL')
+        and ((excluded.state->>'phase'='FINAL' and coalesce(sag_game_clock_authority.state->>'phase','')<>'FINAL')
+          or (case when jsonb_typeof(sag_game_clock_authority.state->'lastCheckedAtMs')='number'
+            then (sag_game_clock_authority.state->>'lastCheckedAtMs')::numeric else 0 end)<=$5::numeric)
+      returning state`,[systemName,eventTicker,state,Date.now(),checkedAtMs]);
+    if(result.rowCount)return {written:true,state:result.rows[0].state};
+    // A separate statement observes a concurrent winner after ON CONFLICT's
+    // row lock; a same-statement snapshot could miss that newly committed row.
+    const current=await this.pool.query('select state from sag_game_clock_authority where system_name=$1 and event_ticker=$2',[systemName,eventTicker]);
+    return {written:false,state:current.rows[0]?.state||null};
   }
   async pruneGameClockStates(systemName,beforeMs){await this.pool.query('delete from sag_game_clock_authority where system_name=$1 and last_updated_ms<$2',[systemName,Number(beforeMs)||0]);}
 
@@ -6418,7 +6534,7 @@ export class Database {
     await this.runLowPriorityPersistence(()=>this.pool.query(`insert into sag_crash_market_state_v1(system_name,ticker,event_ticker,market_title,sport,episode_count,state,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict(system_name,ticker) do update set event_ticker=excluded.event_ticker,market_title=excluded.market_title,sport=excluded.sport,episode_count=excluded.episode_count,state=excluded.state,updated_at_ms=excluded.updated_at_ms where excluded.updated_at_ms>=sag_crash_market_state_v1.updated_at_ms`,[o.systemName,o.ticker,o.eventTicker||null,o.marketTitle||'',o.sport||'Unknown',Number(o.episodeCount||0),o.state||{},Number(o.updatedAtMs||Date.now())]));
   }
   async upsertCrashEpisode(e){
-    await this.runLowPriorityPersistence(()=>this.pool.query(`insert into sag_crash_episodes_v1(id,system_name,ticker,event_ticker,episode_index,sport,market_title,state,pre_crash_peak_cents,trough_cents,crash_depth_cents,crash_started_at_ms,trough_at_ms,rebound_confirmed_at_ms,reset_at_ms,stable_observations,upward_ticks,rebound_cents,reclaim_rate,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do update set state=excluded.state,trough_cents=excluded.trough_cents,crash_depth_cents=excluded.crash_depth_cents,trough_at_ms=excluded.trough_at_ms,rebound_confirmed_at_ms=excluded.rebound_confirmed_at_ms,reset_at_ms=excluded.reset_at_ms,stable_observations=excluded.stable_observations,upward_ticks=excluded.upward_ticks,rebound_cents=excluded.rebound_cents,reclaim_rate=excluded.reclaim_rate,final_result=excluded.final_result,updated_at_ms=excluded.updated_at_ms where excluded.updated_at_ms>=sag_crash_episodes_v1.updated_at_ms`,[e.id,e.systemName,e.ticker,e.eventTicker||null,Number(e.episodeIndex||0),e.sport||'Unknown',e.marketTitle||'',e.state||'CRASHING',Number(e.preCrashPeakCents||0),Number(e.troughCents||0),Number(e.crashDepthCents||0),Number(e.crashStartedAtMs||0),Number(e.troughAtMs||0),e.reboundConfirmedAtMs||null,e.resetAtMs||null,Number(e.stableObservations||0),Number(e.upwardTicks||0),Number(e.reboundCents||0),Number(e.reclaimRate||0),e.finalResult||null,Number(e.updatedAtMs||Date.now())]));
+    await this.runLowPriorityPersistence(()=>this.pool.query(`insert into sag_crash_episodes_v1(id,system_name,ticker,event_ticker,episode_index,sport,market_title,state,pre_crash_peak_cents,trough_cents,crash_depth_cents,crash_started_at_ms,trough_at_ms,rebound_confirmed_at_ms,reset_at_ms,stable_observations,upward_ticks,rebound_cents,reclaim_rate,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do update set state=excluded.state,trough_cents=excluded.trough_cents,crash_depth_cents=excluded.crash_depth_cents,trough_at_ms=excluded.trough_at_ms,rebound_confirmed_at_ms=excluded.rebound_confirmed_at_ms,reset_at_ms=excluded.reset_at_ms,stable_observations=excluded.stable_observations,upward_ticks=excluded.upward_ticks,rebound_cents=excluded.rebound_cents,reclaim_rate=excluded.reclaim_rate,final_result=excluded.final_result,updated_at_ms=excluded.updated_at_ms where excluded.updated_at_ms>=sag_crash_episodes_v1.updated_at_ms`,[e.id,e.systemName,e.ticker,e.eventTicker||null,Number(e.episodeIndex||0),e.sport||'Unknown',e.marketTitle||'',e.state||'CRASHING',crashEpisodePrice(e,'preCrashPeakCents'),crashEpisodePrice(e,'troughCents'),crashEpisodePrice(e,'crashDepthCents'),Number(e.crashStartedAtMs||0),Number(e.troughAtMs||0),e.reboundConfirmedAtMs||null,e.resetAtMs||null,Number(e.stableObservations||0),Number(e.upwardTicks||0),crashEpisodePrice(e,'reboundCents'),Number(e.reclaimRate||0),e.finalResult||null,Number(e.updatedAtMs||Date.now())]));
   }
   async crashEpisodes(systemName,{limit=500,ticker=null}={}){
     const lim=Math.max(1,Math.min(5000,Math.floor(Number(limit)||500)));

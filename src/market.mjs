@@ -5,6 +5,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { isMatchDecisionMarket, MAX_HISTORY } from './doctrine.mjs';
 import { parseMarket, signKalshi } from './kalshi.mjs';
 import {BackgroundBookRecovery} from './backgroundBookRecovery.mjs';
+import {R17_FEED_POLICY,stableR17WatchWindow} from './goldenSaintFeedPolicy.mjs';
+import {researchSeriesForMarket} from './gameClock.mjs';
 
 export const MARKET_TRUTH_REVISION = 'R67-MHF5-VERIFIED-SNAPSHOT-ISOLATION-2026-09-06';
 export const MARKET_RUNTIME_MAINTENANCE = Object.freeze({
@@ -51,6 +53,7 @@ const cents = (v) => {
 };
 const validQuote = (q) => q && q.yesBid >= 0 && q.yesAsk > 0 && q.yesAsk <= 100 && q.yesBid <= q.yesAsk;
 const finalStatus = (q) => ['finalized', 'settled'].includes(String(q?.status || '').toLowerCase()) && Boolean(q?.result);
+const terminalMarketEvidence = q => Boolean(q?.result)||['closed','determined','disputed','finalized','settled','amended','canceled','cancelled'].includes(String(q?.status||'').toLowerCase());
 const finiteInt = (v) => ((typeof v==='number'&&Number.isSafeInteger(v))
   ||(typeof v==='string'&&/^\d+$/.test(v)&&Number.isSafeInteger(Number(v))))&&Number(v)>=0?Number(v):null;
 const sidOf = (data, msg) => finiteInt(data?.sid ?? msg?.sid);
@@ -110,6 +113,10 @@ function walkLevels(levels, count, predicate) {
   };
 }
 
+// The exact same strictly bounded sporting-series research key is used by
+// both the scout selection and the independent GameClockAuthority.
+export {researchSeriesForMarket} from './gameClock.mjs';
+
 export class MarketHub {
   constructor({ kalshi, wsUrl, fallbackWsUrl, getCredentials, onStatus = () => {}, onQuote = () => {}, onPrivate = () => {}, WebSocketClass = WebSocket }) {
     this.kalshi = kalshi;
@@ -160,6 +167,17 @@ export class MarketHub {
     this.restOrderbookInFlight = new Map();
     this.discoveryWanted = new Set();
     this.protectionPriority = {open:new Set(),watch:new Set()};
+    this.r17WatchTickers=new Set();
+    this.r17WatchCursor=0;
+    this.r17WatchWindowAtMs=0;
+    this.r17WatchWindow=[];
+    this.legacyWatchCursor=0;this.legacyWatchWindowAtMs=0;this.legacyWatchWindow=[];
+    this.priorityMissingRestCursor=0;this.priorityRestCalls=0;
+    this.priorityRestPending=new Map();this.priorityRestLastAttempt=new Map();
+    this.priorityRestRecoveryStats={started:0,completed:0,timeouts:0,failed:0,skipped:0};
+    this.pregameScoutStats={version:'R30-OBSERVATION-ONLY',scans:0};
+    this.r17FeedStats={version:'R17-MEGAWAVE-FEED-V1',eligibleWatchTickers:0,
+      coveredWatchTickers:0,rotationCount:0,subscriptionWindowAtMs:0};
     this.protectionEvaluations = new Map();
     this.membershipStats = {version:'MW-FEED-MEMBERSHIP-V1',increments:0,decrements:0,
       acknowledgements:0,errors:0,timeouts:0,preventedReconnects:0,last:null};
@@ -284,6 +302,98 @@ export class MarketHub {
     return this.publishQuote(normalized,{source:'REST',...options});
   }
 
+  // Optional REST discovery NEVER occupies the awaited discovery/entry
+  // lane. The Kalshi transport still owns real deadline and 429 pacing.
+  // One in-flight job per ticker, bounded total slots and per-ticker
+  // cooldown. A hung provider cannot hold the foreground scanner.
+  schedulePriorityMarketRecovery(tickers,requestRevision){
+    const cap=R17_FEED_POLICY.priorityRestRecoveryConcurrency;
+    for(const ticker of tickers){
+      if(this.priorityRestPending.size>=cap)break;
+      if(this.priorityRestPending.has(ticker)||this.quotes.has(ticker))continue;
+      const now=Date.now(),last=this.priorityRestLastAttempt.get(ticker)||0;
+      if(now-last<15_000)continue;
+      this.priorityRestLastAttempt.set(ticker,now);
+      // Prevent an unbounded lifetime of cooldown records as market sets rotate.
+      if(this.priorityRestLastAttempt.size>1024)
+        this.priorityRestLastAttempt.delete(this.priorityRestLastAttempt.keys().next().value);
+      const token=Symbol(ticker);this.priorityRestPending.set(ticker,token);
+      this.priorityRestCalls++;this.priorityRestRecoveryStats.started++;
+      // Initiate the optional read without awaiting it. An immediately
+      // resolved provider can update the cache on the normal microtask turn.
+      let provider;
+      try {provider=Promise.resolve(this.kalshi.getMarket(ticker,
+        {deadline:performance.now()+R17_FEED_POLICY.priorityRestRecoveryTimeoutMs}));}
+      catch(error){provider=Promise.reject(error);}
+      // The timeout is a scheduler fence. The underlying Kalshi request is
+      // also supplied an explicit deadline so the broker read lane can stop.
+      void Promise.resolve().then(async()=>{
+        let timer;
+        const expires=R17_FEED_POLICY.priorityRestRecoveryTimeoutMs;
+        const timeout=new Promise(resolve=>{
+          timer=setTimeout(()=>resolve({timedOut:true}),expires);
+          timer.unref?.();
+        });
+        try{
+          const response=provider.then(q=>({quote:q}),error=>({error}));
+          const result=await Promise.race([response,timeout]);
+          if(result?.timedOut){this.priorityRestRecoveryStats.timeouts++;return;}
+          if(result?.error){this.priorityRestRecoveryStats.failed++;return;}
+          // Only a currently wanted market can be re-seeded. A delayed
+          // optional REST result cannot overwrite a fresher WS revision.
+          const wanted=this.wanted?.has(ticker)||this.protectionPriority?.open?.has(ticker)
+            ||this.r17WatchTickers?.has(ticker);
+          if(!wanted){this.priorityRestRecoveryStats.skipped++;return;}
+          if(result?.quote?.ticker===ticker)this.seed(result.quote,{requestRevision});
+          this.priorityRestRecoveryStats.completed++;
+        }finally{
+          clearTimeout(timer);
+          if(this.priorityRestPending.get(ticker)===token)this.priorityRestPending.delete(ticker);
+        }
+      }).catch(()=>{
+        this.priorityRestRecoveryStats.failed++;
+        if(this.priorityRestPending.get(ticker)===token)this.priorityRestPending.delete(ticker);
+      });
+    }
+  }
+
+  // R31: compile already-fetched Kalshi milestone schedules for discovery only.
+  // NO new REST request, trade, clock admission, or signed broker operation.
+  // Every suggestion is tied to an exact event/series identity and expires.
+  observeClockScoutSchedules(seriesCache,now=Date.now()){
+    const hints=new Map(),invalid=new Set();let sourceSeries=0;
+    if(seriesCache instanceof Map)for(const [series,record] of seriesCache){
+      const observed=Number(record?.observedAtMs||0);
+      if(!(observed>0&&now-observed>=-2000&&now-observed<=60*60_000)
+        ||!Array.isArray(record.rows))continue;
+      sourceSeries++;
+      for(const m of record.rows){
+        const type=String(m?.type||'').toLowerCase();
+        const category=String(m?.category||'').toLowerCase();
+        if(!m?.id||!['sports','esports'].includes(category)
+          ||!(/game|match/.test(type))||/season|series|tournament|multileg/.test(type))continue;
+        const date=Date.parse(String(m.start_date||''));
+        if(!Number.isSafeInteger(date)||date<946684800000
+          ||date<now-30*60_000||date>now+14*24*60*60_000)continue;
+        const related=[...new Set([...(Array.isArray(m.primary_event_tickers)?m.primary_event_tickers:[]),
+          ...(Array.isArray(m.related_event_tickers)?m.related_event_tickers:[])].map(String).filter(Boolean))];
+        for(const event of related){
+          const key=JSON.stringify([String(series),event]);
+          if(invalid.has(key))continue;
+          const prior=hints.get(key);
+          if(prior&&prior.milestoneId!==String(m.id)){
+            hints.delete(key);invalid.add(key);continue;
+          }
+          if(hints.size<4096||hints.has(key))hints.set(key,{startMs:date,
+            milestoneId:String(m.id),observedAtMs:observed});
+        }
+      }
+    }
+    this.clockScoutScheduleHints=hints;
+    this.clockScoutScheduleStats={sourceSeries,hints:hints.size,ambiguous:invalid.size};
+    return this.clockScoutScheduleStats;
+  }
+
   async discover(priorityTickers = []) {
     const requestRevision=this.quoteRevision;
     const tradeData = await this.kalshi.getRecentTrades(5, 5);
@@ -294,13 +404,30 @@ export class MarketHub {
     const merged = new Map();
     for (const q of [...open, ...tradeMarkets]) if (!merged.has(q.ticker)) merged.set(q.ticker, q);
     const now = Date.now();
-    const markets = [];
+    const markets = [],pregameClockCandidates=[];
+    const scoutCounters={version:'R30-OBSERVATION-ONLY',scans:Number(this.pregameScoutStats?.scans||0)+1,
+      fullScanAtMs:now,mergedMarkets:merged.size,eligibleMatchMarkets:0,
+      quoteInvalid:0,quoteInvalidUpcoming2h:0,quietCandidates:0,
+      quietUpcoming15m:0,quietUpcoming2h:0,quietFutureBeyond2h:0,
+      pregameScoutsSelected:0,prioritizedActive:0,
+      scheduleHintSources:Number(this.clockScoutScheduleStats?.sourceSeries||0),
+      scheduleHintEntries:Number(this.clockScoutScheduleStats?.hints||0),
+      selectedMilestoneHintCount:0,continuityRetained:0,uniqueQuietEvents:0,
+      uniqueQuietSeries:0,recoveredQuietSeriesCandidates:0,
+      scheduleWarm:{...(this.pregameScoutScheduleWarmStats||{})}};
     for (const q0 of merged.values()) {
-      const q = { ...q0 };
+      const q = { ...q0,clockProbeOnly:false };
       const t = q.ticker.toUpperCase();
       if (t.startsWith('KXMV') || DERIVATIVE.some((x) => t.includes(x))) continue;
       if (!t.includes('MATCH') && !t.includes('GAME')) continue;
-      if (!isMatchDecisionMarket(q) || !q.canCloseEarly || q.closeTimeMs <= now || !validQuote(q)) continue;
+      if(!isMatchDecisionMarket(q)||!q.canCloseEarly||q.closeTimeMs<=now)continue;
+      scoutCounters.eligibleMatchMarkets++;
+      if(!validQuote(q)){
+        scoutCounters.quoteInvalid++;
+        if(Number(q.occurrenceTimeMs)>now&&Number(q.occurrenceTimeMs)<=now+120*60_000)
+          scoutCounters.quoteInvalidUpcoming2h++;
+        continue;
+      }
       const td = tradeData.get(q.ticker);
       q.recentTrades = td?.count || q.recentTrades || 0;
       q.recentTradesObservedAtMs = Number(td?.observedAtMs || 0);
@@ -308,32 +435,168 @@ export class MarketHub {
       const started = q.occurrenceTimeMs > 0 && q.occurrenceTimeMs < now;
       const moved = (q.prevYesBid > 0 && Math.abs(q.yesBid - q.prevYesBid) >= 2)
         || (q.prevYesAsk > 0 && Math.abs(q.yesAsk - q.prevYesAsk) >= 2);
-      if (!q.recentTrades && !started && !moved) continue;
+      if (!q.recentTrades && !started && !moved) {
+        scoutCounters.quietCandidates++;
+        if(Number(q.occurrenceTimeMs)>now&&Number(q.occurrenceTimeMs)<=now+15*60_000)scoutCounters.quietUpcoming15m++;
+        else if(Number(q.occurrenceTimeMs)>now&&Number(q.occurrenceTimeMs)<=now+120*60_000)scoutCounters.quietUpcoming2h++;
+        else if(Number(q.occurrenceTimeMs)>now+120*60_000)scoutCounters.quietFutureBeyond2h++;
+        // R29: a five-minute full-scan cadence used to omit every quiet
+        // pregame market. Without a preceding provider pregame observation,
+        // a subsequent LIVE status cannot safely bound the actual start.
+        // Scheduled timestamps are ONLY discovery hints, never clock proof.
+        // R30 measured zero candidates inside R29's 15-minute forecast
+        // window on all three clones. 295 quiet matches instead had later
+        // scheduled occurrence timestamps. Those timestamps are fallible and
+        // MUST NOT grant kickoff authority, but do rank observation-only
+        // discovery. Include strictly future, time-stamped candidates in the
+        // existing six-event, 80-market, 50-tracker budget. Provider whole-
+        // event pregame/live evidence remains the only bounded authority.
+        if(Number.isSafeInteger(Number(q.occurrenceTimeMs))
+          &&Number(q.occurrenceTimeMs)>now)
+          pregameClockCandidates.push(q);
+        continue;
+      }
       this.seed(q,{requestRevision});
-      markets.push(this.getQuote(q.ticker)||q);
+      // The role belongs to THIS discovery scan. A fresher WS quote may
+      // legitimately reject the REST seed, but may not retain an older
+      // clockProbeOnly=true flag and consume a reserved tracker slot.
+      markets.push({...this.getQuote(q.ticker)||q,clockProbeOnly:false});
     }
-    // Permanent: never subscribe the whole board. The 80 most active
-    // discovery markets only. Open positions and watches are unioned back
-    // in setWanted and are never capped.
+    // Keep the existing 80-discovery ceiling and all independent priority
+    // subscriptions. At most six quiet, next-scheduled future events can be
+    // scouted per five-minute full scan. Scheduled dates only rank discovery;
+    // never infer a kickoff or age from them. No bookmaker/rest exposure, trade or clock
+    // authority is conferred by the forecast start used to discover them.
+    const alreadyObservedEvents=new Set(markets.map(q=>String(q.eventTicker||q.ticker)));
+    const uniquePregame=[];
+    for(const candidate of pregameClockCandidates.sort((a,b)=>
+      Number(a.occurrenceTimeMs)-Number(b.occurrenceTimeMs))){
+      const event=String(candidate.eventTicker||candidate.ticker);
+      if(!alreadyObservedEvents.has(event)){
+        alreadyObservedEvents.add(event);uniquePregame.push(candidate);
+      }
+    }
+    // R31 root: market occurrence_datetime is not a reliable sporting
+    // schedule. Prefer a cached, exact-event Kalshi milestone start_date for
+    // DISCOVERY RANKING ONLY; it must never become a trading start timestamp.
+    // Preserve an already observed official pregame event continuously across
+    // scans, so a 5-minute scanner plus two-event rotation cannot miss its LIVE
+    // transition or turn a narrow bracket into an unusable >12-minute span.
+    const hintFor=q=>{
+      const key=JSON.stringify([researchSeriesForMarket(q),String(q.eventTicker||q.ticker)]);
+      const hint=this.clockScoutScheduleHints?.get(key);
+      return hint&&now-hint.observedAtMs>=-2000&&now-hint.observedAtMs<=60*60_000
+        ?hint:null;
+    };
+    const dueAt=q=>{
+      const official=hintFor(q)?.startMs;
+      if(Number.isSafeInteger(official)&&official>now-5*60_000)return official;
+      return Number(q.occurrenceTimeMs||0)||Number.MAX_SAFE_INTEGER;
+    };
+    // R34: maintain observation continuity through the owner game-time window.
+    // A BOUNDED clock is PROVEN to have observed the pregame->LIVE transition,
+    // but not to know an exact kickoff. Without this observation-only pin, the
+    // quote can rotate out before a 60/70-minute minimum becomes eligible.
+    // This flag cannot authorize a trade: every actual entry still requires
+    // a fresh same-milestone status, executable book, funds, and native claim.
+    const maxOwnerMinutes=Number(this.clockScoutOwnerMaxGameMinutes||0);
+    const retainMs=Math.min(6*60*60_000,Math.max(90*60_000,
+      (maxOwnerMinutes>0&&Number.isFinite(maxOwnerMinutes)?maxOwnerMinutes:180)*60_000+10*60_000));
+    const observedPregame=q=>{
+      const event=String(q.eventTicker||q.ticker);
+      const raw=this.getQuote?.(q.ticker)?.gameClockState;
+      if(!raw||raw.eventTicker!==event)return false;
+      if(raw.phase==='UNKNOWN')return Boolean(raw.milestoneId
+        &&raw.pregameMilestoneId===raw.milestoneId
+        &&Number(raw.pregameObservedAtMs)>0
+        &&now-Number(raw.pregameObservedAtMs)>=-2000
+        &&now-Number(raw.pregameObservedAtMs)<=12*60_000);
+      if(raw.phase==='SCHEDULE_LIVE'){
+        const start=Number(raw.scheduledStartMs||0);
+        return Boolean(raw.milestoneId&&raw.scheduleReferenceMilestoneId===raw.milestoneId
+          &&raw.actualStartConfidence==='scheduled_estimate'
+          &&Number.isSafeInteger(start)&&start>=946684800000
+          &&now-start>=-2000&&now-start<=retainMs);
+      }
+      if(raw.phase==='BOUNDED'){
+        const lower=Number(raw.boundedStartLowerMs||0),upper=Number(raw.boundedStartUpperMs||0);
+        return Boolean(raw.source==='kalshi_live_data_status_transition'
+          &&raw.milestoneId&&raw.pregameMilestoneId===raw.milestoneId
+          &&Number.isSafeInteger(lower)&&Number.isSafeInteger(upper)
+          &&lower>=946684800000&&upper>lower&&upper-lower<=12*60_000
+          &&now-upper>=-2000&&now-lower<=retainMs);
+      }
+      if(raw.phase==='CONFIRMED'&&raw.confirmed===true&&raw.actualStartConfidence==='proven'){
+        const actual=Number(raw.actualStartMs||0);
+        return Number.isSafeInteger(actual)&&actual>=946684800000
+          &&now-actual>=-2000&&now-actual<=retainMs;
+      }
+      return false;
+    };
+    uniquePregame.sort((a,b)=>dueAt(a)-dueAt(b)||String(a.ticker).localeCompare(String(b.ticker)));
+    scoutCounters.uniqueQuietEvents=uniquePregame.length;
+    // R32: expose a bounded, distinct QUIET-SERIES catalog for low-priority
+    // schedule discovery. R31 only observed series already admitted as active;
+    // that left quiet series without milestone hints, as Railway confirmed.
+    this.pregameScoutCandidateSeries=[...new Set(uniquePregame.map(researchSeriesForMarket).filter(Boolean))].slice(0,80);
+    scoutCounters.recoveredQuietSeriesCandidates=uniquePregame.filter(q=>!q.seriesTicker&&researchSeriesForMarket(q)).length;
+    scoutCounters.uniqueQuietSeries=this.pregameScoutCandidateSeries.length;
+    const selectedPregame=[],selectedEvents=new Set();
+    const choose=q=>{const event=String(q.eventTicker||q.ticker);
+      if(selectedEvents.has(event))return false;
+      selectedPregame.push(q);selectedEvents.add(event);return true;};
+    // The first four lanes belong to verifiably recently observed pregame
+    // lifecycles, then the nearest scheduled market. Two remaining lanes rotate
+    // across the tail and cannot monopolize BUY/protection/network capacity.
+    const pinned=uniquePregame.filter(observedPregame).slice(0,4);
+    for(const q of pinned)if(choose(q))scoutCounters.continuityRetained++;
+    // No witnessed pregame means there is nothing authoritative to pin:
+    // rotate ALL six lanes as R29 did, rather than wasting four on the same
+    // unsupported market occurrence hints. Once pregame is genuinely seen,
+    // retain that continuity and at most three nearest upcoming neighbors.
+    const hasOfficialTimingHint=uniquePregame.some(q=>Boolean(hintFor(q)));
+    if(pinned.length||hasOfficialTimingHint)
+      for(const q of uniquePregame){if(selectedPregame.length>=4)break;choose(q);}
+    const tail=uniquePregame.filter(q=>!selectedEvents.has(String(q.eventTicker||q.ticker)));
+    if(tail.length){
+      const slots=Math.min(6-selectedPregame.length,tail.length);
+      const begin=Number(this.pregameClockDiscoveryCursor||0)%tail.length;
+      for(let i=0;i<slots;i++)choose(tail[(begin+i)%tail.length]);
+      this.pregameClockDiscoveryCursor=(begin+slots)%tail.length;
+    }
+    scoutCounters.selectedMilestoneHintCount=selectedPregame.filter(q=>Boolean(hintFor(q))).length;
+    // Active candidates are never dropped below 74 to make room for scouts.
     markets.sort((a,b)=>Number(b.recentTrades||0)-Number(a.recentTrades||0));
-    const capped=markets.slice(0,80);
+    const capped=markets.slice(0,Math.max(0,80-selectedPregame.length));
+    for(const q of selectedPregame){
+      const probe={...q,clockProbeOnly:true};
+      this.seed(probe,{requestRevision});
+      // A fresher cached quote is price authority. It cannot erase the
+      // selected scout role when seed() rejects an older REST snapshot.
+      capped.push({...this.getQuote(probe.ticker)||probe,clockProbeOnly:true});
+    }
+    scoutCounters.pregameScoutsSelected=selectedPregame.length;
+    scoutCounters.prioritizedActive=markets.length;
+    this.pregameScoutStats=scoutCounters;
     const proposed=[...new Set([...capped.map(x=>x.ticker),...priorityTickers])];
     const subscribed=this.plannedWanted(proposed);
-    for (const ticker of priorityTickers) {
-      // R10-MR2: previous code fetched every out-of-cap priority ticker,
-      // seeded its quote, then IMMEDIATELY pruned it in setWanted. Repeated
-      // scans re-fetched those same discarded quotes, producing HTTP 429s.
-      // Keep a short-lived quote witness observer, even outside membership:
-      // it may be validating an in-flight independent recovery attempt.
-      // Do not trade away that executable-price observation for bandwidth.
-      // For no-observer tickers, the unchanged membership cap would delete
-      // this non-authoritative REST quote in the same sweep.
-      if ((!subscribed.has(ticker)&&!(this.quoteObservers?.get(ticker)?.size>0))
-        ||this.quotes.has(ticker)) continue;
-      const q = await this.kalshi.getMarket(ticker).catch(() => null);
-      if (q) this.seed(q,{requestRevision});
-    }
+    // Research/discovery REST is optional. Never fan out dozens of sequential
+    // getMarket() calls on a 48/171-ticker watch cohort: Kalshi's rate-limited
+    // read lane is shared with BUY book proof and protection. Four distinct
+    // missing markets per discovery pass; continuously rotate the remainder.
+    // Funded positions and genuine exit protection have their own independent
+    // quote/book recovery lane and are not starved by this research quota.
+    const missingPriority=[...new Set(priorityTickers)].filter(ticker=>
+      (subscribed.has(ticker)||this.quoteObservers?.get(ticker)?.size>0)
+      &&!this.quotes.has(ticker));
+    const budget=R17_FEED_POLICY.priorityMissingRestBudget;
+    const begin=missingPriority.length?this.priorityMissingRestCursor%missingPriority.length:0;
+    const picked=[];
+    for(let i=0;i<Math.min(budget,missingPriority.length);i++)
+      picked.push(missingPriority[(begin+i)%missingPriority.length]);
+    this.priorityMissingRestCursor+=picked.length;
     this.setWanted(proposed);
+    this.schedulePriorityMarketRecovery(picked,requestRevision);
     return capped;
   }
 
@@ -717,21 +980,75 @@ export class MarketHub {
       runtimeMaintenance:{...this.runtimeMaintenance},
       protectedMarketData:this.protectedMarketHealthSnapshot(),
       backgroundRestRecovery:this.backgroundRestRecovery.snapshot(),
+      r17Feed:{...this.r17FeedStats,watchCapacity:R17_FEED_POLICY.maximumWatchedTickers,
+        priorityMissingRestCalls:this.priorityRestCalls,legacyWindowSize:this.legacyWatchWindow.length},
     };
+  }
+
+  // Only the R17 scanner owns this list. It consists of live, enabled,
+  // matching-fingerprint WATCHING authorization tickers (not historical rows).
+  // Unlike discoveryWanted it is NOT cleared by unrelated full-scan research.
+  setR17WatchTickers(tickers){
+    const next=new Set(Array.from(tickers||[]).filter(t=>typeof t==='string'&&t.length>0));
+    const changed=next.size!==this.r17WatchTickers.size||[...next].some(t=>!this.r17WatchTickers.has(t));
+    if(changed)this.r17WatchTickers=next;
+    const rotationDue=next.size>R17_FEED_POLICY.maximumWatchedTickers
+      &&Date.now()-this.r17WatchWindowAtMs>=R17_FEED_POLICY.rotationIntervalMs;
+    if(changed||rotationDue)this.setWanted([...this.discoveryWanted]);
   }
 
   plannedWanted(tickers) {
     const discoveryWanted=new Set(Array.from(tickers||[]).filter(Boolean));
-    // The same plan controls both discovery REST admission and WS membership.
-    // No research quote is fetched only to be evicted within the same sweep.
-    // Open positions are never capped. The R7 ledger subscribed 103 and held
-    // 67 recovery markets because the watch set (every priority ticker) was
-    // bigger than the cap, so the cap never bound. Watch is now capped at 12.
-    // Discovery fills to 48. Background load drops; open trades stay.
     const open=[...this.protectionPriority.open];
-    const watch=[...this.protectionPriority.watch].filter(t=>!this.protectionPriority.open.has(t)).slice(0,12);
-    const room=Math.max(0,48-open.length-watch.length);
-    const discovery=[...discoveryWanted].filter(t=>!this.protectionPriority.open.has(t)&&!this.protectionPriority.watch.has(t)).slice(0,room);
+    const r17=[...this.r17WatchTickers].filter(t=>!this.protectionPriority.open.has(t)
+      &&!finalStatus(this.quotes.get(t)));
+    // Coherent multi-tick rebounds require a stable membership window; a
+    // different 12-market slice on every full/fast scan loses quote continuity.
+    // Only rotate on a bounded timer when demand exceeds the subscription cap.
+    const now=Date.now();
+    const changed=this.r17WatchWindow.some(t=>!r17.includes(t));
+    const rollover=!this.r17WatchWindowAtMs||changed
+      ||this.r17WatchWindow.length<Math.min(r17.length,R17_FEED_POLICY.maximumWatchedTickers)
+      ||(r17.length>R17_FEED_POLICY.maximumWatchedTickers
+        &&now-this.r17WatchWindowAtMs>=R17_FEED_POLICY.rotationIntervalMs);
+    if(rollover){
+      const isRotation=this.r17WatchWindowAtMs>0&&!changed&&r17.length>R17_FEED_POLICY.maximumWatchedTickers;
+      if(isRotation){this.r17WatchCursor=(this.r17WatchCursor+R17_FEED_POLICY.maximumWatchedTickers)%r17.length;
+        this.r17FeedStats.rotationCount++;}
+      const selected=stableR17WatchWindow(r17,{cursor:this.r17WatchCursor});
+      this.r17WatchWindow=selected.selected;
+      this.r17WatchWindowAtMs=now;
+    }
+    const watch=[...this.r17WatchWindow];
+    // Protected non-R17 recovery watches MUST NOT lose all WS slots when
+    // R17 alone fills its 48-watch cohort. Rotate a separate stable subset.
+    const otherWatches=[...this.protectionPriority.watch].filter(t=>
+      !this.protectionPriority.open.has(t)&&!this.r17WatchTickers.has(t)
+      &&!watch.includes(t)&&!finalStatus(this.quotes.get(t)));
+    const legacyCap=Math.min(Math.max(R17_FEED_POLICY.legacyWatchCapacity,
+      R17_FEED_POLICY.maximumWatchedTickers-watch.length),
+      Math.max(0,R17_FEED_POLICY.maximumTotalNonFundedTickers
+        -watch.length-R17_FEED_POLICY.minimumDiscoverySlots));
+    const oldGone=this.legacyWatchWindow.some(t=>!otherWatches.includes(t));
+    const legacyRoll=!this.legacyWatchWindowAtMs||oldGone
+      ||this.legacyWatchWindow.length<Math.min(otherWatches.length,legacyCap)
+      ||(otherWatches.length>legacyCap
+        &&now-this.legacyWatchWindowAtMs>=R17_FEED_POLICY.rotationIntervalMs);
+    if(legacyRoll){
+      if(!oldGone&&this.legacyWatchWindowAtMs>0&&otherWatches.length>legacyCap)
+        this.legacyWatchCursor=(this.legacyWatchCursor+legacyCap)%otherWatches.length;
+      this.legacyWatchWindow=legacyCap?stableR17WatchWindow(otherWatches,
+        {maximum:legacyCap,cursor:this.legacyWatchCursor}).selected:[];
+      this.legacyWatchWindowAtMs=now;
+    }
+    watch.push(...this.legacyWatchWindow);
+    const maximum=R17_FEED_POLICY.maximumTotalNonFundedTickers;
+    const room=Math.max(0,maximum-watch.length);
+    const discovery=[...discoveryWanted].filter(t=>!this.protectionPriority.open.has(t)
+      &&!watch.includes(t)).slice(0,room);
+    this.r17FeedStats.eligibleWatchTickers=r17.length;
+    this.r17FeedStats.coveredWatchTickers=watch.filter(t=>this.r17WatchTickers.has(t)).length;
+    this.r17FeedStats.subscriptionWindowAtMs=this.r17WatchWindowAtMs;
     return new Set([...open,...watch,...discovery]);
   }
 
@@ -794,20 +1111,43 @@ export class MarketHub {
   // proof may be newer than the websocket cache, but it must never replace a
   // sequence-aligned WS book merely because an entry candidate is being
   // revalidated. Callers receive the fresh REST quote/book directly.
-  async verifyTickerSnapshot(ticker) {
-    const now=Date.now();
-    const cached=this.snapshotCache?.get(ticker);
+  async verifyTickerSnapshot(ticker,{maxAgeMs}={}) {
+    const now=Date.now(),requestEpoch=this.connectionEpoch;
+    const limited=maxAgeMs!=null&&Number.isFinite(Number(maxAgeMs))&&Number(maxAgeMs)>=0;
+    const limit=limited?Number(maxAgeMs):null;
+    const freshAt=(at,checkAt=Date.now())=>Number(at)>0&&checkAt-Number(at)>=-2000&&checkAt-Number(at)<=limit;
+    const project=value=>{
+      if(requestEpoch!==this.connectionEpoch)return {...value,book:null,marketFresh:false,bookFresh:false,
+        marketObservedAtMs:0,bookObservedAtMs:0,canonicalBookMutated:false,
+        requestEpoch,verificationSource:'connection_epoch_changed'};
+      if(!limited)return value;
+      // Only the caller's freshness contract changes. Keep the actual receipt
+      // clocks; neither cache hits nor delayed sibling requests mint evidence.
+      return {...value,marketFresh:value?.marketFresh===true&&freshAt(value.marketObservedAtMs),
+        bookFresh:value?.bookFresh===true&&freshAt(value.bookObservedAtMs)};
+    };
+    const cached=this.snapshotCache?.get(ticker),latest=this.quotes.get(ticker);
     const ttl=this.protectionPriority?.open?.has(ticker)?2500:30_000;
-    if(cached && now-cached.atMs<ttl)return cached.value;
-    // Concurrent callers observe the same original, complete verification,
-    // but a reconnect must never inherit an old in-flight proof. Failures
-    // remain failures and are not converted into executable book authority.
-    const flightKey=`${this.connectionEpoch}:${ticker}`;
+    const newerCanonical=Number(latest?.quoteObservation?.revision||0)
+      >Number(cached?.value?.quote?.quoteObservation?.revision||cached?.value?.requestRevision||0);
+    const lifecycleChanged=latest&&cached?.value?.quote&&(
+      String(latest.eventTicker||latest.ticker)!==String(cached.value.quote.eventTicker||cached.value.quote.ticker)
+      ||terminalMarketEvidence(latest)&&!terminalMarketEvidence(cached.value.quote)
+      ||newerCanonical&&(!cached.value.marketFresh||!cached.value.bookFresh));
+    const cacheAge=now-Number(cached?.atMs||0);
+    const evidenceWithinLimit=!limited||(
+      (!cached?.value?.marketFresh||freshAt(cached.value.marketObservedAtMs,now))
+      &&(!cached?.value?.bookFresh||freshAt(cached.value.bookObservedAtMs,now)));
+    if(cached&&cached.epoch===requestEpoch&&!lifecycleChanged&&cacheAge>=0&&cacheAge<ttl
+      &&(!limited||cacheAge<=limit)&&evidenceWithinLimit)return project(cached.value);
+    // Share the original verification only inside its connection epoch. A
+    // reconnect fences both completed cache entries and in-flight responses.
+    const flightKey=`${requestEpoch}:${ticker}`;
     const previous=this.verificationInFlight.get(flightKey);
-    if(previous)return previous;
+    if(previous)return project(await previous);
     const pending=this.verifyTickerSnapshotUnshared(ticker);
     this.verificationInFlight.set(flightKey,pending);
-    try{return await pending;}
+    try{return project(await pending);}
     finally{if(this.verificationInFlight.get(flightKey)===pending)this.verificationInFlight.delete(flightKey);}
   }
 
@@ -829,54 +1169,59 @@ export class MarketHub {
     const requestEpoch=this.connectionEpoch;
     const requestRevision=this.quoteRevision;
     const [marketResult,bookResult]=await Promise.allSettled([
-      this.kalshi.getMarket(ticker),this.sharedRestOrderbook(ticker),
+      Promise.resolve().then(()=>this.kalshi.getMarket(ticker)).then(value=>({value,observedAtMs:Date.now()})),
+      this.sharedRestOrderbook(ticker).then(value=>({value,observedAtMs:Date.now()})),
     ]);
-    const marketQuote=marketResult.status==='fulfilled'?marketResult.value:null;
-    const rawBook=bookResult.status==='fulfilled'?bookResult.value:null;
+    const marketQuote=marketResult.status==='fulfilled'?marketResult.value.value:null;
+    const rawBook=bookResult.status==='fulfilled'?bookResult.value.value:null;
     const book=this.trustedRestBook(rawBook);
-    const marketObservedAtMs=marketQuote?Date.now():0;
-    const bookObservedAtMs=book?Number(book.updatedAtMs||Date.now()):0;
+    const marketObservedAtMs=marketQuote?Number(marketResult.value.observedAtMs):0;
+    const bookObservedAtMs=book?Number(book.updatedAtMs||bookResult.value.observedAtMs):0;
     const latest=this.quotes.get(ticker),latestBook=this.books.get(ticker);
-    if(Number(latest?.quoteObservation?.revision||0)>Number(requestRevision||0)){
+    // A newer price-only WS revision cannot erase a definitive REST market
+    // close/result. Preserve terminal evidence from either source while
+    // keeping the canonical WS quote and sequence-aligned book untouched.
+    if(!terminalMarketEvidence(marketQuote)&&(Number(latest?.quoteObservation?.revision||0)>Number(requestRevision||0)
+      ||terminalMarketEvidence(latest))){
       const coherent=latestBook?.sequenceValid!==false && latestBook?.updatedAtMs && !latest.bookInvalid
         && Number(latestBook.yesBids?.[0]?.priceCents)===Number(latest.yesBid)
         && Number(100-latestBook.noBids?.[0]?.priceCents)===Number(latest.yesAsk);
-      const value={quote:latest,book:coherent?latestBook:null,marketFresh:!latest.bookInvalid,bookFresh:Boolean(coherent),marketObservedAtMs:quoteObservedAt(latest),bookObservedAtMs:coherent?latestBook.updatedAtMs:0,canonicalBookMutated:false,requestRevision,verificationSource:'newer_canonical'};
-      // An older connection's slow REST result may be returned to its
-      // original caller, but must not overwrite a newer epoch's cached proof.
+      const value={quote:latest,book:coherent?latestBook:null,marketFresh:!latest.bookInvalid,bookFresh:Boolean(coherent),marketObservedAtMs:quoteObservedAt(latest),bookObservedAtMs:coherent?latestBook.updatedAtMs:0,canonicalBookMutated:false,requestRevision,requestEpoch,verificationSource:'newer_canonical'};
+      // An old connection's slow result cannot seed the new epoch cache.
+      // The public verification wrapper also withdraws its freshness flags.
       if(requestEpoch===this.connectionEpoch){
         if(!(this.snapshotCache instanceof Map))this.snapshotCache=new Map();
-        this.snapshotCache.set(ticker,{atMs:Date.now(),value});
+        this.snapshotCache.set(ticker,{atMs:Date.now(),epoch:requestEpoch,value});
         if(this.snapshotCache.size>400){const first=this.snapshotCache.keys().next().value;this.snapshotCache.delete(first);}
       }
       return value;
     }
     const quote=this.quoteFromVerifiedBook(ticker,marketQuote,book,Math.max(marketObservedAtMs,bookObservedAtMs,Date.now()));
-    const value={quote,book,marketFresh:Boolean(marketQuote),bookFresh:Boolean(book),marketObservedAtMs,bookObservedAtMs,canonicalBookMutated:false,requestRevision};
+    const value={quote,book,marketFresh:Boolean(marketQuote),bookFresh:Boolean(book),marketObservedAtMs,bookObservedAtMs,canonicalBookMutated:false,requestRevision,requestEpoch};
     if(requestEpoch===this.connectionEpoch){
       if(!(this.snapshotCache instanceof Map))this.snapshotCache=new Map();
-      this.snapshotCache.set(ticker,{atMs:Date.now(),value});
+      this.snapshotCache.set(ticker,{atMs:Date.now(),epoch:requestEpoch,value});
       if(this.snapshotCache.size>400){const first=this.snapshotCache.keys().next().value;this.snapshotCache.delete(first);}
     }
     return value;
   }
 
-  async refreshTickerVerified(ticker) {
-    const verified=await this.verifyTickerSnapshot(ticker);
+  async refreshTickerVerified(ticker,options={}) {
+    const verified=await this.verifyTickerSnapshot(ticker,options);
     if(verified.marketFresh&&verified.quote)this.seed({...verified.quote,restMarketObservedAtMs:verified.marketObservedAtMs},{requestRevision:verified.requestRevision});
     let mutated=false;
     if(verified.verificationSource!=='newer_canonical' && verified.bookFresh&&verified.book && Number(this.books.get(ticker)?.updatedAtMs||0)<=Number(verified.book.updatedAtMs||0)){this.books.set(ticker,verified.book);this.applyBook(ticker);mutated=true;}
     return {...verified,quote:this.quotes.get(ticker)||verified.quote||null,canonicalBookMutated:mutated};
   }
 
-  async refreshTicker(ticker) {
-    return (await this.refreshTickerVerified(ticker)).quote;
+  async refreshTicker(ticker,options={}) {
+    return (await this.refreshTickerVerified(ticker,options)).quote;
   }
 
   async ensureFreshBook(ticker, maxAgeMs = 5000) {
     const q = this.getQuote(ticker);
     const book = this.getBook(ticker);
-    if (!book || this.bookAgeMs(ticker) > maxAgeMs || !q || q.bookInvalid || book.sequenceValid===false) await this.refreshTicker(ticker).catch(() => null);
+    if (!book || this.bookAgeMs(ticker) > maxAgeMs || !q || q.bookInvalid || book.sequenceValid===false) await this.refreshTicker(ticker,{maxAgeMs}).catch(() => null);
     return this.getBook(ticker) || null;
   }
 

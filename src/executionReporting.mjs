@@ -1,3 +1,4 @@
+import {R17_GOLDEN_CAPITAL_CONCEPTS} from './doctrine.mjs';
 /** V3 financial READ model. Never used for entry, exit, sizing or stop authority. */
 import {PORTFOLIO_CONCEPTS,isShadowSaintEntry,kalshiGeneralTakerFeeEstimateCents} from './doctrine.mjs';
 export const EXECUTION_REPORT_VERSION='EXECUTION-REPORT-V3';
@@ -8,7 +9,7 @@ export const CRYSTAL_WALL_RECOVERY_CONCEPT='Crystal Wall Recovery';
 export const crystalWallRecoveryCapital=(e)=>e?.conceptName===CRYSTAL_WALL_RECOVERY_CONCEPT&&!isShadowSaintEntry(e);
 export const greatHornCapital=(e)=>e?.conceptName===GREAT_HORN_CONCEPT&&!isShadowSaintEntry(e);
 export const lightningCapital=(e)=>e?.conceptName==='Lightning Plasma'&&!isShadowSaintEntry(e);
-export const EXECUTION_ATTACKS=Object.freeze(['Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery']);
+export const EXECUTION_ATTACKS=Object.freeze([...R17_GOLDEN_CAPITAL_CONCEPTS,'Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery']);
 export const EXPOSURE_STATUSES=Object.freeze(['open','exit_pending','entry_pending','pending_recovery']);
 const finite=(v)=>v!==null&&v!==undefined&&Number.isFinite(Number(v));
 const n=(v)=>finite(v)?Number(v):0;
@@ -115,7 +116,8 @@ export function combineExecutionStats(byAttack){
     out.feesComplete&&=a.feesComplete!==false;
     for(const p of ['day','week','month','year']){
       out.periodsComplete[p]&&=a.periodsComplete?.[p]!==false;
-      out[`${p}RealizedCents`]+=n(a[`${p}RealizedCents`]);
+      const knownKey=`known${p[0].toUpperCase()}${p.slice(1)}RealizedCents`;
+      out[`${p}RealizedCents`]+=n(a[knownKey]??a[`${p}RealizedCents`]);
     }
   }
   out.financialComplete=out.unreconciled===0;
@@ -125,7 +127,10 @@ export function combineExecutionStats(byAttack){
   // economics. A missing/unauthenticated CURRENT mark still fails closed.
   out.valuationComplete=out.missingValuations===0;
   out.unrealizedCents=out.valuationComplete?out.knownUnrealizedCents:null;
-  for(const p of ['day','week','month','year'])if(!out.periodsComplete[p])out[`${p}RealizedCents`]=null;
+  for(const p of ['day','week','month','year']){
+    out[`known${p[0].toUpperCase()}${p.slice(1)}RealizedCents`]=out[`${p}RealizedCents`];
+    if(!out.periodsComplete[p])out[`${p}RealizedCents`]=null;
+  }
   return out;
 }
 const localFormatter=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'});
@@ -145,7 +150,10 @@ function finalizeExecutionStats(a){
   a.realizedCents=a.financialComplete?a.knownRealizedCents:null;
   a.avgEntryCents=a.total?a.avgEntryCents/a.total:0;a.winRate=a.closed?a.wins/a.closed:0;
   a.valuationComplete=a.missingValuations===0;a.unrealizedCents=a.valuationComplete?a.knownUnrealizedCents:null;
-  for(const p of ['day','week','month','year'])if(!a.periodsComplete[p])a[`${p}RealizedCents`]=null;
+  for(const p of ['day','week','month','year']){
+    a[`known${p[0].toUpperCase()}${p.slice(1)}RealizedCents`]=a[`${p}RealizedCents`];
+    if(!a.periodsComplete[p])a[`${p}RealizedCents`]=null;
+  }
 }
 /** Bounded legacy/offline reader: time-uncertain historic partials are NOT fabricated. */
 export function statisticsFromRows(rows,settings,{getQuote=()=>null,now=Date.now()}={}){
@@ -199,7 +207,7 @@ export function statisticsFromSnapshot(snapshot,settings,{getQuote=()=>null,now=
     a.knownFeesCents=n(r.known_fees_cents);
     a.missingValuations+=n(r.unvalued_live_pending);
   }
-  for(const r of snapshot.periods||[]){const a=byAttack[r.concept_name];if(!a)continue;for(const p of ['day','week','month','year']){a.periodsComplete[p]=Number(r[`${p}_unknown`]||0)===0;a[`${p}RealizedCents`]=a.periodsComplete[p]?n(r[`${p}_realized_cents`]):null;}}
+  for(const r of snapshot.periods||[]){const a=byAttack[r.concept_name];if(!a)continue;for(const p of ['day','week','month','year']){a.periodsComplete[p]=Number(r[`${p}_unknown`]||0)===0;a[`${p}RealizedCents`]=n(r[`${p}_realized_cents`]);}}
   for(const r of snapshot.unresolvedAggregates||[]){
     const a=byAttack[r.concept_name];if(!a)continue;
     a.unreconciled+=n(r.unreconciled);a.financialComplete=a.unreconciled===0;a.feesComplete=a.financialComplete;
@@ -252,7 +260,7 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
  create or replace function sag_execution_realization_v3() returns trigger language plpgsql as $$
  declare delta double precision;at_ms bigint;basis text;receipt_ms bigint;
  begin
-   if NEW.concept_name not in ('Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery') or coalesce(NEW.execution_class,'CAPITAL')='SHADOW_SAINT'
+   if NEW.concept_name not in (${EXECUTION_ATTACKS.map(name=>"'"+name+"'").join(',')}) or coalesce(NEW.execution_class,'CAPITAL')='SHADOW_SAINT'
      or coalesce(NEW.entry_config->>'executionClass','CAPITAL')='SHADOW_SAINT' then return NEW;end if;
    at_ms:=(extract(epoch from clock_timestamp())*1000)::bigint;
    basis:='ledger_posting';
@@ -286,7 +294,7 @@ export const EXECUTION_REPORT_MIGRATION_SQL=`
    select e.id,'initial',e.pnl_cents,e.opened_at_ms,
      greatest(e.opened_at_ms,coalesce(e.closed_at_ms,(extract(epoch from clock_timestamp())*1000)::bigint)),
      'legacy_time_interval'
-   from sag_entries e where e.concept_name in ('Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery')
+   from sag_entries e where e.concept_name in (${EXECUTION_ATTACKS.map(name=>"'"+name+"'").join(',')})
    and coalesce(e.execution_class,'CAPITAL')<>'SHADOW_SAINT' and coalesce(e.entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT'
    and not exists(select 1 from sag_execution_realizations_v3 j where j.entry_id=e.id) on conflict do nothing;
  drop trigger if exists sag_execution_realization_observer_v3 on sag_entries;

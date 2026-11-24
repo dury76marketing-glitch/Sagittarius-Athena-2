@@ -30,21 +30,25 @@ function msg(text,bad=false){const e=$('actionMessage');if(!e)return;e.textConte
 function setPnl(id,v,plain=false){const e=$(id);if(!e)return;e.textContent=plain?moneyPlain(v):money(v);e.className=pnlClass(v);}
 function setText(id,v){const e=$(id);if(e)e.textContent=v;}
 function financialMoney(value,plain=false){return value==null||!Number.isFinite(Number(value))?'Unavailable':plain?moneyPlain(value):money(value);}
+function recordedMoney(verified,known){
+  if(verified!=null&&Number.isFinite(Number(verified)))return financialMoney(verified);
+  if(known!=null&&Number.isFinite(Number(known)))return financialMoney(known)+' recorded';
+  return 'Unavailable';
+}
 function setFinancialPnl(id,value,plain=false){const e=$(id);if(!e)return;e.textContent=financialMoney(value,plain);e.className=value==null?'muted':pnlClass(value);}
 function markFinancialSnapshotUnavailable(reason){
   financialSnapshotUnavailable=true;
   // State reads and mode transitions can fail after valid numbers were shown.
   // Do not leave an old multi-attack result labelled as current when its
   // authoritative financial snapshot cannot be refreshed.
-  for(const id of ['portfolioValue','simFreeCash','winRate','unrealized','realized','profitToday','profitWeek','profitMonth','profitYear','openCount','closedPerfCount',
+  for(const id of ['portfolioValue','simFreeCash','winRate','unrealized','realized','profitToday','profitWeek','profitMonth','profitYear','closedPerfCount',
     'capitalCombinedWinRate','capitalCombinedOpen','capitalCombinedClosed','capitalCombinedWinsLosses',
     'capitalCombinedPending','capitalCombinedRealized','capitalCombinedUnrealized',
     'capitalCombinedToday','capitalCombinedWeek','capitalCombinedMonth','capitalCombinedYear'])setText(id,'Unavailable');
   setText('capitalCombinedFinancialStatus',reason+' Combined capital snapshot unavailable until a verified refresh succeeds.');
   setText('capitalAttackResultsStatus',reason+' Financial table unavailable until a new verified snapshot is received.');
   const reportBody=$('capitalAttackResultsBody');if(reportBody)reportBody.innerHTML='<tr><td colspan="11" class="muted">Unavailable — waiting for a verified financial snapshot.</td></tr>';
-  for(const row of document.querySelectorAll('#attackBody tr[data-attack-index]')){
-    if(Number(row.dataset.attackIndex)<1)continue;
+  for(const row of document.querySelectorAll('#attackBody tr[data-r17-row]')){
     for(const cell of row.querySelectorAll('[data-attack-metric]')){
       cell.textContent='Unavailable';cell.classList.add('muted');
     }
@@ -59,11 +63,13 @@ function markFinancialSnapshotUnavailable(reason){
     capitalHistoryScope=capitalHistoryKey(STATE);
     for(const kind of ['open','closed'])clearCapitalHistory(kind,capitalHistoryScope);
   }
-  for(const kind of ['open','closed']){
+  for(const kind of ['closed']){
     const ids=capitalHistoryIds(kind);
     setText(ids.count,'(total unavailable)');
     setText(ids.status,'Stale — current state unavailable. '+reason+' Previously loaded rows are not a current snapshot.');
   }
+  const openIds=capitalHistoryIds('open');
+  setText(openIds.status,'Financial snapshot unavailable. Open exposure still refreshes from the ledger. '+reason);
   setText('hunterSummary','Current capital totals unavailable; any retained history rows are last-known, not live.');
 }
 function currentDashboardStartMs(settings){return Number((settings?.mode==='LIVE'?settings?.liveDashboardStartMs:settings?.simulationDashboardStartMs)||0);}
@@ -159,6 +165,7 @@ function capitalCombinedPerformance(s){
   for(const k of capitalCounts)result[k]=rows.reduce((sum,r)=>sum+Number(r[k]),0);
   result.winRate=result.closed>0?result.wins/result.closed:null;
   result.knownRealizedCents=rows.reduce((sum,r)=>sum+Number(r.knownRealizedCents??r.realizedCents),0);
+  result.knownFeesCents=rows.reduce((sum,r)=>sum+Number(r.knownFeesCents||0),0);
   result.unreconciled=rows.reduce((sum,r)=>sum+Number(r.unreconciled||0),0);
   result.unresolvedClosed=rows.reduce((sum,r)=>sum+Number(r.unresolvedClosed||0),0);
   result.closedHistory=result.closed+result.unresolvedClosed;
@@ -169,8 +176,10 @@ function capitalCombinedPerformance(s){
     ?rows.reduce((sum,r)=>sum+Number(r.unrealizedCents),0):null;
   for(const period of capitalPeriods){
     const key=period+'RealizedCents';
+    const knownKey='known'+period[0].toUpperCase()+period.slice(1)+'RealizedCents';
     result[key]=rows.every(r=>r.periodsComplete?.[period]===true&&numericReportValue(r[key]))
       ?rows.reduce((sum,r)=>sum+Number(r[key]),0):null;
+    result[knownKey]=rows.reduce((sum,r)=>sum+Number(r[knownKey]??r[key]??0),0);
   }
   return result;
 }
@@ -181,13 +190,17 @@ function renderCapitalCombined(s){
   put('capitalCombinedOpen',c.open);put('capitalCombinedClosed',c.closed);
   put('capitalCombinedWinsLosses',`${c.wins} / ${c.losses}`);
   put('capitalCombinedPending',c.pending);
-  for(const [id,key] of [
-    ['capitalCombinedRealized','realizedCents'],['capitalCombinedUnrealized','unrealizedCents'],
-    ['capitalCombinedToday','dayRealizedCents'],['capitalCombinedWeek','weekRealizedCents'],
-    ['capitalCombinedMonth','monthRealizedCents'],['capitalCombinedYear','yearRealizedCents']])
-    setFinancialPnl(id,valid?c[key]:null);
+  const show=(verified,known)=>valid?(verified!=null?verified:known):null;
+  setFinancialPnl('capitalCombinedRealized',show(c.realizedCents,c.knownRealizedCents));
+  setFinancialPnl('capitalCombinedUnrealized',show(c.unrealizedCents,c.knownUnrealizedCents));
+  setFinancialPnl('capitalCombinedToday',show(c.dayRealizedCents,c.knownDayRealizedCents));
+  setFinancialPnl('capitalCombinedWeek',show(c.weekRealizedCents,c.knownWeekRealizedCents));
+  setFinancialPnl('capitalCombinedMonth',show(c.monthRealizedCents,c.knownMonthRealizedCents));
+  setFinancialPnl('capitalCombinedYear',show(c.yearRealizedCents,c.knownYearRealizedCents));
+  setFinancialPnl('capitalCombinedFees',valid?c.knownFeesCents:null);
   setText('capitalCombinedFinancialStatus',valid
-    ?'Combined: Chain 1, Chain 2, and Starlight Extinction, same owner, system, mode, reset and snapshot. Only funded Starlight positions are included; shadow Starlight is excluded. '+
+    ?'R17: ten independent Golden Saints plus Aquarius and Pisces, same owner, system, mode, reset and snapshot. Historical capital and virtual Athena are excluded from these twelve strategy totals. '+
+      (s.health?.brokerPositionsAtMs?`Broker inventory observed ${duration(Date.now()-Number(s.health.brokerPositionsAtMs))} ago. `:'Broker inventory observation time unavailable. ')+
       (c.financialComplete===false?`${c.unreconciled} funded position(s) still require broker reconciliation. Recorded realized amounts: ${financialMoney(c.knownRealizedCents)}; final results are pending. `:'')+
       (c.pending>0?`${c.pending} LOCAL pending BUY intents require exact authenticated broker-order reconciliation; ${c.unverifiedBuyIntents} have no verified broker order ID. These are NOT evidence of resting orders at Kalshi. `:'')+
       (c.valuationComplete?'Open counts are ledger positions, not a live broker-inventory confirmation; bid marks do not guarantee liquidation.':'Unrealized P/L is unavailable because one or more capital marks are incomplete.')
@@ -197,15 +210,9 @@ function actualAccountBalances(s){
   const a=s.accountBalances;
   return a?.scope==='ACTUAL_ACCOUNT_INCLUDING_LEGACY'&&financialScopeMatches(a,s.settings)?a:{};
 }
+const R17_SAINTS=Object.freeze(['Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo', 'Libra', 'Scorpio', 'Sagittarius', 'Capricorn', 'Aquarius', 'Pisces']);
 const ATTACKS=[
-  {legacy:'Athena Exclamation',name:'Athena Exclamation',key:'athenaExclamationEnabled',x1:'athenaExclamationAthenaX1Enabled',stake:'athenaExclamationStakeCents',min:'athenaExclamationMinEntryCents',max:'athenaExclamationMaxEntryCents',multiply:'athenaExclamationMultiply',fields:[['athenaExclamationMinCrashCents','Min crash','c'],['athenaExclamationMinReboundCents','Min rebound','c'],['athenaExclamationMinUpwardTicks','Upward ticks',''],['athenaExclamationObservationMinutes','Observe','min'],['athenaExclamationMinProfitNetPerOriginalContractCents','Min profit target','c']],desc:'Athena Exclamation SHADOW pattern signal. Existing crash/rebound/ticks, profit and X1/Infinity settings remain unchanged.'},
-  {legacy:'Crash Recovery Hunter',name:'Starlight Extinction',key:'crashRecoveryHunterEnabled',real:'starlightExtinctionRealTradeEnabled',x1:'crashRecoveryHunterAthenaX1Enabled',stake:'crashRecoveryStakeCents',min:'crashRecoveryMinEntryCents',max:'crashRecoveryMaxEntryCents',multiply:'crashRecoveryHunterMultiply',fields:[['athenaExclamationStarlightTriggerCents','Athena +c to enter','c'],['crashRecoveryHunterMinCrashCents','Min crash','c'],['crashRecoveryHunterMinReboundCents','Min rebound','c'],['crashRecoveryHunterMinUpwardTicks','Upward ticks',''],['crashRecoveryHunterObservationMinutes','Observe','min'],['crashRecoveryHunterMinProfitNetPerOriginalContractCents','Min profit target','c'],['crashRecoveryHunterAuroraDamageControlPercent','Aurora %','%']],desc:'Recovery after a verified stop. Real Trade OFF keeps Starlight a virtual shadow. ON enables CAPITAL execution: simulated in SIMULATION mode; real broker BUYs only in explicitly authorized, armed LIVE mode with all safety gates. Editable Athena +c to enter on this Starlight card (0 disables extra rise trigger). Lightning Plasma shadow losses never authorize recovery. Own Aurora and X1/Infinity choice preserved.'},
-  {legacy:'Lightning Plasma',name:'Lightning Plasma',key:'lightningPlasmaEnabled',x1:'lightningPlasmaAthenaX1Enabled',stake:'lightningPlasmaFieldStakeCents',min:'lightningPlasmaMinEntryCents',max:'lightningPlasmaMaxEntryCents',multiply:'lightningPlasmaMultiply',fields:[['lightningPlasmaMinCrashCents','Min crash','c'],['lightningPlasmaMinReboundCents','Min rebound','c'],['lightningPlasmaMinUpwardTicks','Upward ticks',''],['lightningPlasmaObservationMinutes','Observe','min'],['lightningPlasmaMinProfitNetPerOriginalContractCents','Min profit target','c'],['lightningPlasmaAuroraDamageControlPercent','Aurora %','%']],desc:'Lightning Plasma V5 requires a verified, still-open CAPITAL Starlight parent and its configured rise/entry qualifications. Own stake, band, geometry, Aurora, X1/Infinity, Multiply and separate SIM/LIVE receipts. Verified Lightning Plasma CAPITAL loss can arm Great Horn, then Crystal Wall. Freezing Coffin is not the capital Aurora policy.'},
-  {legacy:'Great Horn Recovery',name:'Great Horn',key:'greatHornEnabled',x1:'greatHornAthenaX1Enabled',stake:'greatHornStakeCents',min:'greatHornMinEntryCents',max:'greatHornMaxEntryCents',multiply:'greatHornMultiply',fields:[['greatHornMinCrashCents','Min crash','c'],['greatHornMinReboundCents','Min rebound','c'],['greatHornMinUpwardTicks','Upward ticks',''],['greatHornObservationMinutes','Observe','min'],['greatHornMaxSpreadCents','Max spread','c'],['greatHornParentEntryRiseCents','Lightning entry +c','c'],['greatHornMinProfitNetPerOriginalContractCents','Min profit target','c'],['greatHornAuroraDamageControlPercent','Aurora %','%']],desc:'GH1 recovery of verified Lightning losses. Independent Link / crash / rebound / upticks / observation / original Lightning entry +c / Aurora / profit model. SIM code present; LIVE is release-gated pending native deployment proof.'},
-  {legacy:'Crystal Wall Recovery',name:'Crystal Wall Recovery',key:'crystalWallRecoveryEnabled',x1:'crystalWallRecoveryAthenaX1Enabled',stake:'crystalWallRecoveryStakeCents',min:'crystalWallRecoveryMinEntryCents',max:'crystalWallRecoveryMaxEntryCents',multiply:'crystalWallRecoveryMultiply',fields:[['crystalWallRecoveryMinCrashCents','Min crash','c'],['crystalWallRecoveryMinReboundCents','Min rebound','c'],['crystalWallRecoveryMinUpwardTicks','Upward ticks',''],['crystalWallRecoveryObservationMinutes','Observe','min'],['crystalWallRecoveryMaxSpreadCents','Max spread','c'],['crystalWallRecoveryParentEntryRiseCents','Great Horn entry +c','c'],['crystalWallRecoveryMinProfitNetPerOriginalContractCents','Min profit target','c'],['crystalWallRecoveryAuroraDamageControlPercent','Aurora %','%']],desc:'CW1 capital recovery of verified Great Horn losses; separate durable parent, seats, Link, max spread, Aurora, X1/Infinity, Multiply, P/L and closed-trade accounting. Existing Great Horn behavior unchanged. New CW1 LIVE buys are independently release-gated.'},
-  {legacy:'Sagittarius Arrow Recovery',name:'Sagittarius Arrow',key:'sagittariusArrowEnabled',x1:'sagittariusArrowAthenaX1Enabled',stake:'sagittariusArrowStakeCents',min:'sagittariusArrowMinEntryCents',max:'sagittariusArrowMaxEntryCents',multiply:'sagittariusArrowMultiply',fields:[['sagittariusArrowMinCrashCents','Min crash','c'],['sagittariusArrowMinReboundCents','Min rebound','c'],['sagittariusArrowMinUpwardTicks','Upward ticks',''],['sagittariusArrowObservationMinutes','Observe','min'],['sagittariusArrowMaxSpreadCents','Max spread','c'],['sagittariusArrowMinProfitNetPerOriginalContractCents','Min profit target','c'],['sagittariusArrowAuroraDamageControlPercent','Aurora %','%']],desc:'Authorized verified Athena shadow-stop or confirmed CAPITAL Starlight opportunity. Own stake, entry band, crash/rebound/ticks, spread, Aurora %, X1/Infinity, Multiply and separate SIM/LIVE receipts. Verified Sagittarius Arrow CAPITAL loss can arm Scarlet Needle, then Pegasus Ryu Sei Ken. Freezing Coffin does not replace this capital Aurora.'},
-  {legacy:'Scarlet Needle Recovery',name:'Scarlet Needle',key:'scarletNeedleCapitalEnabled',x1:'scarletNeedleCapitalAthenaX1Enabled',stake:'scarletNeedleCapitalStakeCents',min:'scarletNeedleCapitalMinEntryCents',max:'scarletNeedleCapitalMaxEntryCents',multiply:'scarletNeedleCapitalMultiply',fields:[['scarletNeedleCapitalMinCrashCents','Min crash','c'],['scarletNeedleCapitalMinReboundCents','Min rebound','c'],['scarletNeedleCapitalMinUpwardTicks','Upward ticks',''],['scarletNeedleCapitalObservationMinutes','Observe','min'],['scarletNeedleCapitalMaxSpreadCents','Max spread','c'],['scarletNeedleCapitalParentEntryRiseCents','Sagittarius Arrow CAPITAL entry +c','c'],['scarletNeedleCapitalMinProfitNetPerOriginalContractCents','Min profit target','c'],['scarletNeedleCapitalAuroraDamageControlPercent','Aurora %','%']],desc:'CHAIN 2 SN2: independent Great Horn-style capital recovery of verified Sagittarius Arrow CAPITAL loss. Immutable identity, frozen own Aurora, multiple seats, durable parent and financial proof. LIVE release gated.'},
-  {legacy:'Pegasus Ryu Sei Ken Recovery',name:'Pegasus Ryu Sei Ken',key:'pegasusRyuSeiKenCapitalEnabled',x1:'pegasusRyuSeiKenCapitalAthenaX1Enabled',stake:'pegasusRyuSeiKenCapitalStakeCents',min:'pegasusRyuSeiKenCapitalMinEntryCents',max:'pegasusRyuSeiKenCapitalMaxEntryCents',multiply:'pegasusRyuSeiKenCapitalMultiply',fields:[['pegasusRyuSeiKenCapitalMinCrashCents','Min crash','c'],['pegasusRyuSeiKenCapitalMinReboundCents','Min rebound','c'],['pegasusRyuSeiKenCapitalMinUpwardTicks','Upward ticks',''],['pegasusRyuSeiKenCapitalObservationMinutes','Observe','min'],['pegasusRyuSeiKenCapitalMaxSpreadCents','Max spread','c'],['pegasusRyuSeiKenCapitalParentEntryRiseCents','Scarlet Needle CAPITAL entry +c','c'],['pegasusRyuSeiKenCapitalMinProfitNetPerOriginalContractCents','Min profit target','c'],['pegasusRyuSeiKenCapitalAuroraDamageControlPercent','Aurora %','%']],desc:'CHAIN 2 PR3: independent Great Horn-style capital recovery of verified Scarlet Needle CAPITAL loss. Immutable identity, frozen own Aurora, multiple seats, durable parent and financial proof. LIVE release gated.'},
+  {legacy:'Athena Exclamation',name:'Athena Exclamation',key:'athenaExclamationEnabled',x1:'athenaExclamationAthenaX1Enabled',stake:'athenaExclamationStakeCents',min:'athenaExclamationMinEntryCents',max:'athenaExclamationMaxEntryCents',multiply:'athenaExclamationMultiply',fields:[['athenaExclamationMinCrashCents','Min crash','c'],['athenaExclamationMinReboundCents','Min rebound','c'],['athenaExclamationMinUpwardTicks','Upward ticks',''],['athenaExclamationObservationMinutes','Observe','min'],['athenaExclamationMinProfitNetPerOriginalContractCents','Min profit target','c']],desc:'Athena Exclamation SHADOW pattern signal. Existing crash/rebound/ticks, profit and X1/Infinity settings remain unchanged.'}
 ];
 const COSMOS=[
   {legacy:'Pegasus',name:'Pegasus',key:'pegasusEnabled',desc:'Broker-free shadow trader using Pegasus drop/stability qualification.',fields:[['pegasusReferenceStakeCents','Reference stake','c'],['pegasusMinPriceCents','Min price','c'],['pegasusMaxPriceCents','Max price','c'],['pegasusDropCents','Drop','c']]},
@@ -252,8 +259,21 @@ function inputHtml(key,label,value,suffix='',step=1,minVal=null){
   if(key==='athenaExclamationStarlightTriggerCents'){minimum=0;maximum=99;title='Rise above original Athena entry after a verified shadow loss. 0 preserves the previous Starlight route.';}
   return `<label>${esc(label)}<span><input data-setting-key="${esc(key)}" type="number" step="${step}"${required?' required':''}${minimum==null?'':` min="${minimum}"`}${maximum==null?'':` max="${maximum}"`}${title?` title="${esc(title)}"`:''} value="${esc(v??'')}"><em>${esc(suffix)}</em></span></label>`;
 }
-function attackControlsHtml(s,a){let h=inputHtml(a.stake,'Stake',s.settings?.[a.stake],'c',1)+inputHtml(a.min,'Min entry',s.settings?.[a.min],'c',1)+inputHtml(a.max,'Max entry',s.settings?.[a.max],'c',1);for(const [k,l,u] of (a.fields||[]))h+=inputHtml(k,l,s.settings?.[k],u,1,/Min crash|Min rebound|Upward ticks/.test(l)?0:null);if(a.rays)h+=inputHtml(a.rays,'Max rays',s.settings?.[a.rays],'',1);if(a.multiply)h+=inputHtml(a.multiply,'Multiply',s.settings?.[a.multiply],'',1);if(a.repeats)h+=inputHtml(a.repeats,'Max repeats',s.settings?.[a.repeats],'',1);if(a.real){const real=s.settings?.[a.real]===true;h+=`<label>Execution<span><button class="model-toggle ${real?'enabled':'disabled'}" type="button" data-model-key="${esc(a.real)}" data-model-name="${esc(a.name)} simulation capital" data-enabled="${real}">${real?'SIM CAPITAL':'SIM SHADOW'}</button></span></label>`;}
-    if(a.x1){const on=s.settings?.[a.x1]===true;h+=`<label>Profit model<span><button class="model-toggle ${on?'enabled':'disabled'}" type="button" data-model-key="${esc(a.x1)}" data-model-name="${esc(a.name)} X1" data-enabled="${on}">${on?'ATHENA X1':'INFINITY'}</button></span></label>`;}if(a.legacy==='Lightning Plasma'){const link=s.settings?.lightningPlasmaLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="lightningPlasmaLinkEnabled" data-model-name="Lightning Plasma Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Great Horn Recovery'){const link=s.settings?.greatHornLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="greatHornLinkEnabled" data-model-name="Great Horn Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Crystal Wall Recovery'){const link=s.settings?.crystalWallRecoveryLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="crystalWallRecoveryLinkEnabled" data-model-name="Crystal Wall Recovery Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Scarlet Needle Recovery'){const link=s.settings?.scarletNeedleCapitalLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="scarletNeedleCapitalLinkEnabled" data-model-name="Scarlet Needle Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Pegasus Ryu Sei Ken Recovery'){const link=s.settings?.pegasusRyuSeiKenCapitalLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="pegasusRyuSeiKenCapitalLinkEnabled" data-model-name="Pegasus Ryu Sei Ken Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Crash Recovery Hunter'){const link=s.settings?.crashRecoveryHunterLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="crashRecoveryHunterLinkEnabled" data-model-name="Starlight Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}if(a.legacy==='Sagittarius Arrow Recovery'){const link=s.settings?.sagittariusArrowLinkEnabled===true;h+=`<label>Link<span><button class="model-toggle ${link?'enabled':'disabled'}" type="button" data-model-key="sagittariusArrowLinkEnabled" data-model-name="Sagittarius Arrow Link" data-enabled="${link}">${link?'LINK ON':'LINK OFF'}</button></span></label>`;}let authority=a.legacy==='Crash Recovery Hunter'?'Verified Athena SHADOW stop -> Starlight. Link ON immediately evaluates a capital or shadow seat, subject to execution safety; Link OFF waits for Starlight own crash, rebound, ticks and band. Real Trade ON uses capital; OFF remains shadow.':'Strategic qualification: ATHENA ONLY · optional crash/rebound/ticks · X1 or Infinity';if(a.legacy==='Great Horn Recovery')authority='GH1 RELEASE CANDIDATE — NOT DEPLOYMENT CERTIFIED: Link ON immediately evaluates after a verified Lightning loss and bypasses Observe, crash, rebound, ticks, Lightning +c, the Great Horn operator entry band and the old exit-price ceiling; financial book, liquidity, spread and capital checks are ALWAYS enforced. Link OFF follows the full configured recovery card. Durable SIM entry and guarded LIVE pending-order/exit code. LIVE orders fail closed unless the native infrastructure release gate is explicitly verified. Operator must not run unverified capital execution; existing positions retain protection. Historical Momentum Hunter identity is preserved.';if(a.legacy==='Crystal Wall Recovery')authority='CW1 SECOND-LEVEL RECOVERY: A financially verified CLOSED losing Great Horn capital parent arms an independent Crystal Wall Recovery watch. Link ON bypasses recovery-pattern and operator-price-band checks, never spread/depth/fees/capital protections. Link OFF follows its own configured card. No recursive recovery. New LIVE BUYs are fail-closed by an independent release gate.';if(a.legacy==='Scarlet Needle')authority='Strategic qualification: ATHENA ONLY · Cosmo GREEN → Bolt → FIRE · optional crash/rebound/ticks · X1 or Infinity';if(a.legacy==='Lightning Plasma')authority='Chain 1: a verified, still-open CAPITAL Starlight parent authorizes Plasma V5 after the saved rise from Starlight original entry. LINK ON bypasses LP observation, crash/rebound/ticks and the operator entry band; LINK OFF applies the full own card. Original-parent rise, executable-price limits, stake, Aurora, X1/Infinity, Multiply and execution safeguards remain. Verified Plasma net loss -> Great Horn -> Crystal Wall.';if(a.legacy==='Athena Exclamation'||a.legacy==='Sagittarius Justice Arrow')authority='Independent CI1 crash-rebound · own crash/rebound/ticks · X1 or Infinity · Aurora';if(a.legacy==='Crash Recovery Hunter'&&Number(s.settings?.athenaExclamationStarlightTriggerCents||0)>0)authority='Starlight follows a verified Athena shadow stop. Link ON bypasses entry geometry; Link OFF respects configured Starlight qualification and band. Its independent Aurora and execution safeguards are mandatory.';if(a.legacy==='Crash Recovery Hunter')authority+=` | Athena +c to enter: ${Number(s.settings?.athenaExclamationStarlightTriggerCents||0)}c (edit and Save here on Starlight; 0 = original behavior). After a VERIFIED Athena shadow loss, compare current bid to ORIGINAL Athena entry. With a positive trigger use Starlight own live entry band, not the old stop-price ceiling. Other parents unchanged.`;if(a.legacy==='Crash Recovery Hunter'||a.legacy==='Lightning Plasma')authority+=' | X1 uses this card minimum profit; INFINITY uses the shared Infinity Break target.';if(a.legacy==='Sagittarius Arrow Recovery')authority='Verified Athena SHADOW-stop or confirmed CAPITAL Starlight route, with exact parent authority. Own card, Aurora %, Arrow Link and separate SIM/LIVE capital accounting. Verified Arrow CAPITAL net loss may arm Scarlet Needle, then Pegasus Ryu Sei Ken.';if(a.legacy==='Scarlet Needle Recovery')authority='CHAIN 2 SECOND RECOVERY: Requires fully reconciled negative-net Sagittarius Arrow CAPITAL loss. Legacy Scarlet Needle signals are never accepted. Link ON bypasses only recovery signal qualification; financial safeguards remain mandatory. LIVE entries are separately release-gated.';if(a.legacy==='Pegasus Ryu Sei Ken Recovery')authority='CHAIN 2 TERMINAL RECOVERY: Requires fully reconciled negative-net NEW Scarlet Needle CAPITAL loss. No further recovery follows a Pegasus Ryu Sei Ken loss. Legacy Wave Surfer cannot authorize this stage. Financial safeguards and separate LIVE release gate always apply.';return `<div class="model-settings">${h}<button class="btn light model-save" data-model-save="${esc(a.legacy)}">Save</button></div><div class="attack-authority-note">${authority}</div>`;}
+function attackControlsHtml(s,a){
+  if(a.legacy!=='Athena Exclamation')return '';
+  let h=inputHtml(a.stake,'Stake',s.settings?.[a.stake],'c')+
+    inputHtml(a.min,'Min entry',s.settings?.[a.min],'c')+
+    inputHtml(a.max,'Max entry',s.settings?.[a.max],'c');
+  for(const [key,label,unit] of (a.fields||[]))h+=inputHtml(key,label,s.settings?.[key],unit);
+  const x1=s.settings?.[a.x1]===true;
+  h+=`<label>Profit model<span><button type="button" class="model-toggle ${x1?'enabled':'disabled'}"
+    data-model-key="${esc(a.x1)}" data-model-name="Athena X1" data-enabled="${x1}">
+    ${x1?'ATHENA X1':'INFINITY'}</button></span></label>`;
+  return `<div class="model-settings">${h}<button type="button" class="btn light model-save"
+    data-model-save="Athena Exclamation">Save Athena</button></div>
+    <div class="attack-authority-note">UPSTREAM — Athena Exclamation's existing
+    SHADOW intelligence and verified-loss authority are preserved.</div>`;
+}
 function cosmoControlsHtml(s,c){const fields=c.fields||[];const controls=fields.length?`<div class="model-settings">${fields.map(([k,l,u])=>inputHtml(k,l,s.settings?.[k],u,1)).join('')}<button class="btn light model-save" data-model-save="${esc(c.name)}">Save</button></div>`:'';const note=c.legacy==='Gemini'?'GEMINI UNIVERSE · ANOTHER DIMENSION ATTACK · no broker order · no real/simulation portfolio capital': 'SHADOW TRADE ONLY · no broker order · no real portfolio capital';return `${controls}<div class="attack-authority-note">${note}</div>`;}
 function statFor(s,name){return (s.conceptStats||[]).find(x=>x.name===name)||{};}
 function renderSettings(s){const f=$('settingsForm');if(!f)return;f.innerHTML=SHARED.map(([k,l,u])=>{const step=1;const v=drafts.has(k)?drafts.get(k):s.settings?.[k];return `<label>${esc(l)}<input data-setting-key="${esc(k)}" name="${esc(k)}" type="number" step="${step}" value="${esc(v??'')}"><small>${esc(u)}</small></label>`;}).join('');}
@@ -383,35 +403,85 @@ function attackDisplayMetrics(s,a){
     rate:rated>0?pct01(wins/rated):pct01(st.winRate),pnl:money(st.pnlCents),pnlClass:pnlClass(st.pnlCents)};
 }
 const ATTACK_METRIC_KEYS=['avg','entries','open','closed','wl','rate','pnl'];
+const R17_CARD_NUMERIC_FIELDS=Object.freeze([
+ ['stakeCents','Stake','c',1,100000000,1],
+ ['multiply','Multiply','',1,20,1],
+ ['minEntryCents','Min entry','c',1,99,1],
+ ['maxEntryCents','Max entry','c',1,99,1],
+ ['maxSpreadCents','Max spread','c',0,99,1],
+ ['parentEntryRiseCents','Parent entry rise','c',0,99,1],
+ ['observationMinutes','Observe','min',0,1000,1],
+ ['minCrashCents','Min crash','c',0,99,1],
+ ['minReboundCents','Min rebound','c',0,99,1],
+ ['minUpwardTicks','Upward ticks','',0,20,1],
+ ['auroraDamageControlPercent','Aurora damage','%',0.01,95,'any'],
+ ['minProfitNetPerOriginalContractCents','Min net profit / original contract','c',0.01,99,'any']]);
+function r17Metrics(s,name){
+ const p=s?.performance,scope=p?.scope,settings=s?.settings,r=p?.byAttack?.[`R17:${name}`];
+ if(!scope||!financialScopeMatches(scope,settings)||!r||!Number.isSafeInteger(Number(p.asOfMs))||p.asOfMs<=0)
+  return {available:false,avg:'Unavailable',entries:'Unavailable',open:'Unavailable',closed:'Unavailable',wl:'Unavailable',rate:'Unavailable',pnl:'Unavailable',pnlClass:'muted'};
+ const correct=['open','closed','wins','losses','scratches','total','pending'].every(k=>Number.isSafeInteger(Number(r[k]))&&Number(r[k])>=0)
+  &&Number(r.closed)===Number(r.wins)+Number(r.losses)+Number(r.scratches)
+  &&Number(r.total)===Number(r.open)+Number(r.closed)
+  &&financialRealizedValid(r);
+ if(!correct)return {available:false,avg:'Unavailable',entries:'Unavailable',open:'Unavailable',closed:'Unavailable',wl:'Unavailable',rate:'Unavailable',pnl:'Unavailable',pnlClass:'muted'};
+ const shown=r.realizedCents!=null?r.realizedCents:r.knownRealizedCents;
+ return {available:true,avg:pc(r.avgEntryCents),entries:String(r.total),open:String(r.open),closed:String(r.closed),
+   wl:`${r.wins} / ${r.losses}`,rate:r.closed?pct01(r.wins/r.closed):'-',
+   pnl:recordedMoney(r.realizedCents,r.knownRealizedCents),pnlClass:shown==null?'muted':pnlClass(shown)};
+}
+function r17ControlsHtml(s,name){
+ const c=s.settings?.goldenSaints?.[name];if(!c)return '<span class="muted">R17 card unavailable — settings are not verified.</span>';
+ const inputs=R17_CARD_NUMERIC_FIELDS.map(([key,label,unit,min,max,step])=>{
+   const draftKey=`R17:${name}:${key}`,v=r17Drafts.has(draftKey)?r17Drafts.get(draftKey):c[key];
+   return `<label>${esc(label)}<span><input type="number" data-r17-field="${esc(key)}" data-r17-name="${esc(name)}"
+     min="${min}" max="${max}" step="${step}" required value="${esc(v)}"><em>${esc(unit)}</em></span></label>`;
+ }).join('');
+ const toggle=(key,label,onText,offText)=>`<label>${esc(label)}<span><button type="button"
+   data-r17-toggle="${esc(key)}" data-r17-name="${esc(name)}" data-enabled="${c[key]===true}"
+   class="model-toggle ${c[key]===true?'enabled':'disabled'}">${c[key]===true?onText:offText}</button></span></label>`;
+ return `<div class="model-settings">${inputs}
+   ${toggle('linkEnabled','Link','LINK ON','LINK OFF')}
+   ${toggle('athenaX1Enabled','Profit authority','ATHENA X1','INFINITY')}
+   <button type="button" class="btn light" data-r17-save="${esc(name)}">Save ${esc(name)}</button></div>
+   <div class="attack-authority-note">${name==='Aquarius'?'RECOVERY 1 — verified net loss of ANY regular Golden Saint':name==='Pisces'?'RECOVERY 2 — verified net loss of the corresponding Aquarius':'REGULAR — verified Athena Exclamation loss · Starlight-derived signal'}
+   · autonomous seats, independent stop, no obsolete chain authority.</div>`;
+}
+const r17Drafts=new Map();
 function renderAttacks(s){
-  const b=$('attackBody');if(!b)return;
-  b.innerHTML=ATTACKS.map((a,i)=>{
-    const group=i===0?'SHARED SHADOW SIGNALS':i===2?'CHAIN 1 — LIGHTNING PLASMA RECOVERY':i===5?'CHAIN 2 — ARROW CLONE AND RECOVERY':null;
-    const heading=group?`<tr class="attack-group-row"><th colspan="10" scope="rowgroup">${esc(group)}</th></tr>`:'';
-    const enabled=s.settings?.[a.key]===true,m=attackDisplayMetrics(s,a);
-    const cells=ATTACK_METRIC_KEYS.map(key=>`<td data-attack-metric="${key}"${key==='pnl'?` class="${esc(m.pnlClass)}"`:''}>${esc(m[key])}</td>`).join('');
-    const cw=a.legacy==='Crystal Wall Recovery';
-    const label=i===0?'SHADOW / VIRTUAL ONLY · CAPITAL N/A':i===1?'CAPITAL STARLIGHT · VIRTUAL IN SHADOW SAINTS':i===2?'CHAIN 1 · CAPITAL · VIRTUAL IN SHADOW SAINTS':i<5?'CHAIN 1 · CAPITAL RECOVERY':i===5?'CHAIN 2 · CAPITAL CLONE':'CHAIN 2 · CAPITAL RECOVERY';
-    const primary=heading+`<tr data-attack-index="${i}"${cw?' id="crystalWallRecoverySettings"':''} class="${enabled?'':'model-disabled'}${cw?' cw-recovery-row':''}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(a.name)}</div><div class="legacy-name">${esc(label)}${i>2?' · LIVE ENTRY RELEASE GATED':''}</div><div class="concept-desc">${esc(a.desc)}</div>${i===0?`<div class="shadow-inline-note" data-shadow-note>${esc(m.note)}</div>`:''}${attackControlsHtml(s,a)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(a.key)}" data-model-name="${esc(a.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td>${cells}</tr>`;
-    return primary;
-  }).join('');
+ const b=$('attackBody');if(!b)return;
+ const a=ATTACKS[0],enabled=s.settings?.[a.key]===true,m=attackDisplayMetrics(s,a);
+ const upstream=`<tr class="attack-group-row"><th colspan="10" scope="rowgroup">PRESERVED UPSTREAM — ATHENA EXCLAMATION</th></tr>
+   <tr data-attack-index="-1" class="${enabled?'':'model-disabled'}"><td>—</td><td class="concept-cell"><div class="concept-name">Athena Exclamation</div>
+   <div class="concept-desc">Original shadow intelligence and loss-proving gateway</div>${attackControlsHtml(s,a)}</td>
+   <td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(a.key)}"
+   data-model-name="Athena Exclamation" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td>
+   ${ATTACK_METRIC_KEYS.map(key=>`<td data-attack-metric="${key}">${esc(m[key])}</td>`).join('')}</tr>`;
+ const regular=`<tr class="attack-group-row"><th colspan="10" scope="rowgroup">R17 — TEN INDEPENDENT GOLDEN SAINTS</th></tr>`;
+ const recovery=`<tr class="attack-group-row"><th colspan="10" scope="rowgroup">R17 — TWO SEQUENTIAL RECOVERIES</th></tr>`;
+ b.innerHTML=upstream+regular+R17_SAINTS.map((name,i)=>{
+   const card=s.settings?.goldenSaints?.[name],on=card?.enabled===true,metric=r17Metrics(s,name);
+   const cells=ATTACK_METRIC_KEYS.map(key=>`<td data-attack-metric="${key}" class="${key==='pnl'?esc(metric.pnlClass):''}">${esc(metric[key])}</td>`).join('');
+   const head=i===10?recovery:'';
+   return head+`<tr class="${on?'':'model-disabled'}" data-r17-row="${esc(name)}"><td>${i+1}</td><td class="concept-cell">
+     <div class="concept-name">${esc(name)}</div><div class="legacy-name">${i<10?'REGULAR':'RECOVERY '+(i-9)} · R17 CAPITAL</div>
+     ${r17ControlsHtml(s,name)}</td><td><button type="button" class="model-toggle ${on?'enabled':'disabled'}"
+     data-r17-toggle="enabled" data-r17-name="${esc(name)}" data-enabled="${on}">${on?'ON':'OFF'}</button></td>${cells}</tr>`;
+ }).join('');
 }
 function renderAttackMetrics(s){
-  const b=$('attackBody');if(!b)return;
-  for(const [i,a] of ATTACKS.entries()){
-    const row=b.querySelector(`tr[data-attack-index="${i}"]`);if(!row)continue;
-    const m=attackDisplayMetrics(s,a);
-    for(const key of ATTACK_METRIC_KEYS){
-      const cell=row.querySelector(`[data-attack-metric="${key}"]`);if(!cell)continue;
-      const value=String(m[key]);if(cell.textContent!==value)cell.textContent=value;
-      if(key==='pnl'&&cell.className!==m.pnlClass)cell.className=m.pnlClass;
-    }
-    if(a.legacy==='Athena Exclamation'){
-      const note=row.querySelector('[data-shadow-note]');
-      if(note&&note.textContent!==m.note)note.textContent=m.note;
-    }
-
-  }
+ const b=$('attackBody');if(!b)return;
+ for(const name of R17_SAINTS){
+   const row=b.querySelector(`tr[data-r17-row="${name}"]`);if(!row)continue;
+   const m=r17Metrics(s,name);
+   for(const key of ATTACK_METRIC_KEYS){const cell=row.querySelector(`[data-attack-metric="${key}"]`);if(!cell)continue;
+    const value=String(m[key]);if(cell.textContent!==value)cell.textContent=value;
+    if(key==='pnl')cell.className=m.pnlClass;}
+ }
+ const row=b.querySelector('tr[data-attack-index="-1"]'),a=ATTACKS[0];if(row){
+  const m=attackDisplayMetrics(s,a);
+  for(const key of ATTACK_METRIC_KEYS){const cell=row.querySelector(`[data-attack-metric="${key}"]`);if(cell)cell.textContent=String(m[key]);}
+ }
 }
 function renderCosmos(s){const b=$('cosmoBody');if(!b)return;b.innerHTML=COSMOS.map((c,i)=>{if(s.conceptAggregateComplete===false&&c.legacy!=='Gemini'){const enabled=s.settings?.[c.key]===true;return `<tr class="${enabled?'':'model-disabled'}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(c.name)}</div><div class="concept-desc">${esc(c.desc||'Reference intelligence for Atomic Thunder Bolt and Athena.')}</div>${cosmoControlsHtml(s,c)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(c.key)}" data-model-name="${esc(c.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td>${Array(6).fill('<td class="muted">Unavailable</td>').join('')}</tr>`;}const st=c.legacy==='Gemini'?(s.gemini||{}):statFor(s,c.legacy),enabled=s.settings?.[c.key]===true;const shadowTrades=c.legacy==='Gemini'?(st.total??0):(st.feederSignals??st.total??0);const open=st.open||0;const fed=c.legacy==='Gemini'?'-':(st.fedHunters??0);const pnl=c.legacy==='Gemini'?(st.pnlCents??0):st.pnlCents;return `<tr class="${enabled?'':'model-disabled'}"><td>${i+1}</td><td class="concept-cell"><div class="concept-name">${esc(c.name)}</div><div class="concept-desc">${esc(c.desc||'Reference intelligence for Atomic Thunder Bolt and Athena.')}</div>${cosmoControlsHtml(s,c)}</td><td><button class="model-toggle ${enabled?'enabled':'disabled'}" data-model-key="${esc(c.key)}" data-model-name="${esc(c.name)}" data-enabled="${enabled}">${enabled?'ON':'OFF'}</button></td><td>${shadowTrades}</td><td>${open}</td><td>${pc(st.avgEntryCents)}</td><td>${pc(st.avgCurrentCents)}</td><td>${fed}</td><td class="${pnlClass(pnl)}">${money(pnl)}</td></tr>`;}).join('');}
 
@@ -496,14 +566,15 @@ const CAPITAL_ATTACK_LABELS={
   'Pegasus Ryu Sei Ken Recovery':'Pegasus Ryu Sei Ken',
   'Crash Recovery Hunter':'Starlight Extinction'
 };
-function capitalAttackDisplayName(concept){return CAPITAL_ATTACK_LABELS[concept]||concept;}
+const CAPITAL_HISTORY_ALLOWED_CONCEPTS=new Set([...R17_SAINTS.map(name=>`R17:${name}`),...Object.keys(CAPITAL_ATTACK_LABELS)]);
+function capitalAttackDisplayName(concept){return CAPITAL_HISTORY_ALLOWED_CONCEPTS.has(String(concept))&&String(concept).startsWith('R17:')?String(concept).slice(4):(CAPITAL_ATTACK_LABELS[concept]||concept);}
 function capitalHistoryOpenRow(e){
   const danger=e.aurora?.dangerPriceCents??e.aurora?.dangerLineCents;
   const control=e.aurora?`${Number(e.aurora.damageControlPercent??(Number(e.aurora.maximumEconomicLossRatio||0)*100)).toFixed(1)}% / ${pc(danger)}`:'-';
   const profit=e.entryConfig?.profitAuthority||e.entryConfig?.infinityBreak?.version||'-';
   const stop=e.auroraStopWindow?.armed===true?`${e.auroraStopWindow.windowMinutes} min${e.auroraStopWindow.remainingMinutes==null?'':` / ${e.auroraStopWindow.remainingMinutes} left`}`:'not armed';
-  // Great Horn receives no new operator action or changed exit path. The
-  // pre-existing Lightning emergency exit button alone is retained.
+  // Preserve the original operator authorization surface: showing newly
+  // recognized R17 positions does not authorize additional exit controls.
   const action=e.conceptName==='Lightning Plasma'
     ?`<button class="btn emergency-exit" data-emergency-entry="${esc(e.id)}" data-emergency-name="${esc(e.executionAttackName||e.conceptName)}">Emergency Exit</button>`:'-';
   const currentMark=capitalCurrentMarkHtml(e.ticker,e.currentPriceCents);
@@ -514,7 +585,8 @@ function capitalFinancialHistoryValue(e){
     &&e.executionClass!=='SHADOW_SAINT'&&e.entryConfig?.executionClass!=='SHADOW_SAINT'
     &&(e.closeReason==='broker_zero_inventory_closed'||e.postExitState?.brokerZeroInventoryClose!=null)
     &&e.postExitState?.brokerZeroInventoryClose?.economicClosure!==true);
-  return {unresolved,value:unresolved?null:Object.hasOwn(e,'confirmedPnlCents')?e.confirmedPnlCents:e.pnlCents};
+  const known=Object.hasOwn(e,'confirmedPnlCents')?e.confirmedPnlCents:e.pnlCents;
+  return {unresolved,value:unresolved?known:known,recorded:unresolved&&known!=null};
 }
 function capitalHistoryClosedRow(e){
   const p=e.postExitState||{};
@@ -527,7 +599,7 @@ function capitalHistoryClosedRow(e){
   const worstDelta=e.postExitWorstDeltaCents??p.worstDeltaFromExitCents;
   const saved=e.postExitLossAvoidedCents??p.lossAvoidedNetCents;
   const financial=capitalFinancialHistoryValue(e);
-  return `<tr class="capital-entry-row"><td class="ticker">${esc(e.ticker)}</td><td class="capital-attack-name">${esc(capitalAttackDisplayName(e.conceptName))}</td><td>${pc(e.entryPriceCents)}</td><td>${pc(e.exitPriceCents)}</td><td>${pc(post)}</td><td class="${pnlClass(delta)}">${dpc(delta)}</td><td>${best==null?'-':`${pc(best)} (${dpc(bestDelta)})`}</td><td class="${pnlClass(missed)}">${missed==null?'-':money(missed)}</td><td>${worst==null?'-':`${pc(worst)} (${dpc(worstDelta)})`}</td><td class="${pnlClass(saved)}">${saved==null?'-':money(saved)}</td><td>${esc(e.closeReason||'-')}</td><td class="${financial.unresolved?'muted':pnlClass(financial.value)}">${financial.unresolved?'Pending reconciliation':financialMoney(financial.value)}</td><td>${capitalHistoryDate(e.openedAtMs)}</td><td>${capitalHistoryDate(e.closedAtMs)}</td></tr>`;
+  return `<tr class="capital-entry-row"><td class="ticker">${esc(e.ticker)}</td><td class="capital-attack-name">${esc(capitalAttackDisplayName(e.conceptName))}</td><td>${pc(e.entryPriceCents)}</td><td>${pc(e.exitPriceCents)}</td><td>${pc(post)}</td><td class="${pnlClass(delta)}">${dpc(delta)}</td><td>${best==null?'-':`${pc(best)} (${dpc(bestDelta)})`}</td><td class="${pnlClass(missed)}">${missed==null?'-':money(missed)}</td><td>${worst==null?'-':`${pc(worst)} (${dpc(worstDelta)})`}</td><td class="${pnlClass(saved)}">${saved==null?'-':money(saved)}</td><td>${esc(e.closeReason||'-')}</td><td class="${financial.value==null?'muted':pnlClass(financial.value)}">${financial.unresolved&&financial.value==null?'Closed at broker / Financial reconciliation pending':financial.recorded?financialMoney(financial.value)+' recorded':financialMoney(financial.value)}</td><td>${capitalHistoryDate(e.openedAtMs)}</td><td>${capitalHistoryDate(e.closedAtMs)}</td></tr>`;
 }
 function renderCapitalViewport(kind){
   if(!capitalHistoryVisible(kind))return;
@@ -547,8 +619,8 @@ function renderCapitalHistoryStatus(kind,s){
   const n=kind==='closed'&&verified&&numericReportValue(combined.closedHistory)?Number(combined.closedHistory):null;
   setText(ids.count,kind==='open'?`(${h.rows.length.toLocaleString()} loaded${h.hasMore?' +':''})`:n===null?'(total unavailable)':`(${n.toLocaleString()} history rows${combined.unresolvedClosed?' · '+combined.unresolvedClosed+' unresolved':''})`);
   if(kind==='open')setText('hunterSummary',verified
-    ?`${combined.open} current-session open positions. This risk table also includes earlier-session open exposure across all seven capital attacks; history is not erased.`
-    :'All seven capital attacks: financial total unavailable until matching reports verify; trade history remains separate and scope-checked.');
+    ?`${combined.open} current-session Golden Saint open positions. This risk table also includes earlier-session protected capital exposure; historical positions are not erased.`
+    :'Golden Saint capital total unavailable until matching reports verify; trade history remains separately scope-checked.');
   const count=h.rows.length,summary=`${count.toLocaleString()} loaded${n===null?'':` of ${n.toLocaleString()}`}`;
   const freshnessWarning=financialSnapshotUnavailable
     ?'Stale — current state snapshot unavailable. ':operatorStreamDisconnected
@@ -578,8 +650,7 @@ function capitalizePageScopeMatches(page,s,kind){
        ||!Number.isSafeInteger(Number(page.nextCursor.beforeAtMs))
        ||typeof page.nextCursor.beforeId!=='string'||!page.nextCursor.beforeId)))return false;
   return page.rows.every(e=>{
-    const allowed=['Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery','Crash Recovery Hunter'];
-    if(!e||!e.id||!allowed.includes(e.conceptName)
+    if(!e||!e.id||!CAPITAL_HISTORY_ALLOWED_CONCEPTS.has(e.conceptName)
       ||!(kind==='open'?dashboardRowIdentityMatches(e,s.settings):dashboardRowScopeMatches(e,s.settings)))return false;
     // A shadow Starlight position is never a CAPITAL trade, even when its
     // concept name matches capital Starlight. Both stored classification
@@ -647,11 +718,12 @@ function syncCapitalHistory(s){
   }
 }
 function capitalHistoryAutoRefresh(){
-  if(!STATE||modeChangePending||financialSnapshotUnavailable)return;
+  if(!STATE||modeChangePending)return;
   for(const kind of ['open','closed']){
+    if(kind==='closed'&&financialSnapshotUnavailable)continue;
     const h=capitalHistory[kind],pane=$(capitalHistoryIds(kind).scroll);
     if(!capitalHistoryVisible(kind)||!pane||!h.scope||h.loading)continue;
-    // A temporary API/DB failure must not permanently strand the seven-stage
+    // A temporary API/DB failure must not permanently strand the R17/legacy
     // history. Retry only after a bounded delay; keep the existing cursor and
     // scroll when the operator is inspecting older positions.
     if(h.error){
@@ -725,57 +797,27 @@ function renderTrades(s){
 }
 
 
-// All seven real-capital attack rows share the same authenticated snapshot.
+// All twelve R17 capital rows use one authoritative scoped snapshot.
 // This table and the combined KPIs NEVER accept shadow Starlight as capital.
-const CAPITAL_ATTACK_REPORT_ROWS=[
-  ['Starlight Extinction','Crash Recovery Hunter','SC1','starlightCapitalPerformance'],
-  ['Lightning Plasma','Lightning Plasma','LP1','performance'],
-  ['Great Horn','Great Horn Recovery','GH1','greatHornPerformance'],
-  ['Crystal Wall Recovery','Crystal Wall Recovery','CW1','crystalWallRecoveryPerformance'],
-  ['Sagittarius Arrow','Sagittarius Arrow Recovery','SA1','sagittariusArrowPerformance'],
-  ['Scarlet Needle','Scarlet Needle Recovery','SN2','scarletNeedleCapitalPerformance'],
-  ['Pegasus Ryu Sei Ken','Pegasus Ryu Sei Ken Recovery','PR3','pegasusRyuSeiKenCapitalPerformance']
-];
+const CAPITAL_ATTACK_REPORT_ROWS=R17_SAINTS.map((name,i)=>[
+ name,`R17:${name}`,i<10?'REGULAR':i===10?'RECOVERY_1':'RECOVERY_2','performance']);
 function capitalAttackTableReport(s,concept,code,key){
-  // The UI can receive mixed-version or late snapshots during restarts and
-  // reconnects. Never display an older capital row as if it belonged to the
-  // current seven-attack financial snapshot.
-  const lightning=lightningPerformance(s);
-  const expectedAt=lightning.available&&Number.isSafeInteger(Number(lightning.asOfMs))
-    &&Number(lightning.asOfMs)>0?Number(lightning.asOfMs):null;
-  if(expectedAt===null)return {available:false,reason:'Missing verified Lightning snapshot timestamp'};
-  let report;
-  if(key==='performance')report=lightning;
-  else if(key==='greatHornPerformance')report=verifiedGreatHornPerformance(s);
-  else if(key==='crystalWallRecoveryPerformance')report=verifiedCrystalWallRecoveryPerformance(s);
-  else {
-    const r=s?.[key];
-    const valid=r?.reportingVersion===code+'-CAPITAL-REPORT-V1'
-      &&r.scope?.conceptName===concept&&r.scope?.executionClass==='CAPITAL'
-      &&financialScopeMatches(r.scope,s?.settings)
-      &&capitalCounts.every(k=>numericReportValue(r[k])&&Number(r[k])>=0)
-      &&financialRealizedValid(r)
-      &&(r.valuationComplete===false||numericReportValue(r.unrealizedCents));
-    report=valid?{...r,available:true}:{available:false,reason:'Unverified capital report or scope'};
-  }
-  if(report.available!==true)return report;
-  // Shared financial contract: even a correctly scoped Lightning report can be
-  // partial or malformed during a restart. Never sum invalid P/L or counts.
-  const counts=[...capitalCounts,'total','unreconciled'];
-  if(!counts.every(k=>Number.isSafeInteger(Number(report[k]))&&Number(report[k])>=0)
-    ||!financialRealizedValid(report)
-    ||!numericReportValue(report.avgEntryCents)
-    ||Number(report.closed)!==Number(report.wins)+Number(report.losses)+Number(report.scratches)
-    ||Number(report.total)!==Number(report.open)+Number(report.closed)
-    ||typeof report.financialComplete!=='boolean'
-    ||typeof report.valuationComplete!=='boolean'
-    ||(report.valuationComplete&&!numericReportValue(report.unrealizedCents))
-    ||!capitalPeriods.every(period=>report.periodsComplete?.[period]===true
-      ?numericReportValue(report[period+'RealizedCents'])
-      :report.periodsComplete?.[period]===false))
-    return {available:false,reason:'Capital report has invalid counts, economics or period-completeness metadata'};
-  return Number.isSafeInteger(Number(report.asOfMs))&&Number(report.asOfMs)===expectedAt
-    ?report:{available:false,reason:'Capital report timestamp does not match the current snapshot'};
+ const p=s?.performance,scope=p?.scope,settings=s?.settings,r=p?.byAttack?.[concept];
+ if(!p||!financialScopeMatches(scope,settings)||!Number.isSafeInteger(Number(p.asOfMs))
+  ||Number(p.asOfMs)<=0||!R17_SAINTS.includes(String(concept||'').slice(4))
+  ||!r||r.name!==concept)return {available:false,reason:'R17 scoped capital snapshot unavailable'};
+ if(!capitalCounts.every(k=>Number.isSafeInteger(Number(r[k]))&&Number(r[k])>=0)
+  ||!['total','unreconciled','unresolvedClosed'].every(k=>Number.isSafeInteger(Number(r[k]))&&Number(r[k])>=0)
+  ||Number(r.closed)!==Number(r.wins)+Number(r.losses)+Number(r.scratches)
+  ||Number(r.total)!==Number(r.open)+Number(r.closed)
+  ||typeof r.financialComplete!=='boolean'||typeof r.valuationComplete!=='boolean'
+  ||!financialRealizedValid(r)
+  ||(r.valuationComplete&&!numericReportValue(r.unrealizedCents))
+  ||!capitalPeriods.every(period=>r.periodsComplete?.[period]===true
+    ?numericReportValue(r[period+'RealizedCents'])
+    :r.periodsComplete?.[period]===false))
+  return {available:false,reason:'R17 financial counts, fees or period completeness not proven'};
+ return {...r,asOfMs:p.asOfMs,available:true};
 }
 function renderCapitalAttackResults(s){
   const body=$('capitalAttackResultsBody');if(!body)return;
@@ -785,20 +827,26 @@ function renderCapitalAttackResults(s){
     if(r.available!==true)return `<tr><th scope="row" class="capital-attack-name">${esc(name)}</th><td colspan="10" class="muted">Unavailable — ${esc(r.reason||'missing matching capital report')}</td></tr>`;
     // A time-window total is verified only when its completeness flag is
     // explicitly true. Missing metadata cannot silently mean zero or complete.
-    const realized=(key,period)=>r.periodsComplete?.[period]===true?r[key]:null;
-    const moneyCell=(value)=>`<td class="${value===null||value===undefined||!Number.isFinite(Number(value))?'muted':pnlClass(value)}">${financialMoney(value)}</td>`;
+    const knownPeriod=(period)=>{
+      const key=period+'RealizedCents';
+      const knownKey='known'+period[0].toUpperCase()+period.slice(1)+'RealizedCents';
+      return r.periodsComplete?.[period]===true?r[key]:(r[knownKey]??r[key]);
+    };
+    const moneyCell=(value,recorded=false)=>`<td class="${value===null||value===undefined||!Number.isFinite(Number(value))?'muted':pnlClass(value)}">${recorded&&value!=null?financialMoney(value)+' recorded':financialMoney(value)}</td>`;
+    const realizedShown=r.realizedCents!=null?r.realizedCents:r.knownRealizedCents;
     return `<tr><th scope="row" class="capital-attack-name">${esc(name)}</th>`+
       `<td>${esc(r.open)}</td><td>${esc(r.closed)}</td><td>${esc(r.wins)} / ${esc(r.losses)}</td>`+
       `<td>${Number(r.closed)>0?pct01(Number(r.wins)/Number(r.closed)):'-'}</td><td>${esc(r.pending)}</td>`+
-      moneyCell(r.realizedCents)+moneyCell(r.valuationComplete===false?null:r.unrealizedCents)+
-      moneyCell(realized('dayRealizedCents','day'))+
-      moneyCell(realized('weekRealizedCents','week'))+
-      moneyCell(realized('monthRealizedCents','month'))+'</tr>';
+      moneyCell(realizedShown,r.realizedCents==null)+
+      moneyCell(r.valuationComplete===false?r.knownUnrealizedCents:r.unrealizedCents,r.valuationComplete===false)+
+      moneyCell(knownPeriod('day'),r.periodsComplete?.day!==true)+
+      moneyCell(knownPeriod('week'),r.periodsComplete?.week!==true)+
+      moneyCell(knownPeriod('month'),r.periodsComplete?.month!==true)+'</tr>';
   }).join('');
   const valid=records.filter(({report})=>report.available===true).length;
   const combined=capitalCombinedPerformance(s);
   setText('capitalAttackResultsStatus',valid===CAPITAL_ATTACK_REPORT_ROWS.length&&combined.available===true
-    ?(combined.financialComplete===false?`${combined.unreconciled} funded position(s) await broker reconciliation. Recorded results remain incomplete until those positions reconcile. `:'')+'All seven scoped capital reports use the same snapshot. Profit periods show recorded realized net P/L; unrealized marks do not guarantee liquidation proceeds.'
+    ?(combined.financialComplete===false?`${combined.unreconciled} funded position(s) await broker reconciliation. Recorded results remain incomplete until those positions reconcile. `:'')+'All twelve Golden Saint capital reports use the same scoped snapshot. Profit periods show recorded realized net P/L; unrealized marks do not guarantee liquidation proceeds.'
     :`${valid} of ${CAPITAL_ATTACK_REPORT_ROWS.length} independently scoped capital reports available. ${combined.available===true?'':'Combined totals require matching snapshots; unavailable values are not replaced with zeros.'}`);
 }
 
@@ -874,7 +922,7 @@ function render(s){
     STATE=s;
     financialSnapshotUnavailable=false;operatorStreamDisconnected=false;
     renderSystem(s);renderTradingLiveness(s);renderLiveAuthorization(s);renderBolt(s);renderAthena(s);renderInfinity(s);renderAurora(s);renderTrades(s);
-    const editing=!!document.activeElement?.matches('[data-setting-key]');
+    const editing=!!document.activeElement?.matches('[data-setting-key],[data-r17-field]');
     const attackFp=attackControlsFingerprint(s);
     if(!editing&&(attackFp!==ATTACK_CONTROL_FINGERPRINT||!$('attackBody')?.firstElementChild)){
       renderAttacks(s);ATTACK_CONTROL_FINGERPRINT=attackFp;
@@ -996,7 +1044,10 @@ async function patchSettingsVerified(data){
   const committed=suppliedState?.settings||reply;
   const verify=(settings)=>{for(const [key,value] of Object.entries(data)){
     const actual=settings?.[key];
-    const matches=typeof value==='boolean'?actual===value:
+    const matches=key==='goldenSaints'&&value&&typeof value==='object'
+      ?Object.entries(value).every(([name,fields])=>Object.entries(fields).every(([field,v])=>
+          typeof v==='number'?Number(actual?.[name]?.[field])===v:actual?.[name]?.[field]===v)):
+      typeof value==='boolean'?actual===value:
       typeof value==='number'?Number.isFinite(Number(actual))&&Number(actual)===value:
       String(actual??'')===String(value??'');
     if(!matches)throw new Error(`Setting ${key} did not persist exactly`);
@@ -1013,12 +1064,40 @@ async function patchSettingsVerified(data){
 }
 function bindBoard(id){const b=$(id);b.oninput=e=>{const i=e.target.closest('[data-setting-key]');if(i)drafts.set(i.dataset.settingKey,i.value);};b.onclick=async e=>{const save=e.target.closest('[data-model-save]');if(save){if(save.dataset.modelSave==='Crystal Wall Recovery'&&!cw1UiBackendCompatible(STATE)){msg('Crystal Wall settings cannot be saved: the CW1 backend does not match this dashboard.',true);return;}if(save.dataset.modelSave==='Great Horn Recovery'&&!gh1UiBackendCompatible(STATE)){msg('Great Horn settings cannot be saved: the GH1 backend build does not match this dashboard.',true);return;}const row=save.closest('tr'),data={};for(const i of row.querySelectorAll('[data-setting-key]')){if(i.value.trim()===''||!i.checkValidity()){i.reportValidity();msg(`Invalid ${i.closest('label')?.firstChild?.textContent||i.dataset.settingKey}: ${i.validationMessage||'a value is required'}`,true);return;}data[i.dataset.settingKey]=Number(i.value);}save.disabled=true;try{const fresh=await patchSettingsVerified(data);render(fresh);msg(`${save.dataset.modelSave} settings saved.`);}catch(x){msg(x.message,true);}finally{save.disabled=false;}return;}const btn=e.target.closest('[data-model-key]');if(!btn)return;const key=btn.dataset.modelKey,enable=btn.dataset.enabled!=='true';if(key.startsWith('crystalWallRecovery')&&!cw1UiBackendCompatible(STATE)){msg('Crystal Wall controls are disabled until the CW1 backend report verifies.',true);return;}if(key.startsWith('greatHorn')&&!gh1UiBackendCompatible(STATE)){msg('Great Horn controls are disabled: verify the GH1 backend build first.',true);return;}btn.disabled=true;try{const fresh=await patchSettingsVerified({[key]:enable});render(fresh);msg(`${btn.dataset.modelName} ${enable?'enabled':'disabled'}.`);}catch(x){msg(x.message,true);}finally{btn.disabled=false;}};}
 bindBoard('attackBody');bindBoard('cosmoBody');
+const goldenAttackBoard=$('attackBody');
+goldenAttackBoard.addEventListener('input',event=>{
+ const input=event.target.closest('[data-r17-field]');if(!input)return;
+ r17Drafts.set(`R17:${input.dataset.r17Name}:${input.dataset.r17Field}`,input.value);
+});
+goldenAttackBoard.addEventListener('click',async event=>{
+ const toggle=event.target.closest('[data-r17-toggle]'),save=event.target.closest('[data-r17-save]');
+ if(!toggle&&!save)return;
+ const name=toggle?.dataset.r17Name||save?.dataset.r17Save;
+ if(!R17_SAINTS.includes(name)||!STATE?.settings?.goldenSaints?.[name])return;
+ const button=toggle||save,card=STATE.settings.goldenSaints[name],change={};
+ if(toggle)change[toggle.dataset.r17Toggle]=toggle.dataset.enabled!=='true';
+ else{
+   const row=button.closest('[data-r17-row]');
+   for(const input of row.querySelectorAll('[data-r17-field]')){
+     if(input.value.trim()===''||!input.checkValidity()){
+       input.reportValidity();msg(`Invalid ${name} ${input.dataset.r17Field}`,true);return;
+     }
+     change[input.dataset.r17Field]=Number(input.value);
+   }
+ }
+ button.disabled=true;
+ try{const fresh=await patchSettingsVerified({goldenSaints:{[name]:change}});
+  for(const key of Object.keys(change))r17Drafts.delete(`R17:${name}:${key}`);
+  ATTACK_CONTROL_FINGERPRINT=null;render(fresh);msg(`${name} card saved and verified.`);
+ }catch(error){msg(String(error.message||error),true);}finally{button.disabled=false;}
+});
+
 $('settingsForm').oninput=e=>{const i=e.target.closest('[data-setting-key]');if(i)drafts.set(i.dataset.settingKey,i.value);};
 $('settingsForm').onsubmit=async e=>{e.preventDefault();const data={};for(const [k] of SHARED)if(drafts.has(k))data[k]=Number(drafts.get(k));if(!Object.keys(data).length)return msg('No shared setting changes.');try{const fresh=await patchSettingsVerified(data);render(fresh);msg('Shared settings saved and verified.');}catch(x){msg(x.message,true);}};
 $('atomicThunderGreenSave').onclick=async()=>{const data={atomicThunderGreenTriggerCents:Number($('atomicThunderGreenTrigger').value)};try{render(await patchSettingsVerified(data));msg('Atomic Thunder GREEN trigger saved. New threshold applies to future green crossings; already emitted shadow Bolts remain one-shot.');}catch(e){msg(e.message,true);}};
 $('infinitySave').onclick=async()=>{const data={infinityBreakMinNetPerOriginalContractCents:Number($('infinityMinNet').value),infinityBreakRequiredConfirmations:Number($('infinityConfirmations').value),infinityBreakMaximumBookAgeMs:Number($('infinityBookAge').value),infinityBreakConfirmationWindowMs:Number($('infinityWindow').value)};try{render(await patchSettingsVerified(data));msg('Infinity Break settings saved.');}catch(e){msg(e.message,true);}};
 $('auroraSave').onclick=async()=>{try{render(await patchSettingsVerified({auroraDamageControlPercent:Number($('auroraDamagePercent').value),auroraStopWindowMinutes:Number($('auroraStopWindowMinutes').value)}));msg('Aurora saved. Damage % applies to new trades. Stop window is the real clock and open trades pick it up on the next protection check.');}catch(e){msg(e.message,true);}};
-$('galacticExplosionToggle').onclick=async()=>{const on=$('galacticExplosionToggle').dataset.enabled==='true';if(!on&&!confirm('Enable Galactic Explosion? Every enabled saint that is inside its own price band and confirmation settings may enter the SAME ticker. The one-hunter-per-event cap becomes per-Attack. Crystal Wall and Justice Arrow stay on their own crash path and can also sit on that ticker.'))return;try{render(await patchSettingsVerified({galacticExplosionEnabled:!on}));}catch(e){msg(e.message,true);}};
+$('galacticExplosionToggle').onclick=async()=>{const on=$('galacticExplosionToggle').dataset.enabled==='true';if(!on&&!confirm('Enable Galactic Explosion? The ten regular Golden Saints have distinct parent watches and independent capital seats. This historical setting cannot reactivate retired attack execution routes or override R17 safety gates.'))return;try{render(await patchSettingsVerified({galacticExplosionEnabled:!on}));}catch(e){msg(e.message,true);}};
 $('openHunterBody').onclick=async e=>{const b=e.target.closest('[data-emergency-entry]');if(!b)return;if(!confirm(`Emergency exit ${b.dataset.emergencyName||'this Attack'}?`))return;b.disabled=true;try{const r=await post('/api/emergency-exit',{entryId:b.dataset.emergencyEntry});await load();msg(r.closed?'Emergency Exit completed.':r.pending?'Emergency Exit committed; reconciliation pending.':`Not executed: ${r.skipped||r.reason||'unknown'}`,!r.closed&&!r.pending);}catch(x){msg(x.message,true);}finally{b.disabled=false;}};
 // Legacy real positions remain controllable outside the current Lightning board.
 $('legacyRealExposureBody').onclick=$('openHunterBody').onclick;
@@ -1038,7 +1117,7 @@ $('modeBtn').onclick=async()=>{
     acknowledged=true;windowModeArmDenial='';
     // Only the mode acknowledgement is authoritative here, not old account
     // values. Leave balances unavailable until the fresh scoped read arrives.
-    STATE={...STATE,settings:{...STATE.settings,...ack}};
+    STATE={...STATE,settings:{...STATE.settings,...(ack.settings||ack)}};
     modeChangePending=false;invalidateStateReads();
     const fresh=await load();
     if(!fresh){
@@ -1070,7 +1149,7 @@ $('liveRearmBtn').onclick=async()=>{
     const ack=await post('/api/mode',{mode:'LIVE',confirmation:phrase});
     if(ack?.mode!=='LIVE'||ack.liveArmed!==true)throw new Error('live_rearm_acknowledgement_mismatch');
     acknowledged=true;windowModeArmDenial='';
-    STATE={...STATE,settings:{...STATE.settings,...ack}};
+    STATE={...STATE,settings:{...STATE.settings,...(ack.settings||ack)}};
     modeChangePending=false;invalidateStateReads();
     const fresh=await load();
     if(!fresh){
@@ -1100,7 +1179,7 @@ $('resetDefaultsBtn').onclick=async()=>{
     // A full factory reset deliberately discards ALL unsaved operator drafts.
     // Otherwise attack inputs and shared forms keep rendering their old values.
     drafts.clear();
-    if(document.activeElement?.matches('[data-setting-key]'))document.activeElement.blur();
+    r17Drafts.clear();if(document.activeElement?.matches('[data-setting-key],[data-r17-field]'))document.activeElement.blur();
     invalidateStateReads();
     if(operatorEventStream){operatorEventStream.close();operatorEventStream=null;}
     ATTACK_CONTROL_FINGERPRINT=null;CONTROL_FINGERPRINT=null;
@@ -1219,8 +1298,8 @@ function renderLegacyCapitalHistory(s){
     &&e.entryConfig?.executionClass!=='SHADOW_SAINT'&&e.status==='closed'&&Number(e.count)>0&&dashboardRowScopeMatches(e,s.settings));
   $('legacyCapitalHistoryPanel')?.classList.toggle('hidden',!valid||(Number(a.total||0)===0&&Number(a.pending||0)===0&&Number(a.unreconciled||0)===0));
   setText('legacyCapitalHistoryCount',valid?`(${a.closed||0} closed; ${rows.length} recent rows)`:'');
-  setText('legacyCapitalSummary',valid?`Confirmed REAL Starlight capital only. ${a.closed||0} closed · ${a.wins||0} wins / ${a.losses||0} losses · win rate ${a.closed?pct01(a.wins/a.closed):'-'} · realized ${financialMoney(a.realizedCents)} · unrealized ${financialMoney(a.valuationComplete?a.unrealizedCents:null)}. Included once in the main seven-attack results; shadow Starlight is excluded.`:'Starlight capital history unavailable.');
-  if($('legacyClosedBody'))$('legacyClosedBody').innerHTML=rows.map(e=>`<tr><td class="ticker">${esc(e.ticker)}</td><td>Starlight Extinction · capital</td><td>${pc(e.entryPriceCents)}</td><td>${pc(e.exitPriceCents)}</td><td>${esc(e.closeReason||'-')}</td><td class="${capitalFinancialHistoryValue(e).unresolved?'muted':pnlClass(capitalFinancialHistoryValue(e).value)}">${capitalFinancialHistoryValue(e).unresolved?'Pending reconciliation':financialMoney(capitalFinancialHistoryValue(e).value)}</td><td>${e.closedAtMs?new Date(e.closedAtMs).toLocaleString():'-'}</td></tr>`).join('')||'<tr><td colspan="7">No closed real Starlight positions in this scope.</td></tr>';
+  setText('legacyCapitalSummary',valid?`Confirmed REAL Starlight capital only. ${a.closed||0} closed · ${a.wins||0} wins / ${a.losses||0} losses · win rate ${a.closed?pct01(a.wins/a.closed):'-'} · realized ${financialMoney(a.realizedCents)} · unrealized ${financialMoney(a.valuationComplete?a.unrealizedCents:null)}. Protected historical Starlight capital is reported separately from the twelve Golden Saint strategy totals; shadow Starlight is excluded.`:'Starlight capital history unavailable.');
+  if($('legacyClosedBody'))$('legacyClosedBody').innerHTML=rows.map(e=>`<tr><td class="ticker">${esc(e.ticker)}</td><td>Starlight Extinction · capital</td><td>${pc(e.entryPriceCents)}</td><td>${pc(e.exitPriceCents)}</td><td>${esc(e.closeReason||'-')}</td><td class="${capitalFinancialHistoryValue(e).value==null?'muted':pnlClass(capitalFinancialHistoryValue(e).value)}">${capitalFinancialHistoryValue(e).recorded?financialMoney(capitalFinancialHistoryValue(e).value)+' recorded':financialMoney(capitalFinancialHistoryValue(e).value)}</td><td>${e.closedAtMs?new Date(e.closedAtMs).toLocaleString():'-'}</td></tr>`).join('')||'<tr><td colspan="7">No closed real Starlight positions in this scope.</td></tr>';
 }
 function renderShadowDashboard(s){
   renderLegacyCapitalHistory(s);

@@ -57,8 +57,21 @@ export function classifyTradingLiveness({workers=[],queues=[],health={},lastEven
 
 export class TradingLiveness {
   constructor(){this.scope=null;this.samples=[];this.sampleSizes=[];this.sampleBytes=0;this.events=[];this.lastSampleAtMs=0;this.observationStartedAtMs=Date.now();this.last=null;this.resetCounts();}
-  resetCounts(){this.counts={candidateEvaluations:0,strategyQualifiedEvaluations:0,brokerDispatches:0,confirmedEntryReceiptObservations:0,refusals:0};this.times={candidate:0,qualified:0,dispatch:0,fill:0};this.attempts=new Map();this.receipts=new Set();this.attemptEvictions=0;this.unresolvedAttemptEvictions=0;this.receiptEvictions=0;}
-  useScope(settings){const key=scope(settings);if(key===this.scope)return;this.scope=key;this.samples=[];this.sampleSizes=[];this.sampleBytes=0;this.events=[];this.lastSampleAtMs=0;this.last=null;this.observationStartedAtMs=Date.now();this.resetCounts();}
+  resetCounts(){this.counts={candidateEvaluations:0,strategyQualifiedEvaluations:0,brokerDispatches:0,confirmedEntryReceiptObservations:0,refusals:0};this.times={candidate:0,qualified:0,dispatch:0,fill:0};this.attempts=new Map();this.receipts=new Set();this.attemptEvictions=0;this.unresolvedAttemptEvictions=0;this.receiptEvictions=0;this.hashCache=new Map();}
+  digestAttempt(value){
+    // The cache is observability-only. Never cache unbounded broker IDs.
+    const raw=String(value);
+    if(raw.length>256)return identity(raw);
+    const cached=this.hashCache.get(raw);if(cached!==undefined)return cached;
+    const digest=identity(raw);
+    if(this.hashCache.size>=LIVENESS_LIMITS.attempts)this.hashCache.delete(this.hashCache.keys().next().value);
+    this.hashCache.set(raw,digest);return digest;
+  }
+  useScope(settings){
+    const fast=[settings?.systemName||'',settings?.ownerId||'',settings?.mode||'',Number(settings?.resetTimestampMs||0)];
+    if(this.scopeFastFields && fast.every((v,i)=>v===this.scopeFastFields[i] && v!==null && !['object','function'].includes(typeof v)))return;
+    const key=scope(settings);if(key===this.scope){this.scopeFastFields=fast;return;}
+    this.scope=key;this.scopeFastFields=fast;this.samples=[];this.sampleSizes=[];this.sampleBytes=0;this.events=[];this.lastSampleAtMs=0;this.last=null;this.observationStartedAtMs=Date.now();this.resetCounts();}
   event(row={},settings={}){
     this.useScope(settings);
     const e={atMs:num(row.atMs)||Date.now(),attemptId:clean(row.attemptId),candidateId:clean(row.candidateId),
@@ -67,7 +80,7 @@ export class TradingLiveness {
       mode:clean(settings.mode,16),parentEntryId:clean(row.parentEntryId||row.starlightRecoveryParentEntryId||row.parentStarlightId),
       quoteAtMs:num(row.decisionContext?.quoteAtMs),quoteRevision:num(row.decisionContext?.quoteRevision)};
     if(e.attemptId){
-      const key=identity(row.attemptId);e.attemptKey=key;
+      const key=this.digestAttempt(row.attemptId);e.attemptKey=key;
       let a=this.attempts.get(key);if(!a){a={firstDenial:null};this.attempts.set(key,a);}
       if(e.status==='BLOCKED'&&!a.firstDenial)a.firstDenial={stage:e.stage,reason:e.reason,atMs:e.atMs};
       a.stage=e.stage;a.atMs=e.atMs;a.terminal=e.status==='BLOCKED'||e.stage==='OPENED'||e.stage==='CONFIRMED_FILL';
@@ -94,7 +107,7 @@ export class TradingLiveness {
     const p=entry.entryConfig?.entryFillProof;
     if(entry.mode!=='LIVE'||p?.authoritative!==true||!(Number(p.filledCount)>0)||!entry.entryOrderId)return;
     // Registration may repeat; count unique retained receipt identities only.
-    const id=String(entry.entryOrderId),key=identity(id);if(this.receipts.has(key))return;
+    const id=String(entry.entryOrderId),key=this.digestAttempt(id);if(this.receipts.has(key))return;
     this.receipts.add(key);while(this.receipts.size>LIVENESS_LIMITS.receipts){this.receipts.delete(this.receipts.values().next().value);this.receiptEvictions++;}
     this.counts.confirmedEntryReceiptObservations++;
     // Rehydrating an old receipt is not a newly executed fill. Unknown broker

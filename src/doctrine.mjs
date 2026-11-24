@@ -4,8 +4,11 @@
 // R45 Mega Wave separates active runtime concepts from historical compatibility.
 // Retired concepts remain recognizable so old/open positions stay protected and
 // historical analytics stay truthful, but they have zero new-entry authority.
-export const ACTIVE_PORTFOLIO_CONCEPTS = new Set(['Athena Exclamation', 'Scarlet Needle', 'Sagittarius Justice Arrow', 'Momentum Hunter', 'Recovery Hunter', 'Wave Surfer', 'Crash Recovery Hunter', 'Lightning Plasma']);
-export const SHADOW_SAINT_CONCEPTS = new Set(ACTIVE_PORTFOLIO_CONCEPTS);
+export const R17_GOLDEN_CAPITAL_CONCEPTS = Object.freeze(['Aries','Taurus','Gemini','Cancer','Leo','Virgo','Libra','Scorpio','Sagittarius','Capricorn','Aquarius','Pisces'].map(saint=>`R17:${saint}`));
+export const R17_RETIRED_NEW_CAPITAL_CONCEPTS = new Set(['Crash Recovery Hunter','Lightning Plasma','Great Horn Recovery','Crystal Wall Recovery','Sagittarius Arrow Recovery','Scarlet Needle Recovery','Pegasus Ryu Sei Ken Recovery','Scarlet Needle','Sagittarius Justice Arrow','Recovery Hunter','Momentum Hunter','Wave Surfer']);
+export const ACTIVE_PORTFOLIO_CONCEPTS = new Set([...R17_GOLDEN_CAPITAL_CONCEPTS,'Athena Exclamation', 'Scarlet Needle', 'Sagittarius Justice Arrow', 'Momentum Hunter', 'Recovery Hunter', 'Wave Surfer', 'Crash Recovery Hunter', 'Lightning Plasma']);
+// Legacy SHADOW signatures remain upstream intelligence only, never new R17 capital identity.
+export const SHADOW_SAINT_CONCEPTS = new Set([...ACTIVE_PORTFOLIO_CONCEPTS].filter(x=>!R17_GOLDEN_CAPITAL_CONCEPTS.includes(x)));
 export const SHADOW_SAINT_ARCHITECTURE = Object.freeze({
   version:'APS2-SHADOW-STARLIGHT-V1',
   capitalAttack:'Lightning Plasma',
@@ -37,6 +40,7 @@ export const ALL_CONCEPTS = new Set([...PORTFOLIO_CONCEPTS, ...FEEDER_CONCEPTS, 
 export const WATCHDOG_MODEL = 'bolt-athena-infinity-aurora';
 
 export const EXECUTION_ATTACK_DISPLAY = Object.freeze({
+  ...Object.fromEntries(R17_GOLDEN_CAPITAL_CONCEPTS.map(key=>[key,Object.freeze({name:key.slice(4),legacy:'R17 Golden Saint capital'})])),
   'Athena Exclamation': Object.freeze({ name:'Athena Exclamation', legacy:'AE1 / Three Gold Saint Convergence' }),
   'Scarlet Needle': Object.freeze({ name:'Scarlet Needle', legacy:'Needle / Scorpio Continuation Strike' }),
   'Sagittarius Justice Arrow': Object.freeze({ name:'Sagittarius Justice Arrow', legacy:'Sagittarius Aiolos / Arrow of Justice' }),

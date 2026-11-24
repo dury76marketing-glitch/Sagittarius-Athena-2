@@ -1,5 +1,7 @@
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import {q17SimSettings} from './q17Profile.mjs';
+import {normalizeGoldenSaintCards} from './goldenSaintCards.mjs';
+import {SGT2_FACTORY_PROFILE_20261124_082300} from './factoryProfile20261124.mjs';
 
 const num = (name, fallback) => {
   const v = Number(process.env[name]);
@@ -11,7 +13,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-R16-MEGAWAVE-INTEGRATED-2026-11-21';
+export const RELEASE = 'SAGITTARIUS-R17.7-R36-OFFICIAL-SCHEDULE-LIVE-REFERENCE-2026-11-23';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
@@ -1013,7 +1015,16 @@ export function freshInstallSettings() {
     ...LEDGER_FACTORY_OVERRIDES_20261116_141852,
     ...LEDGER_FACTORY_OVERRIDES_20261120_144232,
     ...LEDGER_FACTORY_OVERRIDES_20261120_151312,
+    // 2026-11-24 SGT-2 operator snapshot: full factory card fingerprint,
+    // 20-90 min Game Clock and 35 min Aurora window. Applies only to
+    // fresh installs / explicit factory reset, never a persisted card.
+    ...SGT2_FACTORY_PROFILE_20261124_082300,
+    // Never share mutable card objects between clones or engine instances.
+    goldenSaints:structuredClone(SGT2_FACTORY_PROFILE_20261124_082300.goldenSaints),
+    // These epochs must be installation/session-specific, not imported.
     resetTimestampMs:null,
+    liveDashboardStartMs:null,
+    simulationDashboardStartMs:null,
     factoryTradingProfile20261005Applied:true,
     athenaArrowCloneApplied:true,
     winningCard20261005Applied:true,
@@ -1043,6 +1054,9 @@ export function factoryOperatorSettingsPatch() {
   // OPEN is a policy level, not a boolean/numeric setting. Include it explicitly
   // so the dashboard Factory Reset restores the exact ledger card.
   patch.andromedaThunderWaveLevel = factory.andromedaThunderWaveLevel;
+  // Factory Reset must restore the exact twelve owner-selected cards, NOT
+  // synthesize twelve generic disabled templates.
+  patch.goldenSaints = normalizeGoldenSaintCards(factory,factory.goldenSaints);
   return patch;
 }
 
@@ -1321,6 +1335,14 @@ export function sanitizeRuntimeSettings(value = {}, defaults = originalSettings(
   // sanitizer is used by transactional verifiers too, so it must not erase proof.
   out.liveArmed = out.mode==='LIVE'&&src.liveArmed===true;
   out.liveOwnerAuthorized = out.mode==='LIVE'&&src.liveOwnerAuthorized===true;
+  // Only a genuinely NEW installation inherits the ledger-locked twelve-card
+  // factory profile. An existing persisted installation without R17 cards must
+  // retain the historical safe OFF migration; never silently activate capital
+  // entries merely because new source code was deployed.
+  const selectedGoldenCards=Object.hasOwn(src,'goldenSaints')
+    ? src.goldenSaints
+    : (hasPersistedRecord ? undefined : defaults?.goldenSaints);
+  out.goldenSaints = normalizeGoldenSaintCards(out,selectedGoldenCards);
   return out;
 }
 
