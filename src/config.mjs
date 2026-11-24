@@ -13,7 +13,7 @@ const bool = (name, fallback) => {
 };
 const pem = (v='') => String(v).replace(/\\n/g, '\n').trim();
 
-export const RELEASE = 'SAGITTARIUS-R17.7-R36-OFFICIAL-SCHEDULE-LIVE-REFERENCE-2026-11-23';
+export const RELEASE = 'SAGITTARIUS-R17.7-R36-FACTORY-LEDGER-20261124-191646';
 
 export const env = Object.freeze({
   port: num('PORT', 3000),
