@@ -258,7 +258,7 @@ export class KalshiClient {
     // One balance-read / transfer decision per exchange shard at a time.
     this.exchangeBalanceChecks = new Set();
     this.fundingStore = null;
-    this.readLane=new RequestLane(OPS_LIMITS.readConcurrency,OPS_LIMITS.readPending,{reservedConcurrency:2,reservedPending:16});
+    this.readLane=new RequestLane(OPS_LIMITS.readConcurrency,OPS_LIMITS.readPending,{reservedConcurrency:2,reservedPending:16,entryReservedConcurrency:1});
     this.lastRequestFailure=null;
     this.readTelemetryStartedAtMs=Date.now();
     this.readCategoryTelemetry=new Map();
@@ -487,6 +487,9 @@ export class KalshiClient {
     const path=String(apiPath).split('?')[0];
     if(/^\/portfolio\/balance$/.test(path))return 'balance';
     if(/^\/portfolio\//.test(path))return 'portfolio';
+    if(/^\/live_data\/milestone\/[^/]+\/game_stats$/.test(path))return 'sporting_stats';
+    if(/^\/live_data\/milestone\/[^/]+$/.test(path))return 'sporting_live';
+    if(/^\/milestones(?:\/|$)/.test(path))return 'sporting_milestone';
     if(/^\/markets\/[^/]+\/orderbook$/.test(path))return 'market_orderbook';
     if(/^\/markets\/[^/]+$/.test(path))return 'market_single';
     if(path==='/markets/trades')return 'market_trades';
@@ -495,32 +498,40 @@ export class KalshiClient {
     return 'other';
   }
 
-  recordReadCategory(apiPath,result,latencyMs,queueWaitMs=0) {
+  recordReadCategory(apiPath,result,latencyMs,queueWaitMs=0,transport={}) {
     const key=this.readCategory(apiPath),prior=this.readCategoryTelemetry.get(key)||
       {completed:0,failures:0,rateLimited:0,totalLatencyMs:0,maxLatencyMs:0,
-        queueWaitTotalMs:0,queueWaitMaxMs:0};
+        queueWaitTotalMs:0,queueWaitMaxMs:0,serviceTimeTotalMs:0,serviceTimeMaxMs:0,
+        httpAttempts:0,retries:0,rateLimitedAttempts:0};
     prior.completed++;
     if(result?.ok!==true)prior.failures++;
     if(Number(result?.status)===429||Number(result?.originatingHttpStatus)===429
-      ||Number(result?.requestFailure?.originatingHttpStatus)===429)prior.rateLimited++;
+      ||Number(result?.requestFailure?.originatingHttpStatus)===429||Number(transport.rateLimitedAttempts)>0)prior.rateLimited++;
     const ms=Math.max(0,Math.round(Number(latencyMs)||0));
     prior.totalLatencyMs+=ms;prior.maxLatencyMs=Math.max(prior.maxLatencyMs,ms);
     const queueMs=Math.max(0,Math.round(Number(queueWaitMs)||0));
     prior.queueWaitTotalMs+=queueMs;prior.queueWaitMaxMs=Math.max(prior.queueWaitMaxMs,queueMs);
+    const serviceMs=Math.max(0,ms-queueMs),attempts=Math.max(0,Number(transport.attempts)||0);
+    prior.serviceTimeTotalMs+=serviceMs;prior.serviceTimeMaxMs=Math.max(prior.serviceTimeMaxMs,serviceMs);
+    prior.httpAttempts+=attempts;prior.retries+=Math.max(0,attempts-1);
+    prior.rateLimitedAttempts+=Math.max(0,Number(transport.rateLimitedAttempts)||0);
     this.readCategoryTelemetry.set(key,prior);
   }
 
   async requestUncoalesced(method,apiPath,body=null,options={}){
     const readTelemetryAtMs=performance.now();
     const mutation=method.toUpperCase()!=='GET'||options.mutation===true;
-    const critical=!mutation&&this.accountReadPath(apiPath);
+    const critical=!mutation&&(this.accountReadPath(apiPath)
+      ||options.protectiveRead===true&&/^\/markets\/[^/]+(?:\/orderbook)?(?:\?|$)/.test(apiPath));
+    const priority=!mutation&&/\/orderbook(?:\?|$)/.test(apiPath)?'book'
+      :!mutation&&options.entryIntent===true&&/^\/live_data\/milestone\//.test(apiPath)?'clock':'normal';
     const deadline=Math.min(performance.now()+OPS_LIMITS.requestBudgetMs,
       Number.isFinite(options.deadline)?options.deadline:Infinity);
     const lane=mutation?this.mutationLane:this.readLane;
-    let started=false,result,queueWaitMs=0;
+    let started=false,result,queueWaitMs=0;const requestTelemetry={attempts:0,rateLimitedAttempts:0};
     try{result=await lane.run(async()=>{started=true;
       if(!mutation)queueWaitMs=Math.max(0,performance.now()-readTelemetryAtMs);
-      const dispatch=()=>this.requestWithBudget(method,apiPath,body,{...options,mutation,deadline});
+      const dispatch=()=>this.requestWithBudget(method,apiPath,body,{...options,mutation,deadline,requestTelemetry});
       if(mutation){
         // Keep exact clone ID, installation binding and order provenance
         // checks without using a shared database or account-wide mutation lock.
@@ -533,7 +544,7 @@ export class KalshiClient {
         return dispatch();
       }
       return dispatch();
-    },deadline,{critical,owner:`${method}:${this.readCategory(apiPath)}:${String(body?.client_order_id||'').slice(0,100)}`});}
+    },deadline,{critical,priority,owner:`${method}:${this.readCategory(apiPath)}:${String(body?.client_order_id||'').slice(0,100)}`});}
     catch(error){result={ok:false,status:0,...(!started?{notSubmitted:true}:{}),data:{error:String(error?.message||'broker_request_failed')},transportCode:transportCodeOf(error)};}
     finally{if(mutation&&result?.notSubmitted!==true){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'finished'});}}
     if(!result.ok&&!mutation){
@@ -543,7 +554,8 @@ export class KalshiClient {
       // endpoint's error to the LIVE request that is actually being refused.
       result={...result,requestFailure:failure};
     }
-    if(!mutation)this.recordReadCategory(apiPath,result,performance.now()-readTelemetryAtMs,queueWaitMs);
+    if(!mutation)this.recordReadCategory(apiPath,result,performance.now()-readTelemetryAtMs,
+      started?queueWaitMs:performance.now()-readTelemetryAtMs,requestTelemetry);
     return result;
   }
   localBalancePacingSnapshot(){
@@ -575,6 +587,7 @@ export class KalshiClient {
     // must revalidate its durable intent, then its live signal/control state.
     beforeDispatch = null,
     confirmDispatch = null,
+    requestTelemetry = null,
     deadline=performance.now()+OPS_LIMITS.requestBudgetMs,
   } = {}) {
     mutation=mutation||method.toUpperCase()!=='GET';
@@ -626,7 +639,9 @@ export class KalshiClient {
           data:{error:'broker_request_deadline_exceeded'},...preceding()};
         if(mutation){this.invalidateBalanceReadAuthority();this.onAccountMutation?.({method,apiPath,clientOrderId:body?.client_order_id,side:body?.side,phase:'before_send'});}
         priorAttemptsSubmitted++;
+        if(requestTelemetry)requestTelemetry.attempts++;
         const r = await this.fetchOnce(method, host, apiPath, body, Math.min(timeoutMs,remaining), authenticated);
+        if(requestTelemetry&&Number(r.status)===429)requestTelemetry.rateLimitedAttempts++;
         last = r;
         // A superseded response cannot become new-account financial evidence.
         // On 429, first publish the throttle to the ORIGINAL scoped bucket.
@@ -949,27 +964,27 @@ export class KalshiClient {
     });
   }
 
-  async getLiveData(milestoneId) {
+  async getLiveData(milestoneId,{entryIntent=false}={}) {
     const id = String(milestoneId || '');
     if (!id) return null;
     const r = await this.request(
       'GET',
       `/live_data/milestone/${encodeURIComponent(id)}`,
       null,
-      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true },
+      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent },
     );
     if (!r.ok) throw new Error(`live_data ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
     return r.data?.live_data || r.data || null;
   }
 
-  async getGameStats(milestoneId) {
+  async getGameStats(milestoneId,{entryIntent=false}={}) {
     const id = String(milestoneId || '');
     if (!id) return null;
     const r = await this.request(
       'GET',
       `/live_data/milestone/${encodeURIComponent(id)}/game_stats`,
       null,
-      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true },
+      { timeoutMs: 1500, maxAttempts: 2, authenticated: false, preferFallbackHost: true,entryIntent },
     );
     if (!r.ok) throw new Error(`game_stats ${r.status}: ${String(r.data?.error || r.data?.message || 'request_failed')}`);
     return r.data || null;
@@ -1006,13 +1021,13 @@ export class KalshiClient {
     return out;
   }
 
-  async getMarket(ticker,{deadline}={}) {
-    const r = await this.request('GET', `/markets/${encodeURIComponent(ticker)}`,null,{deadline});
+  async getMarket(ticker,{deadline,protectiveRead=false}={}) {
+    const r = await this.request('GET', `/markets/${encodeURIComponent(ticker)}`,null,{deadline,protectiveRead});
     return r.ok ? parseMarket(r.data.market || r.data) : null;
   }
 
-  async getOrderbook(ticker) {
-    const r = await this.request('GET', `/markets/${encodeURIComponent(ticker)}/orderbook`);
+  async getOrderbook(ticker,{protectiveRead=false}={}) {
+    const r = await this.request('GET', `/markets/${encodeURIComponent(ticker)}/orderbook`,null,{protectiveRead});
     if (!r.ok) return null;
     const current=Object.hasOwn(r.data||{},'orderbook_fp');
     const ob=current?r.data.orderbook_fp:r.data?.orderbook;

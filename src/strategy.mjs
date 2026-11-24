@@ -1746,9 +1746,31 @@ export class StrategyEngine {
     return e;
   }
 
-  async createAnotherDimensionShadow(source,q,{sourcePeakCents=null}={}){
+  async createAnotherDimensionShadow(source,q,{sourcePeakCents=null,isCurrent=null}={}){
     const s=this.getSettings();
-    if(!isModelEnabled(s,'Another Dimension'))return null;
+    const simulationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
+    const currentScope=()=>{
+      const current=this.getSettings();
+      return current?.engineActive===true&&sameShadowScope(current,s)
+        &&isModelEnabled(current,'Another Dimension')
+        &&(isCurrent===null||(typeof isCurrent==='function'&&isCurrent()===true));
+    };
+    const currentSource=candidate=>{
+      if(!candidate?.id||candidate.archived===true||!openLike(candidate.status)
+        ||!ACTIVE_FEEDER_CONCEPTS.has(String(candidate.conceptName||''))
+        ||String(candidate.systemName||'')!==String(s.systemName||'')
+        ||String(candidate.ownerId||'')!==String(s.ownerId||'')
+        ||String(candidate.mode||'')!==String(s.mode||''))return false;
+      const epoch=Number(s.resetTimestampMs||0),sourceEpoch=candidate.shadowEpoch
+        ??candidate.entryConfig?.shadowSaint?.resetEpoch;
+      if(sourceEpoch!=null)return Number.isSafeInteger(Number(sourceEpoch))&&Number(sourceEpoch)===epoch;
+      // Historical Cosmo references did not stamp shadow_epoch. Their exact
+      // owner/mode identity and original creation time are the only supported
+      // current-session proof; an archived/pre-reset source is never revived.
+      const opened=Number(candidate.openedAtMs||0);
+      return Number.isSafeInteger(opened)&&opened>0&&opened>=epoch;
+    };
+    if(!currentScope()||!currentSource(source))return null;
     if(!source?.id||!q?.ticker||String(source.ticker||'')!==String(q.ticker||''))return null;
     if(!ACTIVE_FEEDER_CONCEPTS.has(String(source.conceptName||''))||!openLike(source.status))return null;
     if(String(source.systemName||'')!==String(s.systemName||'')||String(source.ownerId||'')!==String(s.ownerId||'')||String(source.mode||'')!==String(s.mode||''))return null;
@@ -1765,11 +1787,16 @@ export class StrategyEngine {
     if(Number(exec.avgCents)>Number(s.geminiMaxPriceCents)+1e-9)return null;
     if(typeof this.db?.entryByConceptSourceTradeId==='function'){
       const existing=await this.db.entryByConceptSourceTradeId(s.systemName,'Another Dimension',source.id).catch(()=>null);
-      if(existing)return null;
+      if(existing||!currentScope())return null;
     }
     if(typeof this.db?.openEntriesByTicker==='function'){
       const open=await this.db.openEntriesByTicker(s.systemName,q.ticker).catch(()=>[]);
-      if((open||[]).some((e)=>e.conceptName==='Another Dimension'))return null;
+      if(!currentScope()||(open||[]).some((e)=>e.conceptName==='Another Dimension'))return null;
+    }
+    if(typeof this.db?.entryById==='function'){
+      const durable=await this.db.entryById(source.id).catch(()=>null);
+      if(!currentScope()||!currentSource(durable)||durable.id!==source.id
+        ||String(durable.ticker)!==String(q.ticker))return null;
     }
     const count=requested;
     const entryPriceCents=Math.round(Number(exec.avgCents));
@@ -1794,7 +1821,7 @@ export class StrategyEngine {
       },
       feederState:{phase:'ANOTHER_DIMENSION',universe:'Gemini',sourceShadowTradeId:String(source.id),sourceCosmo:String(source.conceptName)},
     };
-    const simulationToken=s.mode==='SIMULATION'?this.captureSimulationMutationToken?.():null;
+    if(!currentScope()||!currentSource(source))return null;
     let releaseSimulationMutation=null;
     if(s.mode==='SIMULATION'&&this.enterSimulationMutation){
       releaseSimulationMutation=this.enterSimulationMutation(simulationToken);
@@ -4560,29 +4587,40 @@ export class StrategyEngine {
     return opened;
   }
 
-  async materializePhoenixSignal(q, qualification, now=Date.now()) {
+  async materializePhoenixSignal(q, qualification, now=Date.now(),{isCurrent=null}={}) {
     const s=this.getSettings(),ticker=String(q?.ticker||qualification?.ticker||'');
-    if(!ticker||!isModelEnabled(s,'Phoenix'))return null;
+    const currentWork=()=>{
+      const current=this.getSettings();
+      return current?.engineActive===true&&sameShadowScope(current,s)&&isModelEnabled(current,'Phoenix')
+        &&(isCurrent===null||(typeof isCurrent==='function'&&isCurrent()===true));
+    };
+    if(!ticker||!currentWork())return null;
     const localKey=`Phoenix|${ticker}`;
     if(this.phoenixSignalLocks.has(localKey))return null;
     this.phoenixSignalLocks.add(localKey);
     let unlock=null;
     try{
-      const current=this.market?.getQuote?.(ticker)||q;
+      let current=this.market?.getQuote?.(ticker)||q;
       const at=Number.isFinite(Number(now))?Number(now):Date.now();
       const valid=revalidatePhoenixQualification(qualification,current,s,at);
       if(!valid.ok){await this.audit('phoenix_materialization_blocked',{ticker,reason:valid.reason,signalId:qualification?.signalId||null});return null;}
       if(typeof this.db?.acquireCosmoSignalLock==='function'){
         unlock=await this.db.acquireCosmoSignalLock(s.systemName,'Phoenix',ticker);
         if(!unlock){await this.audit('phoenix_materialization_lock_busy',{ticker,signalId:qualification?.signalId||null});return null;}
+        if(!currentWork())return null;
       }
       const open=typeof this.db?.openEntriesByTicker==='function'?await this.db.openEntriesByTicker(s.systemName,ticker):[];
+      if(!currentWork())return null;
       for(const e of open||[]){
         if(e.conceptName!=='Phoenix')continue;
         if(phoenixSignalActive(e,s,at))return null;
         await this.db.updateEntry?.(e.id,{status:'closed',closeReason:'phoenix_signal_expired',closedAtMs:at,updatedAtMs:at});
+        if(!currentWork())return null;
       }
-      const source={...structuredClone(qualification),materializedAtMs:at,expiresAtMs:Number(qualification.expiresAtMs||at+PHOENIX_COSMO.signalTtlMs)};
+      current=this.market?.getQuote?.(ticker)||q;
+      const finalAt=Date.now();
+      if(!currentWork()||!revalidatePhoenixQualification(qualification,current,this.getSettings(),finalAt).ok)return null;
+      const source={...structuredClone(qualification),materializedAtMs:finalAt,expiresAtMs:Number(qualification.expiresAtMs||finalAt+PHOENIX_COSMO.signalTtlMs)};
       const entry=await this.createGhost('Phoenix',current,Number(source.signalAskCents),Number(current?.gameStartTimeMs)||null,{
         sourceTradeId:String(source.signalId),currentPriceCents:Number(current?.yesBid||source.signalBidCents),peakPriceCents:Number(current?.yesBid||source.signalBidCents),entryConfigExtra:{phoenixSource:source},feederState:{phase:'PHOENIX',expiresAtMs:source.expiresAtMs},
       });

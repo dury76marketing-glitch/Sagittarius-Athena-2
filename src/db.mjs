@@ -5,7 +5,9 @@ import {q17LivePendingReserveDecision} from './q17LiveCapitalAdmissibility.mjs';
 import {createLiveFundingStore,LIVE_FUNDING_JOURNAL_SQL} from './liveFundingJournal.mjs';
 import {maximumSettlementNetAdmission,frozenRecoveryEconomicTargetMatches} from './executionEconomics.mjs';
 import {OPS_SCHEMA_SQL} from './operationalSafety.mjs';
-import {authorityHash} from './authority.mjs';
+import {authorityHash,canonicalJson} from './authority.mjs';
+import {commitSimulationReset,reconcileSimulationReset} from './simulationResetPersistence.mjs';
+import {durableGameClockState,restoreGameClockState,latestSameEventClockState} from './gameClockRuntime.mjs';
 import {INDEPENDENT_LIFECYCLE_VERSION,INDEPENDENT_LIFECYCLE_SQL,INDEPENDENT_MAX_RETRY_GENERATION,independentCapitalId,independentSeatState} from './independentRecoveryLifecycle.mjs';
 import {loadOrCreateCloneIdentity} from './cloneIdentity.mjs';
 import {athenaStarlightTriggerConfig,athenaStarlightTriggerDecision,ATHENA_STARLIGHT_TRIGGER_SQL} from './athenaStarlightTrigger.mjs';
@@ -2076,6 +2078,13 @@ export class Database {
       await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))',['MW-R25-SAVED-RUNTIME-CARD']);
       const previous=await client.query("select value from sag_settings where key='runtime' for update");
       const prior=previous.rows?.[0]?.value||{};
+      // A stale process/control writer must never restore an older execution
+      // epoch after an atomic reset. Validate under the same admission lock.
+      if(prior.systemName===clean.systemName&&prior.ownerId===clean.ownerId
+        &&Number(clean.resetTimestampMs||0)<Number(prior.resetTimestampMs||0)){
+        const error=new Error('runtime_settings_stale_reset_epoch');
+        error.code='RUNTIME_SETTINGS_STALE_RESET_EPOCH';throw error;
+      }
       const revisionQuery=await client.query("select value from sag_settings where key='runtime_commit_revision' for update");
       const revision=Math.max(0,Math.trunc(Number(revisionQuery.rows?.[0]?.value?.revision||0)))+1;
       if(!Number.isSafeInteger(revision))throw new Error('runtime_settings_revision_overflow');
@@ -3810,6 +3819,13 @@ export class Database {
       await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))',['MW-R25-SAVED-RUNTIME-CARD']);
       const previous=await client.query("select value from sag_settings where key='runtime' for update");
       const prior=previous.rows?.[0]?.value||{};
+      // A stale process/control writer must never restore an older execution
+      // epoch after an atomic reset. Validate under the same admission lock.
+      if(prior.systemName===clean.systemName&&prior.ownerId===clean.ownerId
+        &&Number(clean.resetTimestampMs||0)<Number(prior.resetTimestampMs||0)){
+        const error=new Error('runtime_settings_stale_reset_epoch');
+        error.code='RUNTIME_SETTINGS_STALE_RESET_EPOCH';throw error;
+      }
       const revisionQuery=await client.query("select value from sag_settings where key='runtime_commit_revision' for update");
       const revision=Math.max(0,Math.trunc(Number(revisionQuery.rows?.[0]?.value?.revision||0)))+1;
       if(!Number.isSafeInteger(revision))throw new Error('runtime_settings_revision_overflow');
@@ -6410,35 +6426,78 @@ export class Database {
   async deleteStaleTrackers(systemName,keepTickers=[]){if(!keepTickers.length){await this.pool.query('delete from sag_trackers where system_name=$1',[systemName]);return;}await this.pool.query('delete from sag_trackers where system_name=$1 and not (ticker = any($2::text[]))',[systemName,keepTickers]);}
   async clearTrackers(systemName){await this.pool.query('delete from sag_trackers where system_name=$1',[systemName]);}
 
+  async commitSimulationReset(request){return commitSimulationReset(this.pool,request);}
+  async reconcileSimulationReset(request){return reconcileSimulationReset(this.pool,request);}
+
   async gameClockStates(systemName,eventTickers=[]){
     const events=[...new Set((eventTickers||[]).map(String).filter(Boolean))];
     if(!events.length)return new Map();
     const r=await this.pool.query('select event_ticker,state,last_updated_ms from sag_game_clock_authority where system_name=$1 and event_ticker = any($2::text[])',[systemName,events]);
-    return new Map(r.rows.map(x=>[x.event_ticker,x.state&&typeof x.state==='object'?x.state:{}]));
+    return new Map(r.rows.map(x=>[x.event_ticker,restoreGameClockState(x.state,x.event_ticker)]));
   }
   async upsertGameClockState(systemName,eventTicker,state){
     if(!eventTicker)return {written:false,state:null};
+    state=durableGameClockState(state,eventTicker);
     const checkedAtMs=Number(state?.lastCheckedAtMs||0);
     if(String(state?.eventTicker||'')!==String(eventTicker)||!Number.isSafeInteger(checkedAtMs)||checkedAtMs<=0)
       throw new Error('game_clock_persistence_invalid_state');
-    // R28: an older process/scan must not overwrite newer durable authority.
-    // FINAL stays terminal even when a delayed LIVE response has a later local
-    // timestamp. Proven FINAL also supersedes a newer nonterminal snapshot:
-    // local receipt order cannot reopen a finished event. Persistence time is
-    // retention metadata, never sporting proof.
-    const result=await this.pool.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms)
-      values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update
-      set state=excluded.state,last_updated_ms=excluded.last_updated_ms
-      where (coalesce(sag_game_clock_authority.state->>'phase','')<>'FINAL' or excluded.state->>'phase'='FINAL')
-        and ((excluded.state->>'phase'='FINAL' and coalesce(sag_game_clock_authority.state->>'phase','')<>'FINAL')
-          or (case when jsonb_typeof(sag_game_clock_authority.state->'lastCheckedAtMs')='number'
-            then (sag_game_clock_authority.state->>'lastCheckedAtMs')::numeric else 0 end)<=$5::numeric)
-      returning state`,[systemName,eventTicker,state,Date.now(),checkedAtMs]);
-    if(result.rowCount)return {written:true,state:result.rows[0].state};
-    // A separate statement observes a concurrent winner after ON CONFLICT's
-    // row lock; a same-statement snapshot could miss that newly committed row.
+    const incoming=canonicalJson(state);
+    // Use the same structural/provenance normalization as runtime authority.
+    // A raw legacy pregame flag or malformed interval must not create a higher
+    // SQL source version than the runtime recognizes. Optimistic equality
+    // fences concurrent writers without holding a transaction across work.
+    for(let attempt=0;attempt<4;attempt++){
+      const read=await this.pool.query('select state from sag_game_clock_authority where system_name=$1 and event_ticker=$2',[systemName,eventTicker]);
+      const raw=read.rows[0]?.state??null,prior=restoreGameClockState(raw,eventTicker);
+      const selected=latestSameEventClockState(eventTicker,prior,state);
+      if(prior&&canonicalJson(selected)!==incoming)return {written:false,state:prior};
+      const result=await this.pool.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms)
+        values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update
+        set state=excluded.state,last_updated_ms=excluded.last_updated_ms
+        where sag_game_clock_authority.state is not distinct from $5::jsonb
+        returning state`,[systemName,eventTicker,state,Date.now(),raw]);
+      if(result.rowCount)return {written:true,state:restoreGameClockState(result.rows[0].state,eventTicker)};
+    }
+    // A quiet event may never be resolved again. After repeated optimistic
+    // races, make new negative sporting knowledge durable under a short lock
+    // on this event only. No provider I/O or runtime-settings lock is involved.
+    if(['FINAL','CONFLICT'].includes(state.phase)){
+      const client=await this.pool.connect();let inTx=false;
+      try{
+        await client.query('BEGIN');inTx=true;
+        await client.query("set local lock_timeout='1500ms'");
+        await client.query("set local statement_timeout='5000ms'");
+        // Handle a concurrently inserted or pruned row before selecting. The
+        // false UPDATE predicate locks a conflict row without writing it, so
+        // a retention prune cannot remove it between here and FOR UPDATE.
+        const created=await client.query(`insert into sag_game_clock_authority(system_name,event_ticker,state,last_updated_ms)
+          values($1,$2,$3,$4) on conflict(system_name,event_ticker) do update
+          set state=sag_game_clock_authority.state where false returning state`,
+        [systemName,eventTicker,state,Date.now()]);
+        let result;
+        if(created.rowCount)result={written:true,state:restoreGameClockState(created.rows[0].state,eventTicker)};
+        else{
+          const locked=await client.query('select state from sag_game_clock_authority where system_name=$1 and event_ticker=$2 for update',[systemName,eventTicker]);
+          const prior=restoreGameClockState(locked.rows[0]?.state,eventTicker);
+          const selected=latestSameEventClockState(eventTicker,prior,state);
+          if(prior&&canonicalJson(selected)!==incoming)result={written:false,state:prior};
+          else{
+            const written=await client.query('update sag_game_clock_authority set state=$3,last_updated_ms=$4 where system_name=$1 and event_ticker=$2 returning state',
+              [systemName,eventTicker,state,Date.now()]);
+            if(written.rowCount!==1)throw new Error('game_clock_negative_persistence_row_missing');
+            result={written:true,state:restoreGameClockState(written.rows[0].state,eventTicker)};
+          }
+        }
+        await client.query('COMMIT');inTx=false;return result;
+      }catch(error){
+        if(inTx)try{await client.query('ROLLBACK');inTx=false;}catch{}
+        throw error;
+      }finally{client.release(inTx?new Error('game_clock_negative_persistence_incomplete'):undefined);}
+    }
+    // Bounded positive-proof contention is a wait, never permission to
+    // publish stale proof. Its normal future refresh can retry persistence.
     const current=await this.pool.query('select state from sag_game_clock_authority where system_name=$1 and event_ticker=$2',[systemName,eventTicker]);
-    return {written:false,state:current.rows[0]?.state||null};
+    return {written:false,state:restoreGameClockState(current.rows[0]?.state,eventTicker)};
   }
   async pruneGameClockStates(systemName,beforeMs){await this.pool.query('delete from sag_game_clock_authority where system_name=$1 and last_updated_ms<$2',[systemName,Number(beforeMs)||0]);}
 

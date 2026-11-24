@@ -67,7 +67,7 @@ import { FEEDER_SIGNAL_INTELLIGENCE } from './feederSignalIntel.mjs';
 import { PhoenixCosmoEngine } from './phoenix.mjs';
 import { PORTFOLIO_CONCEPTS, ACTIVE_PORTFOLIO_CONCEPTS, RETIRED_PORTFOLIO_CONCEPTS, FEEDER_CONCEPTS, ACTIVE_FEEDER_CONCEPTS, RETIRED_FEEDER_CONCEPTS, SHADOW_ATTACK_CONCEPTS, SHADOW_SAINT_ARCHITECTURE, isShadowSaintConcept, isShadowSaintEntry, SHADOW_SAINT_QUOTE_MAX_AGE_MS, executionMarketFamilyExclusion, MARKET_FAMILY_EXECUTION_EXCLUSION, EXECUTION_ATTACK_DISPLAY, GALACTIC_EXPLOSION, CI1_WALL_CLONE, COSMO_ROUTING, LIGHTNING_PLASMA, PHOENIX_COSMO, ATHENA_EXCLAMATION, SCARLET_NEEDLE, CRYSTAL_WALL, GEMINI_UNIVERSE, ANOTHER_DIMENSION, SAGITTARIUS_JUSTICE_ARROW, AURORA_EXECUTION, kalshiGeneralTakerFeeEstimateCents, computeLiveStatus, MOMENTUM, RECOVERY, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, ULTIMATE_PROFIT_GUARD, APEX_PROFIT_GUARD, PROTECTED_RUNNER_INTELLIGENCE, PROFIT_LEARNING_INTELLIGENCE, ATHENA_EXIT_INTELLIGENCE, GOLDEN_EYE, ATOMIC_THUNDER, ATOMIC_THUNDER_BOLT, ATOMIC_THUNDER_PATTERN_GUARDIAN, COSMO_SHADOW_TRADING, ATHENA_COMMANDER, ARAYASHIKI, INFINITY_BREAK, POST_EXIT_RESEARCH } from './doctrine.mjs';
 import { GameClockAuthority, GAME_CLOCK_AUTHORITY, isConfirmedGameClockState, isEntryAuthorizedGameClockState, normalizeGameClockState } from './gameClock.mjs';
-import {EventClockRuntime,latestSameEventClockState} from './gameClockRuntime.mjs';
+import {EventClockRuntime,latestSameEventClockState,expireGameClockAuthorization} from './gameClockRuntime.mjs';
 import {TradingFunnel} from './tradingFunnel.mjs';
 import { AtomicThunderBoltEngine, atomicThunderBoltFeatures } from './opportunity.mjs';
 
@@ -285,18 +285,24 @@ export class SimulationMutationGate {
   constructor(){this.epoch=0;this.blocked=false;this.active=0;this.waiters=[];}
   capture(){return{epoch:this.epoch,blocked:this.blocked};}
   enter(token){
-    if(this.blocked||!token||Number(token.epoch)!==this.epoch)return null;
+    if(this.blocked||!token||token.blocked===true||Number(token.epoch)!==this.epoch)return null;
     this.active+=1;let released=false;
     return()=>{if(released)return;released=true;this.active=Math.max(0,this.active-1);if(this.active===0){const waiters=this.waiters.splice(0);for(const resolve of waiters)resolve();}};
   }
-  async blockAndDrain(){
+  async blockAndDrain({timeoutMs=15000}={}){
     if(this.blocked)throw new Error('simulation_reset_already_in_progress');
     this.blocked=true;this.epoch+=1;
-    if(this.active>0)await new Promise((resolve)=>this.waiters.push(resolve));
+    if(this.active>0)await new Promise((resolve,reject)=>{
+      let timer;
+      const done=()=>{clearTimeout(timer);const i=this.waiters.indexOf(done);if(i>=0)this.waiters.splice(i,1);resolve();};
+      this.waiters.push(done);
+      timer=setTimeout(()=>{const i=this.waiters.indexOf(done);if(i>=0)this.waiters.splice(i,1);
+        reject(new Error('simulation_reset_drain_timeout'));},Math.max(1,Math.min(30000,Number(timeoutMs)||15000)));
+    });
     return{epoch:this.epoch,active:this.active};
   }
   release(){this.blocked=false;}
-  snapshot(){return{version:'SIM-RESET-GATE-V1',epoch:this.epoch,blocked:this.blocked,active:this.active,waiting:this.waiters.length};}
+  snapshot(){return{version:'SIM-RESET-GATE-V2',epoch:this.epoch,blocked:this.blocked,active:this.active,waiting:this.waiters.length};}
 }
 
 // HF2 crash orchestration is independent of any one Cosmo source. CI1 wakes
@@ -322,6 +328,7 @@ export class SagittariusEngine {
     this.settingsMutationTail = Promise.resolve();
     this.simulationMutationGate = new SimulationMutationGate();
     this.simulationResetPromise = null;
+    this.simulationResetPending = null;
     this.intelligenceHydration = {legacyAthena:'IDLE',athenaCommander:'IDLE',atomicThunderResearch:'IDLE',lastError:null,startedAtMs:0,completedAtMs:0};
     this.intelligenceHydrationPromise = null;
     this.cyclePromise = null;
@@ -988,8 +995,14 @@ export class SagittariusEngine {
       }
       return;
     }
+    if(!this.running||!this.referenceSignalGate().allowed)return;
     if(this.settings?.geminiEnabled!==true)return;
     if(!sources.length)return;
+    const entryWorkRevision=this.runtimeSettingsSafetyRevision||0;
+    const queuedScope={...this.settings};
+    const entryStillCurrent=()=>this.running===true
+      &&entryWorkRevision===(this.runtimeSettingsSafetyRevision||0)
+      &&sameShadowScope(queuedScope,this.settings)&&this.referenceSignalGate().allowed;
     // Same visible market book should produce at most one durable Gemini-open
     // attempt. This bounds DB/lock churn without changing the qualification.
     const bookMs=Number(this.market?.getBook?.(ticker)?.updatedAtMs||q.updatedAtMs||0);
@@ -1006,16 +1019,19 @@ export class SagittariusEngine {
       this.anotherDimensionStats.qualified+=1;
       this.anotherDimensionStats.lastEvent={status:'QUALIFIED',atMs:Date.now(),universe:'Gemini',attack:'Another Dimension',sourceTradeId:source.id,ticker,riseCents:qualification.riseCents,pullbackCents:qualification.pullbackCents};
       this.anotherDimensionQueue.enqueue(`open:${ticker}`,async()=>{
-        if(this.anotherDimensionOpenByTicker.has(ticker))return;
+        if(!entryStillCurrent()||this.anotherDimensionOpenByTicker.has(ticker))return;
         const durable=typeof this.db?.entryById==='function'?await this.db.entryById(source.id).catch(()=>null):source;
-        if(!durable||!openLike(durable.status)||!ACTIVE_FEEDER_CONCEPTS.has(String(durable.conceptName||'')))return;
+        if(!entryStillCurrent()||!durable||durable.archived===true
+          ||!openLike(durable.status)||!ACTIVE_FEEDER_CONCEPTS.has(String(durable.conceptName||'')))return;
         let unlock=null;
         try{
           if(typeof this.db?.acquireHunterTickerLock==='function')unlock=await this.db.acquireHunterTickerLock(this.settings.systemName,`gemini-another-dimension:${ticker}`);
           if(typeof this.db?.acquireHunterTickerLock==='function'&&!unlock){this.anotherDimensionStats.blocked+=1;return;}
+          if(!entryStillCurrent())return;
           const freshQ=this.market?.getQuote?.(ticker)||q;
-          const opened=await this.strategy.createAnotherDimensionShadow(durable,freshQ,{sourcePeakCents:this.anotherDimensionSourcePeaks.get(String(durable.id))});
-          if(opened){this.anotherDimensionStats.opened+=1;this.rememberAnotherDimension(opened);this.anotherDimensionStats.lastEvent={status:'OPENED',atMs:Date.now(),universe:'Gemini',attack:'Another Dimension',entryId:opened.id,sourceTradeId:opened.sourceTradeId,ticker};}
+          const opened=await this.strategy.createAnotherDimensionShadow(durable,freshQ,{
+            sourcePeakCents:this.anotherDimensionSourcePeaks.get(String(durable.id)),isCurrent:entryStillCurrent});
+          if(opened&&entryStillCurrent()){this.anotherDimensionStats.opened+=1;this.rememberAnotherDimension(opened);this.anotherDimensionStats.lastEvent={status:'OPENED',atMs:Date.now(),universe:'Gemini',attack:'Another Dimension',entryId:opened.id,sourceTradeId:opened.sourceTradeId,ticker};}
         }finally{if(unlock)await unlock().catch(()=>{});}
       });
       break;
@@ -4200,9 +4216,15 @@ export class SagittariusEngine {
   queuePhoenixSignal(qualification,q=null) {
     const ticker=String(qualification?.ticker||q?.ticker||'');
     if(!ticker||!this.running||!this.strategy||!this.referenceSignalGate().allowed)return;
+    const entryWorkRevision=this.runtimeSettingsSafetyRevision||0;
+    const queuedScope={...this.settings};
+    const entryStillCurrent=()=>this.running===true
+      &&entryWorkRevision===(this.runtimeSettingsSafetyRevision||0)
+      &&sameShadowScope(queuedScope,this.settings)&&this.referenceSignalGate().allowed;
     const simulationToken=this.settings?.mode==='SIMULATION'?this.simulationMutationGate.capture():null;
     const queue=this.phoenixSignalQueue;
     queue.enqueue(`phoenix:${ticker}`,async()=>{
+      if(!entryStillCurrent())return;
       let releaseSimulationWork=null;
       if(this.settings?.mode==='SIMULATION'){
         releaseSimulationWork=this.simulationMutationGate.enter(simulationToken);
@@ -4211,7 +4233,7 @@ export class SagittariusEngine {
       try{
         const live=this.market?.getQuote?.(ticker)||q;
         if(!live)return;
-        await this.strategy.materializePhoenixSignal(live,qualification);
+        await this.strategy.materializePhoenixSignal(live,qualification,Date.now(),{isCurrent:entryStillCurrent});
       }finally{try{releaseSimulationWork?.();}catch{}}
     });
   }
@@ -5461,7 +5483,12 @@ export class SagittariusEngine {
   // engine control and restart rearm must never race stale whole-object saves.
   queueRuntimeSettingsMutation(action) {
     const prior=this.settingsMutationTail||Promise.resolve();
-    const run=prior.catch(()=>{}).then(action);
+    const run=prior.catch(()=>{}).then(async()=>{
+      // No whole-settings write may restore an old epoch after a lost reset
+      // COMMIT acknowledgement. The durable receipt resolves it first.
+      if(this.simulationResetPending)await this.reconcilePendingSimulationReset();
+      return action();
+    });
     this.settingsMutationTail=run.catch(()=>{});
     return run;
   }
@@ -5551,11 +5578,41 @@ export class SagittariusEngine {
       // A failed arm must fail CLOSED, but it must not switch off the engine
       // and leave SIMULATION unable to trade. Existing protective exits keep
       // running; LIVE new BUYs require persisted liveArmed=true.
-      this.raiseRuntimeSafetyFence({liveArmed:false},'runtime_settings_commit_failed');
-      try {await this.db.saveSettings({...this.settings});}catch(disarmError){error.disarmError=String(disarmError?.message||disarmError);}
+      const staleEpoch=error?.code==='RUNTIME_SETTINGS_STALE_RESET_EPOCH'
+        ||error?.message==='runtime_settings_stale_reset_epoch';
+      if(staleEpoch){
+        // A second process may have committed a reset while this process held
+        // an older settings snapshot. Reject this enable, refresh knowledge,
+        // and require a new explicit Start using the durable execution epoch.
+        // Never retry a stale whole-object save, including as a disarm attempt.
+        this.raiseRuntimeSafetyFence({engineActive:false,liveArmed:false},'runtime_settings_epoch_stale');
+        const identity={systemName:this.settings.systemName,ownerId:this.settings.ownerId};
+        try{
+          const durable=await this.db.loadSettings(freshInstallSettings(),{preserveRuntimeArm:true});
+          const epoch=Number(durable?.resetTimestampMs||0),currentEpoch=Number(this.settings.resetTimestampMs||0);
+          if(durable?.systemName!==identity.systemName||durable?.ownerId!==identity.ownerId
+            ||this.settings.systemName!==identity.systemName||this.settings.ownerId!==identity.ownerId
+            ||!Number.isSafeInteger(epoch)||epoch<currentEpoch)
+            throw new Error('runtime_settings_epoch_readback_scope_invalid');
+          const next={...durable,engineActive:false,liveArmed:false};
+          for(const key of ['liveDashboardStartMs','simulationDashboardStartMs'])
+            if(Number(this.settings[key]||0)>Number(next[key]||0))next[key]=this.settings[key];
+          this.raiseRuntimeSafetyFence(next,'runtime_settings_epoch_reconciled');
+          this.settings=next;
+          this.eventClockRuntime?.useScope?.(next);
+          this.invalidateOperatorTelemetry?.();
+          error.scopeReconciled=true;
+        }catch(readbackError){
+          error.scopeReadbackError=String(readbackError?.message||readbackError);
+        }
+      }else{
+        this.raiseRuntimeSafetyFence({liveArmed:false},'runtime_settings_commit_failed');
+        try {await this.db.saveSettings({...this.settings});}catch(disarmError){error.disarmError=String(disarmError?.message||disarmError);}
+      }
       this.settingsPersistence={...(this.settingsPersistence||{}),version:'APS2-SERIALIZED-RUNTIME-CONTROLS',lastError:String(error?.message||error)};
       await Promise.resolve(this.db.audit?.('error','settings_persistence_verification_failed',{
-        release:RELEASE,changedKeys,message:String(error?.message||error),disarmError:error.disarmError||null})).catch(()=>{});
+        release:RELEASE,changedKeys,message:String(error?.message||error),disarmError:error.disarmError||null,
+        scopeReconciled:error.scopeReconciled===true,scopeReadbackError:error.scopeReadbackError||null})).catch(()=>{});
       throw error;
     }
   }
@@ -5835,6 +5892,10 @@ export class SagittariusEngine {
     this.justiceArrowWatches?.clear?.();
     this.crystalWallWatches?.clear?.();
     this.entryEvaluationQueue?.clear?.();
+    this.phoenixSignalQueue?.clear?.();
+    // Invalidate same-epoch work synchronously. Keep the runtime's separate
+    // intent reconciliation timer alive while entry admission is stopped.
+    this.r17?.resetScope?.(this.settings,{force:true});
     return reason;
   }
 
@@ -5848,6 +5909,12 @@ export class SagittariusEngine {
       const committed=await this.persistRuntimeSettings({...this.settings,engineActive:on,liveArmed:on&&this.settings.liveArmed===true},
         {safetyRevision,changedKeys:['engineActive','liveArmed']});
       if(on&&committed.superseded)throw new Error('engine_start_superseded_by_safety_control');
+      if(on){
+        this.r17?.resetScope?.(this.settings);
+        this.r17?.start?.();
+        this.r17?.requestTick?.();
+        this.requestScan();
+      }
       await Promise.resolve(this.db.audit?.('info',on?'engine_started':'engine_stopped',
         {release:RELEASE,engineActive:this.settings.engineActive===true})).catch(()=>{});
       return committed.settings;
@@ -5875,39 +5942,95 @@ export class SagittariusEngine {
     });
   }
 
+  applyCommittedSimulationReset(result) {
+    const receipt=result?.receipt,next=result?.settings;
+    if(result?.outcome!=='COMMITTED'||!receipt||next?.mode!=='SIMULATION'
+      ||next.systemName!==this.settings.systemName||next.ownerId!==this.settings.ownerId
+      ||Number(next.resetTimestampMs)!==Number(receipt.toEpoch)
+      ||Number(receipt.toEpoch)<=Number(receipt.fromEpoch))throw new Error('simulation_reset_commit_invalid');
+    // Preserve a Stop or reporting reset that arrived while COMMIT was in
+    // flight. Never copy the old execution epoch from its safety snapshot.
+    const current=this.settings,settings={...next,engineActive:false,liveArmed:false};
+    for(const key of ['liveDashboardStartMs','simulationDashboardStartMs']){
+      if(Number(current[key]||0)>Number(settings[key]||0))settings[key]=current[key];
+    }
+    const scopeChanged=!sameShadowScope(current,settings);
+    this.settings=settings;
+    this.runtimeSettingsSafetyState={...this.runtimeSettingsSafetyState,mode:settings.mode,
+      engineActive:false,liveArmed:false,resetTimestampMs:settings.resetTimestampMs,
+      liveDashboardStartMs:settings.liveDashboardStartMs??null,
+      simulationDashboardStartMs:settings.simulationDashboardStartMs??null};
+    if(scopeChanged)this.starlightRecoveryScopeRevision=(this.starlightRecoveryScopeRevision||0)+1;
+    this.starlightRecoveryBootPending=true;
+    // Invalidate execution state only after the archive/epoch commit is known.
+    // Learning, trackers, Athena memory, clock truth and LIVE protection remain.
+    this.anotherDimensionOpenByTicker?.clear?.();
+    this.anotherDimensionRecent?.clear?.();
+    this.anotherDimensionRuntime?.clear?.();
+    this.anotherDimensionSourcePeaks?.clear?.();
+    this.geminiOpenAttemptBookMs?.clear?.();
+    this.activeCosmosByTicker?.clear?.();
+    this.refreshCrashPriorityTickers();
+    this.haltNewEntries('simulation_reset_committed');
+    this.ci1ConsumedEpisodes?.clear?.();
+    this.starlightRecoveryWatches?.clear?.();
+    this.starlightRecoveryInFlight?.clear?.();
+    this.eventClockRuntime?.useScope?.(settings);
+    this.r17?.resetScope?.(settings);
+    this.settingsPersistence={version:'R38-ATOMIC-SIM-RESET',lastVerifiedAtMs:Date.now(),
+      lastRevision:receipt.revision,lastCommittedAtMs:receipt.changedAtMs,
+      lastKeys:['resetTimestampMs','engineActive','liveArmed'],
+      lastValues:{resetTimestampMs:settings.resetTimestampMs,engineActive:false,liveArmed:false},lastError:null};
+    this.simulationResetReceipt=receipt;
+    this.invalidateStateSnapshot();
+    this.invalidateOperatorTelemetry();
+    return result.archivedEntries;
+  }
+
+  async reconcilePendingSimulationReset() {
+    const request=this.simulationResetPending;if(!request)return null;
+    const result=await this.db.reconcileSimulationReset(request);
+    if(result?.outcome==='COMMITTED')this.applyCommittedSimulationReset(result);
+    else if(result?.outcome!=='ROLLED_BACK')throw new Error('simulation_reset_outcome_unresolved');
+    this.simulationResetPending=null;
+    return result;
+  }
+
   async resetSimulation() {
     if (this.settings.mode !== 'SIMULATION') throw new Error('Simulation reset is only allowed in SIMULATION mode');
     if(this.simulationResetPromise)return this.simulationResetPromise;
     const requestedSystem=this.settings.systemName,requestedOwner=this.settings.ownerId;
-    this.raiseRuntimeSafetyFence({engineActive:false},'simulation_reset');
+    const safetyRevision=this.raiseRuntimeSafetyFence({engineActive:false,liveArmed:false},'simulation_reset');
     const run=this.queueRuntimeSettingsMutation(async()=>{
       if(this.settings.mode!=='SIMULATION'||this.settings.systemName!==requestedSystem||this.settings.ownerId!==requestedOwner)
         throw new Error('simulation_reset_scope_changed');
+      // Persist the operator's Stop before the mutation boundary. A failed
+      // reset then stays stopped after restart, with its old ledger/epoch intact.
+      await this.persistRuntimeSettings({...this.settings,engineActive:false,liveArmed:false},
+        {safetyRevision,changedKeys:['engineActive','liveArmed']});
       const before=this.simulationMutationGate.snapshot();
-      await this.simulationMutationGate.blockAndDrain();
       try{
-        const n = await this.db.archiveSimulation(this.settings.systemName);
-        // Performance reset archives economic SIM rows only. The following are
-        // intelligence and MUST survive: tracker rows, MarketHub histories,
-        // crash/learning state, Atomic Thunder observations and Athena memory.
-        this.anotherDimensionOpenByTicker?.clear?.();
-        this.anotherDimensionRecent?.clear?.();
-        this.anotherDimensionRuntime?.clear?.();
-        this.anotherDimensionSourcePeaks?.clear?.();
-        this.geminiOpenAttemptBookMs?.clear?.();
-        this.activeCosmosByTicker?.clear?.();
-        this.refreshCrashPriorityTickers();
-        this.haltNewEntries?.('simulation_reset');
-        this.ci1ConsumedEpisodes?.clear?.();
-        this.starlightRecoveryWatches?.clear?.();
-        this.starlightRecoveryInFlight?.clear?.();
-        const resetTimestampMs=Math.max(Date.now(),Number(this.settings.resetTimestampMs||0)+1);
-        const safetyRevision=this.raiseRuntimeSafetyFence({resetTimestampMs,engineActive:false},'simulation_reset_committed');
-        await this.persistRuntimeSettings({...this.settings},{safetyRevision,changedKeys:['resetTimestampMs','engineActive']});
-        this.invalidateStateSnapshot();
-        this.invalidateOperatorTelemetry();
-        await this.db.audit('info','simulation_reset_completed',{release:RELEASE,archivedEntries:n,intelligencePreserved:true,trackersCleared:false,marketHistoriesCleared:false,athenaMemoryPreserved:true,atomicThunderHistoryPreserved:true,mutationGateBefore:before,mutationGateAtArchive:this.simulationMutationGate.snapshot()}).catch(()=>{});
+        await this.simulationMutationGate.blockAndDrain();
+        const expectedEpoch=Number(this.settings.resetTimestampMs||0);
+        const request={requestId:randomUUID(),systemName:requestedSystem,ownerId:requestedOwner,
+          expectedEpoch,resetEpoch:Math.max(Date.now(),expectedEpoch+1),
+          safetyRevision:this.runtimeSettingsSafetyRevision||0,
+          readSafetyState:()=>({revision:this.runtimeSettingsSafetyRevision||0,settings:this.settings})};
+        this.simulationResetPending=request;
+        const result=await this.db.commitSimulationReset(request);
+        const n=this.applyCommittedSimulationReset(result);
+        this.simulationResetPending=null;
+        await Promise.resolve(this.db.audit?.('info','simulation_reset_completed',
+          {release:RELEASE,archivedEntries:n,resetReceipt:result.receipt,intelligencePreserved:true,
+           trackersCleared:false,marketHistoriesCleared:false,athenaMemoryPreserved:true,
+           atomicThunderHistoryPreserved:true,mutationGateBefore:before,
+           mutationGateAtArchive:this.simulationMutationGate.snapshot()})).catch(()=>{});
         return n;
+      }catch(error){
+        if(error.resetOutcome==='ROLLED_BACK')this.simulationResetPending=null;
+        // An unresolved request remains behind queueRuntimeSettingsMutation's
+        // readback fence. It cannot be retried with a stale settings epoch.
+        this.invalidateStateSnapshot();throw error;
       }finally{this.simulationMutationGate.release();}
     });
     this.simulationResetPromise=run;
@@ -6532,25 +6655,35 @@ export class SagittariusEngine {
   currentGameClockState(eventTicker){return this.clockRuntime().current(String(eventTicker));}
 
   publishGameClockState(eventTicker,state,quotes=[]){
-    if(!state||String(state.eventTicker)!==String(eventTicker))return;
-    const seen=new Set(),apply=q=>{
+    if(!state||String(state.eventTicker)!==String(eventTicker))return null;
+    const related=[],seen=new Set(),add=q=>{
       if(!q||seen.has(q)||String(q.eventTicker||q.ticker)!==String(eventTicker))return;
-      seen.add(q);q.gameClockState=state;
-      q.gameStartTimeMs=isConfirmedGameClockState(state,eventTicker)?Number(state.actualStartMs):null;
+      seen.add(q);related.push(q);
     };
-    for(const q of quotes)apply(q);
-    for(const q of this.lastScanMarkets||[])apply(q);
-    for(const q of this.market?.quotes?.values?.()||[])apply(q);
-    for(const q of quotes)apply(this.market?.getQuote?.(q.ticker));
-    // Wake the existing bounded reader; no sibling waits for another price tick.
-    this.r17?.onGameClockEvidence?.(eventTicker);
+    for(const q of quotes)add(q);
+    for(const q of this.lastScanMarkets||[])add(q);
+    for(const q of this.market?.quotes?.values?.()||[])add(q);
+    for(const q of quotes)add(this.market?.getQuote?.(q.ticker));
+    const runtime=this.clockRuntime();
+    state=expireGameClockAuthorization(latestSameEventClockState(eventTicker,
+      runtime.current(eventTicker),state,...related.map(q=>q.gameClockState)),eventTicker,Date.now());
+    if(!state)return null;
+    state=runtime.adopt(eventTicker,state);
+    for(const q of related){
+      q.gameClockState=state;
+      q.gameStartTimeMs=isConfirmedGameClockState(state,eventTicker)?Number(state.actualStartMs):null;
+    }
+    // Wake only from the causally current event state; the reader coalesces
+    // unchanged evidence. Quote references cannot regress a terminal/conflict.
+    this.r17?.onGameClockEvidence?.(eventTicker,state);
+    return state;
   }
 
   async resolveClockForEvent(eventTicker,quotes,{priorState=null,forceFresh=false,allowGameStats=true}={}){
     const runtime=this.clockRuntime(),systemName=this.settings.systemName,generation=runtime.generation;
     const currentScope=()=>{runtime.useScope(this.settings);return generation===runtime.generation;};
     const exact=raw=>{const state=normalizeGameClockState(raw,eventTicker);return state?.eventTicker===String(eventTicker)?state:null;};
-    const state=await runtime.resolve(eventTicker,{forceFresh,allowGameStats},async memory=>{
+    let state=await runtime.resolve(eventTicker,{forceFresh,allowGameStats},async memory=>{
       let prior=latestSameEventClockState(eventTicker,memory,priorState,
         ...(quotes||[]).map(q=>q?.gameClockState));
       if(!prior&&typeof this.db?.gameClockStates==='function'){
@@ -6565,6 +6698,11 @@ export class SagittariusEngine {
       // A same-event FINAL is sticky; a late older result cannot be persisted
       // before the in-memory adoption check notices that it was superseded.
       let selected=latestSameEventClockState(eventTicker,runtime.current(eventTicker),prior,next);
+      // An observed terminal/conflict/denial takes effect immediately even if
+      // persistence is unavailable. A failed write cannot leave old LIVE
+      // permission active while the original evidence TTL runs out.
+      if(selected?.entryAuthorized!==true)
+        selected=this.publishGameClockState(eventTicker,selected,quotes)||selected;
       if(typeof this.db?.upsertGameClockState==='function'){
         const persisted=await runtime.persist(eventTicker,selected,prior,value=>this.db.upsertGameClockState(systemName,eventTicker,value),Date.now(),generation);
         selected=exact(persisted?.state);
@@ -6575,11 +6713,13 @@ export class SagittariusEngine {
         const report=()=>this.gameClock.auditTransition(eventTicker,prior,selected,quotes);
         if(typeof this.queueRuntimeDiagnostic==='function')this.queueRuntimeDiagnostic(report);
       }
-      return selected;
+      // Persistence and optional provider work can consume the remaining
+      // freshness budget. Recheck at publication, without restamping proof.
+      return expireGameClockAuthorization(selected,eventTicker,Date.now());
     });
     if(!currentScope())return null;
     if(state){
-      this.publishGameClockState(eventTicker,state,quotes);
+      state=this.publishGameClockState(eventTicker,state,quotes)||state;
       const evidence={candidateId:`clock:${eventTicker}`,eventTicker,
         stage:state.actualStartConfidence==='proven'?'actual_start_proven':
           state.phase==='BOUNDED'?'actual_start_bounded':
@@ -6595,6 +6735,7 @@ export class SagittariusEngine {
   async refreshGameClockForQuote(candidate,{forceFresh=false}={}){
     const ticker=String(candidate?.ticker||''),eventTicker=String(candidate?.eventTicker||ticker);
     if(!ticker||!eventTicker||!this.gameClock)return null;
+    const runtime=this.clockRuntime(),generation=runtime.generation;
     // Clock-only requests use official sporting data. Executable book/cash
     // validation remains in the order path; trades can never prove kickoff.
     const current=this.market?.getQuote?.(ticker)||candidate;
@@ -6605,9 +6746,10 @@ export class SagittariusEngine {
     for(const q of this.lastScanMarkets||[])add(q);
     const state=await this.resolveClockForEvent(eventTicker,siblings,{forceFresh,allowGameStats:true,
       priorState:candidate.gameClockState||null});
-    if(!state)return null;
-    this.publishGameClockState(eventTicker,state,[candidate,current]);
-    return {gameClockState:state,gameStartTimeMs:candidate.gameStartTimeMs,liveStatus:candidate.liveStatus};
+    runtime.useScope(this.settings);
+    if(!state||generation!==runtime.generation)return null;
+    const published=this.publishGameClockState(eventTicker,state,[candidate,current]);
+    return {gameClockState:published,gameStartTimeMs:candidate.gameStartTimeMs,liveStatus:candidate.liveStatus};
   }
 
   async evaluateEntryChain(markets, trackerMap, marketMap) {
@@ -7552,8 +7694,9 @@ export class SagittariusEngine {
       settings: { ...this.settings, allowLiveTrading: env.allowLiveTrading, liveReady: this.isLiveReady() },
       athenaExclamation:this.strategy?.athenaExclamation?.summary?.()||null,
       riskControls: {
-        resetSafetyVersion:'R60-HF1-SIMULATION-MUTATION-EPOCH-DRAIN',
-        simulationResetInProgress:Boolean(this.simulationResetPromise||this.simulationMutationGate?.blocked),
+        resetSafetyVersion:'R38-ATOMIC-SIMULATION-RESET',
+        simulationResetInProgress:Boolean(this.simulationResetPromise||this.simulationResetPending||this.simulationMutationGate?.blocked),
+        simulationResetOutcome:this.simulationResetPending?'reconciliation_pending':this.simulationResetReceipt?'committed':null,
         simulationMutationGate:this.simulationMutationGate?.snapshot?.()||null,
         intelligenceHydration:{...(this.intelligenceHydration||{}),tradingBlocked:false},
         athenaHistoricalMemoryLoad:{...(this.athenaCommander?.memoryLoad||{}),entryAuthorityBlockedUntilLoaded:false},

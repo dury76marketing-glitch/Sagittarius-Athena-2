@@ -348,6 +348,43 @@ export class GoldenSaintRepository {
         Math.max(1,Math.min(500,limit)),enabledFingerprints!==null,...allowed]);
     return r.rows.map(normalizedRecord);
   }
+  async tickerPage(scope,{after=null,limit=48,enabledFingerprints=null}={}){
+    assertScope(scope);
+    if(after!==null&&!idString(after))throw new Error('r17_ticker_cursor_invalid');
+    if(enabledFingerprints!==null&&(typeof enabledFingerprints!=='object'
+      ||Array.isArray(enabledFingerprints)))throw new Error('r17_page_fingerprint_map_invalid');
+    const cap=Math.max(1,Math.min(48,Math.floor(Number(limit)||1)));
+    const clauses=ALL_SAINTS.map((_,i)=>
+      `(saint=$${8+2*i}::text and card_fingerprint=$${9+2*i}::text)`).join(' or ');
+    const allowed=ALL_SAINTS.flatMap(saint=>[saint,enabledFingerprints?.[saint]||null]);
+    // A loose index cursor skips every duplicate ticker rather than scanning
+    // all watch rows for SELECT DISTINCT. Each step seeks the next ticker in
+    // the existing scoped (status,ticker) index; at most cap+1 seeks execute.
+    // The lookahead and recursion depth are bounded even with millions of
+    // watches. Scope and current card fingerprints apply at every step.
+    const r=await this.pool.query(`with recursive ticker_cohort(ticker,depth) as (
+      (select ticker,1 from sag_r17_golden_watches
+        where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+          and status='WATCHING' and ($5::text is null or ticker > $5)
+          and ($7::boolean=false or (${clauses}))
+        order by ticker limit 1)
+      union all
+      select next_ticker.ticker,prior.depth+1 from ticker_cohort prior
+        cross join lateral (
+          select ticker from sag_r17_golden_watches
+          where system_name=$1 and owner_id=$2 and mode=$3 and reset_epoch=$4
+            and status='WATCHING' and ticker > prior.ticker
+            and ($7::boolean=false or (${clauses}))
+          order by ticker limit 1
+        ) next_ticker
+      where prior.depth < $6
+    ) select ticker from ticker_cohort order by ticker limit $6`,
+      [scope.systemName,scope.ownerId,scope.mode,scope.resetEpoch,after,
+        cap+1,enabledFingerprints!==null,...allowed]);
+    const tickers=r.rows.slice(0,cap).map(row=>row.ticker);
+    return {tickers,hasMore:r.rows.length>cap,
+      nextCursor:r.rows.length>cap?tickers.at(-1):null};
+  }
   async get(scope,authorizationId){
     assertScope(scope);
     const r=await this.pool.query(`select * from sag_r17_golden_watches
@@ -522,6 +559,20 @@ export class GoldenSaintRepository {
           throw new Error('r17_sim_available_cash_insufficient');
       }
       const confirm=phase=>{
+        // Parent/capacity/cash checks and both writes await native SQL after
+        // the first eligibility proof. Apply the SAME five-second quote and
+        // executable-book limits again at each final transaction boundary,
+        // for every Saint. A still-fresh ten-second sporting clock cannot
+        // turn an expired five-second market observation into a SIM fill.
+        const now=Date.now();
+        const currentSignal=r17QualifiedObservationEvidence({watch:storedWatch,card,
+          quote:lastObservedQuote,now});
+        if(!currentSignal.ok||JSON.stringify(currentSignal.evidence)!==JSON.stringify(stamped))
+          throw new Error('r17_native_signal_qualification_expired');
+        const bookAt=Number(entry.entryConfig?.finalEntryConfirmation?.verifiedBookAtMs);
+        if(!Number.isSafeInteger(bookAt)||bookAt<=0||bookAt>now+2000||now-bookAt>5000
+          ||bookAt!==Number(entry.entryConfig?.goldenSaintR17?.finalBookObservedAtMs))
+          throw new Error('r17_native_executable_book_expired');
         if(confirmReservation===null)return;
         if(typeof confirmReservation!=='function')throw new Error('r17_reservation_confirmation_invalid');
         const decision=confirmReservation({settings:current,phase});

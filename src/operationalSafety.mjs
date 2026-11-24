@@ -171,24 +171,32 @@ export class BoundedCoalescingQueue {
 // Bounded waiting with explicit rejection. A timed-out queued request never starts
 // later; an already-started mutation is NEVER aborted/retried by this scheduler.
 export class RequestLane {
-  constructor(concurrency,pending,{reservedConcurrency=0,reservedPending=0}={}){
+  constructor(concurrency,pending,{reservedConcurrency=0,reservedPending=0,entryReservedConcurrency=0}={}){
     this.concurrency=concurrency;this.maximumPending=pending;
     // Reservations share the EXISTING total budget. Market reads cannot occupy
     // all account-proof slots, and no second/unbounded transport lane is added.
     this.reservedConcurrency=Math.max(0,Math.min(concurrency-1,reservedConcurrency));
     this.reservedPending=Math.max(0,Math.min(pending-1,reservedPending));
-    this.active=0;this.activeNormal=0;this.queue=[];this.rejected=0;this.completed=0;
+    this.entryReservedConcurrency=Math.max(0,Math.min(concurrency-this.reservedConcurrency-1,entryReservedConcurrency));
+    this.entryReservedPending=this.entryReservedConcurrency>0
+      ?Math.min(8,Math.max(0,pending-this.reservedPending-1)):0;
+    this.active=0;this.activeNormal=0;this.activeBackground=0;this.normalTurn=0;this.queue=[];this.rejected=0;this.completed=0;
     this.peakActive=0;this.peakPending=0;
     this.activeJobs=new Map();this.sequence=0;this.queueWaitTotalMs=0;this.queueWaitMaxMs=0;
   }
-  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false,owner='request'}={}){
+  run(fn,deadline=performance.now()+OPS_LIMITS.requestBudgetMs,{critical=false,owner='request',priority='normal'}={}){
     if(!Number.isFinite(deadline)||performance.now()>=deadline){this.rejected++;return Promise.reject(new Error('broker_request_queue_expired'));}
     const normalPending=this.queue.reduce((n,j)=>n+(j.critical?0:1),0);
-    if(this.queue.length>=this.maximumPending||(!critical&&normalPending>=this.maximumPending-this.reservedPending)){
+    const backgroundPending=this.queue.reduce((n,j)=>n+(!j.critical&&j.priority!=='clock'?1:0),0);
+    if(this.queue.length>=this.maximumPending
+      ||(!critical&&normalPending>=this.maximumPending-this.reservedPending)
+      ||(!critical&&priority!=='clock'
+        &&backgroundPending>=this.maximumPending-this.reservedPending-this.entryReservedPending)){
       this.rejected++;return Promise.reject(new Error('broker_request_backpressure'));
     }
     return new Promise((resolve,reject)=>{
       const job={fn,resolve,reject,deadline,timer:null,critical:critical===true,
+        priority:priority==='clock'||priority==='book'?priority:'normal',
         id:++this.sequence,owner:String(owner).slice(0,160),queuedAt:performance.now()};
       // Expiring WAITING work never cancels a dispatched broker mutation.
       job.timer=setTimeout(()=>{
@@ -202,8 +210,21 @@ export class RequestLane {
   }
   pump(){
     while(this.active<this.concurrency&&this.queue.length){
-      const normal=this.activeNormal<this.concurrency-this.reservedConcurrency
-        ?this.queue.findIndex(j=>!j.critical):-1;
+      const normalAvailable=this.activeNormal<this.concurrency-this.reservedConcurrency;
+      const backgroundAvailable=normalAvailable&&this.activeBackground<this.concurrency-this.reservedConcurrency-this.entryReservedConcurrency;
+      const book=backgroundAvailable?this.queue.findIndex(j=>!j.critical&&j.priority==='book'):-1;
+      const clock=normalAvailable?this.queue.findIndex(j=>!j.critical&&j.priority==='clock'):-1;
+      const background=backgroundAvailable
+        ?this.queue.findIndex(j=>!j.critical&&j.priority==='normal'):-1;
+      // Account/protected-exposure reads retain critical priority. Unfunded
+      // books and discovery share three slots, leaving one for entry clocks.
+      // Weighted round robin bounds service for every noncritical class.
+      const order=['clock','clock','clock','book','normal','book'];
+      const available={clock,book,normal:background};let normal=-1,nextTurn=this.normalTurn;
+      for(let offset=0;offset<order.length;offset++){
+        const turn=(this.normalTurn+offset)%order.length,found=available[order[turn]];
+        if(found>=0){normal=found;nextTurn=(turn+1)%order.length;break;}
+      }
       const critical=this.queue.findIndex(j=>j.critical);
       // Critical reads lead FIFO market work. With sustained critical traffic,
       // keep one slot making market progress too; total concurrency never grows.
@@ -212,12 +233,13 @@ export class RequestLane {
       if(index<0)return;
       const [job]=this.queue.splice(index,1);clearTimeout(job.timer);job.timer=null;
       if(performance.now()>=job.deadline){this.rejected++;job.reject(new Error('broker_request_queue_expired'));continue;}
-      this.active++;if(!job.critical)this.activeNormal++;
+      this.active++;if(!job.critical){this.activeNormal++;if(job.priority!=='clock')this.activeBackground++;this.normalTurn=nextTurn;}
       job.startedAt=performance.now();this.activeJobs.set(job.id,job);
       const waited=Math.max(0,job.startedAt-job.queuedAt);this.queueWaitTotalMs+=waited;this.queueWaitMaxMs=Math.max(this.queueWaitMaxMs,waited);
       this.peakActive=Math.max(this.peakActive,this.active);
       void Promise.resolve().then(job.fn).then(job.resolve,job.reject).finally(()=>{
-        this.activeJobs.delete(job.id);this.active--;if(!job.critical)this.activeNormal--;this.completed++;this.pump();
+        this.activeJobs.delete(job.id);this.active--;if(!job.critical){this.activeNormal--;if(job.priority!=='clock')this.activeBackground--;}
+        this.completed++;this.pump();
       });
     }
   }
@@ -229,6 +251,9 @@ export class RequestLane {
     activeCritical:this.active-this.activeNormal,activeNormal:this.activeNormal,
     pendingCritical:this.queue.filter(j=>j.critical).length,pendingNormal:this.queue.filter(j=>!j.critical).length,
     reservedConcurrency:this.reservedConcurrency,reservedPending:this.reservedPending,
+    entryReservedConcurrency:this.entryReservedConcurrency,activeBackground:this.activeBackground,
+    entryReservedPending:this.entryReservedPending,
+    pendingEntryClock:this.queue.filter(j=>!j.critical&&j.priority==='clock').length,
     rejected:this.rejected,completed:this.completed,peakActive:this.peakActive,peakPending:this.peakPending};}
 }
 

@@ -323,7 +323,8 @@ export class MarketHub {
       // resolved provider can update the cache on the normal microtask turn.
       let provider;
       try {provider=Promise.resolve(this.kalshi.getMarket(ticker,
-        {deadline:performance.now()+R17_FEED_POLICY.priorityRestRecoveryTimeoutMs}));}
+        {deadline:performance.now()+R17_FEED_POLICY.priorityRestRecoveryTimeoutMs,
+          protectiveRead:this.protectionPriority?.open?.has(ticker)===true}));}
       catch(error){provider=Promise.reject(error);}
       // The timeout is a scheduler fence. The underlying Kalshi request is
       // also supplied an explicit deadline so the broker read lane can stop.
@@ -1158,7 +1159,8 @@ export class MarketHub {
     // Dispatch at most one raw REST read per ticker and connection epoch.
     // Unlike snapshotCache, this keeps no completed or time-extended evidence.
     // Rejection is preserved; the two consumers make their OWN trust decisions.
-    const pending=Promise.resolve().then(()=>this.kalshi.getOrderbook(ticker));
+    const pending=Promise.resolve().then(()=>this.kalshi.getOrderbook(ticker,
+      {protectiveRead:this.protectionPriority?.open?.has(ticker)===true}));
     const record={epoch,pending};
     this.restOrderbookInFlight.set(ticker,record);
     try{return await pending;}
@@ -1169,7 +1171,8 @@ export class MarketHub {
     const requestEpoch=this.connectionEpoch;
     const requestRevision=this.quoteRevision;
     const [marketResult,bookResult]=await Promise.allSettled([
-      Promise.resolve().then(()=>this.kalshi.getMarket(ticker)).then(value=>({value,observedAtMs:Date.now()})),
+      Promise.resolve().then(()=>this.kalshi.getMarket(ticker,
+        {protectiveRead:this.protectionPriority?.open?.has(ticker)===true})).then(value=>({value,observedAtMs:Date.now()})),
       this.sharedRestOrderbook(ticker).then(value=>({value,observedAtMs:Date.now()})),
     ]);
     const marketQuote=marketResult.status==='fulfilled'?marketResult.value.value:null;

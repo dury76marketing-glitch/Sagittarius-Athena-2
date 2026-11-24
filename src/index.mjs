@@ -6,6 +6,8 @@ import {env,RELEASE} from './config.mjs';
 import {SagittariusEngine} from './engine.mjs';
 import {startServer} from './server.mjs';
 import {ProcessSentinel} from './operationalWatchdog.mjs';
+import {isEntryAuthorizedGameClockState} from './gameClock.mjs';
+import {NATIVE_LEDGER_EVIDENCE_SQL,nativeLedgerEvidenceParameters} from './nativeLedgerEvidence.mjs';
 
 assertQ17IsolatedDatabase({databaseUrl:env.databaseUrl});
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
@@ -15,12 +17,12 @@ let stopping=false,stopPromise=null;
 let probeTimer=null;
 let r35NativeProbeAtMs=0,r35NativeProbeActive=false;
 const r35ProcessStartedAtMs=Date.now();
-// R35 acceptance: read-only native PostgreSQL evidence, 2 bounded COUNT
+// Native evidence: read-only PostgreSQL, 2 bounded COUNT
 // queries per clone every 5 minutes, on the existing async diagnostic lane.
 // No credential values, row IDs, positions or account fields are logged.
 function emitR35NativeLedgerProof(engine){
   try{
-    const at=Date.now(),pool=engine?.db?.pool,systemName=String(engine?.settings?.systemName||'');
+    const at=Date.now(),pool=engine?.db?.pool,settings={...engine?.settings},systemName=String(settings.systemName||'');
     if(!pool||!systemName||r35NativeProbeActive||at-r35NativeProbeAtMs<5*60_000)return;
     r35NativeProbeAtMs=at;r35NativeProbeActive=true;
     const clocks=`select count(*)::int as total,
@@ -34,17 +36,24 @@ function emitR35NativeLedgerProof(engine){
       count(*) filter (where state->>'pregameMilestoneId' is not null
         and state->>'pregameMilestoneId' <> '')::int as prior_pregame_evidence
       from sag_game_clock_authority where system_name=$1`;
-    const entries=`select count(*) filter (where concept_name like 'R17:%'
-        and mode='SIMULATION' and opened_at_ms >= $2)::int as new_sim_saint_entries,
-      count(*) filter (where concept_name like 'R17:%' and status='open')::int as currently_open_saints
-      from sag_entries where system_name=$1`;
-    void Promise.all([
-      pool.query({text:clocks,values:[systemName],query_timeout:1500}),
-      pool.query({text:entries,values:[systemName,r35ProcessStartedAtMs],query_timeout:1500}),
-    ]).then(([c,e])=>{
+    void (async()=>{
+      const client=await pool.connect();let begun=false;
+      try{
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');begun=true;
+        await client.query("SET LOCAL statement_timeout='1500ms'");
+        await client.query("SET LOCAL lock_timeout='250ms'");
+        const c=await client.query(clocks,[systemName]);
+        const e=await client.query(NATIVE_LEDGER_EVIDENCE_SQL,nativeLedgerEvidenceParameters(settings,r35ProcessStartedAtMs));
+        await client.query('COMMIT');begun=false;return[c,e];
+      }finally{if(begun)await client.query('ROLLBACK').catch(()=>{});client.release();}
+    })().then(([c,e])=>{
       console.log(JSON.stringify({event:'sagittarius_r35_native_pg_attestation',atMs:Date.now(),
+        version:'R38-SCOPED-NATIVE-EVIDENCE',
+        scope:{systemName,ownerId:settings.ownerId,mode:settings.mode,resetEpoch:Number(settings.resetTimestampMs||0)},
+        capturedScopeStillCurrent:JSON.stringify(nativeLedgerEvidenceParameters(settings))===JSON.stringify(nativeLedgerEvidenceParameters(engine.settings)),
         clockCounts:c?.rows?.[0]||{},entryCounts:e?.rows?.[0]||{},
-        source:'native_postgres_read_only_aggregate',window:'since_this_process_start',
+        source:'native_postgres_read_only_aggregate',processStartedAtMs:r35ProcessStartedAtMs,
+        window:'explicit_in_each_counter_name',
         doesNotProveBrokerFill:true}));
     }).catch(err=>{console.log(JSON.stringify({event:'sagittarius_r35_native_pg_attestation',
       atMs:Date.now(),status:'unavailable',code:String(err?.code||'query_failed').slice(0,20)}));
@@ -75,9 +84,11 @@ function logNoTradeProbe(engine){
         recentDecisions:(trace.events||[]).slice(-6).map(x=>({stage:x.stage,reason:x.reason,saint:x.saint}))},
       clocks:{inMemory:rows.length,phases:count(rows,'phase'),reasons:count(rows,'reason'),
         lastFive:rows.slice(-5).map(x=>({phase:x.phase,reason:x.reason,
-          liveStatus:x.liveStatus,source:x.source,entryAuthorized:x.entryAuthorized,
+          liveStatus:x.liveStatus,source:x.source,entryAuthorized:isEntryAuthorizedGameClockState(x,x.eventTicker,Date.now()),
           pregameObserved:Boolean(x.pregameObservedAtMs),bounded:Boolean(x.boundedStartLowerMs&&x.boundedStartUpperMs),
-          milestoneMatched:Boolean(x.milestoneId),evidenceAgeMs:Math.max(0,Date.now()-Number(x.evidenceObservedAtMs||0))}))},
+          milestoneMatched:Boolean(x.milestoneId),evidenceObservedAtMs:x.evidenceObservedAtMs||null,
+          sourceObservationAtMs:x.sourceObservationAtMs||null,
+          evidenceAgeMs:Number(x.evidenceObservedAtMs)>0?Math.max(0,Date.now()-Number(x.evidenceObservedAtMs)):null}))},
       scanner:{lastFullScanAgeMs:Math.max(0,Date.now()-Number(engine?.lastFullScanMs||0)),
         lastScanMarkets:engine?.lastScanMarkets?.length||0,
         cachedMarketQuotes:engine?.market?.quotes?.size||0,

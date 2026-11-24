@@ -12,7 +12,10 @@ export const R17_FEED_POLICY=Object.freeze({
   terminalProbeIntervalMs:60_000,
   quoteDrivenPageMinimumIntervalMs:250,
   fullPageIntervalMs:2_500,
-  watchInterestLifetimeMs:15_000,
+  // Discovery is a bounded native ticker cursor, independent of the number
+  // of WATCHING rows. Membership never expires on a partial watch-row page.
+  clockWaitMaximumEvents:256,
+  clockRefreshConcurrency:2,
   // Bounded tick history per eligible ticker. On extraordinary overload,
   // carry a durable-in-this-process gap marker and require a fresh trend.
   quoteTapeMaximumPerTicker:256,

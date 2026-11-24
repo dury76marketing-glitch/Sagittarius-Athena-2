@@ -3605,7 +3605,7 @@ export class ProfitGuard {
         this.kalshi.getSettlementsForTicker(current.ticker,current.openedAtMs),
         this.kalshi.getFillsForTicker(current.ticker,current.openedAtMs),
         typeof this.kalshi.getMarket==='function'
-          ?this.kalshi.getMarket(current.ticker).catch(()=>null):null,
+          ?this.kalshi.getMarket(current.ticker,{protectiveRead:true}).catch(()=>null):null,
       ]);
       if(unresolvedExitReceipt){
         const sell=proveExactLiveSellClose(current,fills);
@@ -3773,7 +3773,7 @@ export class ProfitGuard {
       const openedAtMs=Math.min(...history.map(e=>Number(e.openedAtMs)));
       const [settlements,fills,market]=await Promise.all([
         this.kalshi.getSettlementsForTicker(ticker,openedAtMs),this.kalshi.getFillsForTicker(ticker,openedAtMs),
-        typeof this.kalshi.getMarket==='function'?this.kalshi.getMarket(ticker).catch(()=>null):null]);
+        typeof this.kalshi.getMarket==='function'?this.kalshi.getMarket(ticker,{protectiveRead:true}).catch(()=>null):null]);
       if(!Array.isArray(fills)||!Array.isArray(settlements))return outcome('settlement_account_history_invalid');
       // Exact full SELL fill history is per-order authority. A sibling's
       // settlement or entry does not invalidate this seat's proven SELL.
