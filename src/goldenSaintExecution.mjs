@@ -5,7 +5,7 @@
  */
 import {REGULAR_SAINTS,ALL_SAINTS,R17_VERSION,r17ScopedId,
   r17SignalUsingOriginalStarlight,r17CardFingerprint,r17PersistedObservationQuote,saintRole} from './goldenSaintDomain.mjs';
-import {createGoldenSaintCapitalEntry} from './goldenSaintCapital.mjs';
+import {createGoldenSaintCapitalEntry,goldenSaintQuoteRefusal} from './goldenSaintCapital.mjs';
 import {liveEntryDispatchBookConfirmation} from './liveEntryDispatchBook.mjs';
 import {liveRecoveryCollateralRequirement} from './executionEconomics.mjs';
 import {stampLiveEpoch} from './strategy.mjs';
@@ -18,6 +18,10 @@ const scopedSettings=s=>({systemName:s?.systemName,ownerId:s?.ownerId,
 const refusals=new Set(['r17_watch_or_card_invalid','r17_market_identity_mismatch','r17_fresh_quote_spread_invalid']);
 const validScope=(a,b)=>a?.systemName===b?.systemName&&a?.ownerId===b?.ownerId
   &&a?.mode===b?.mode&&Number(a?.resetEpoch)===Number(b?.resetEpoch);
+// One additional preparation may replace an expired signal before any seat
+// exists. Two original five-second signal windows bound this recovery;
+// transport and SQL retain their existing individual request deadlines.
+const ENTRY_REQUALIFICATION_MAX_ELAPSED_MS=10_000;
 
 export function regularWindowDecision(quote, settings, now=Date.now()){
   const event=String(quote?.eventTicker||quote?.ticker||'');
@@ -107,12 +111,13 @@ export class GoldenSaintRuntime {
       clockDeferred:0,clockWaitCapacity:0,clockRefreshCompleted:0,tickerDiscoveryPages:0,
       quoteDrivenPages:0,fullPages:0,terminalProbes:0,
       quotesPreserved:0,quoteQueueOverflow:0,executionQueued:0,
-      executionCompleted:0,executionErrors:0,executionQueueFull:0,lastError:null};
+      executionCompleted:0,executionErrors:0,executionQueueFull:0,
+      quotePreparationRetries:0,clockNegativeResolutionsDeferred:0,lastError:null};
     // Bounded R17-specific eligibility evidence. The retired R16 entry
     // pipeline cannot establish LIVE/SIM parity for constellation attacks.
     this.decisionEvents=[];this.decisionKeys=new Set();this.decisionCounts={};
   }
-  noteDecision(stage,reason,watch,quote=null){
+  noteDecision(stage,reason,watch,quote=null,details=null){
     // Diagnostic only. Every event is a sampled decision/evaluation, not an
     // independent opportunity or an authenticated broker receipt.
     try{
@@ -139,7 +144,8 @@ export class GoldenSaintRuntime {
         cardFingerprint:String(watch?.cardFingerprint||'').slice(0,90),
         quoteAtMs:Number(quote?.quoteAtMs||quote?.updatedAtMs||0)||null,
         quoteEpoch:String(observation.epoch||'').slice(0,80),
-        quoteRevision:Number(observation.revision||0),mode:this.scope().mode});
+        quoteRevision:Number(observation.revision||0),mode:this.scope().mode,
+        ...(details?{details}:{} )});
       if(this.decisionEvents.length>128)this.decisionEvents.shift();
     }catch{/* optional evidence may never block trading or protection */}
   }
@@ -231,11 +237,20 @@ export class GoldenSaintRuntime {
         state:refreshed.gameClockState});
     }
     decision=applyCurrent();
-    const retryMs=decision.action==='ALLOW'?0:
+    let retryMs=decision.action==='ALLOW'?0:
       decision.reason==='live_start_unknown'?10000:2000;
+    const completedAt=Date.now(),nextDiscovery=Number(refreshed?.nextMilestoneDiscoveryAtMs||0);
+    // Only the resolver's exact clean-negative cache can extend this retry.
+    // Current authority was reapplied above; positive/stale/error paths retain
+    // their own refresh policy and evidence changes still invalidate the memo.
+    if(decision.reason==='live_start_unknown'&&Number.isFinite(nextDiscovery)
+      &&nextDiscovery>completedAt&&nextDiscovery-completedAt<=GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs){
+      if(nextDiscovery-completedAt>retryMs)this.stats.clockNegativeResolutionsDeferred++;
+      retryMs=Math.max(retryMs,nextDiscovery-completedAt);
+    }
     const state=this.clockRefreshMemo.get(event)?.state||null;
     this.clockRefreshMemo.delete(event);
-    this.clockRefreshMemo.set(event,{scopeKey,state,nextAtMs:Date.now()+retryMs});
+    this.clockRefreshMemo.set(event,{scopeKey,state,nextAtMs:completedAt+retryMs});
     if(this.clockRefreshMemo.size>512)this.clockRefreshMemo.delete(this.clockRefreshMemo.keys().next().value);
     return {decision,quote};
   }
@@ -1113,6 +1128,112 @@ export class GoldenSaintRuntime {
     }
     return result;
   }
+  async prepareClaimedSeat(claim,card,{scope,seat,readReady}){
+    const startedAtMs=Date.now();
+    const retryDeadlineMs=startedAtMs+ENTRY_REQUALIFICATION_MAX_ELAPSED_MS;
+    let originalLimit=null,originalQuoteAtMs=0,bookMs=0,clockMs=0,claimMs=0;
+    const details=(quote,plan,subreason=null)=>({
+      subreason,originalQuoteAtMs,signalQuoteAtMs:quotedNow(quote),
+      signalAgeMs:Date.now()-quotedNow(quote),bidCents:Number(quote?.yesBid),
+      askCents:Number(quote?.yesAsk),spreadCents:Number(quote?.yesAsk)-Number(quote?.yesBid),
+      maximumSpreadCents:Number(card.maxSpreadCents),
+      bookReceiptAgeMs:plan?.verifiedBookAtMs?Date.now()-Number(plan.verifiedBookAtMs):null,
+      preparationMs:Date.now()-startedAtMs,bookPreparationMs:bookMs,
+      clockPreflightMs:clockMs,claimRefreshMs:claimMs,
+      claimRevision:Number(claim?.revision||0),executionGeneration:this.executionGeneration,
+      eventTicker:String(claim?.eventTicker||'').slice(0,160),seat,
+    });
+    const fail=(reason,quote=null,plan=null,subreason=null)=>
+      ({ok:false,reason,claim,quote,details:details(quote,plan,subreason)});
+    // The only second pass is before reservation and before any broker send.
+    // A new authentic observation must requalify through the same card oracle;
+    // the first pass's price limit can only stay fixed or become stricter.
+    for(let attempt=0;attempt<2;attempt++){
+      if(!readReady())return fail('r17_current_scope_or_actual_live_authority_changed');
+      if(attempt&&Date.now()>retryDeadlineMs)return fail('r17_preparation_retry_deadline_exceeded');
+      const currentCard=this.settings().goldenSaints?.[claim.saint];
+      if(currentCard&&r17CardFingerprint(currentCard)!==claim.cardFingerprint)
+        return fail('r17_watch_or_card_invalid');
+      const latest=this.engine.market.getQuote?.(claim.ticker);
+      if(!latest||String(latest.eventTicker||latest.ticker)!==claim.eventTicker)
+        return fail('r17_current_market_identity_unavailable');
+      const quote=stampLiveEpoch({...latest},String(this.engine.market.quoteEpoch||''));
+      if(originalLimit===null){originalLimit=Number(quote.yesAsk);originalQuoteAtMs=quotedNow(quote);}
+      if(Number(quote.yesAsk)>originalLimit+1e-9)
+        return fail('r17_requalification_original_price_limit_exceeded',quote);
+      const evaluation=r17SignalUsingOriginalStarlight({watch:claim,quote,
+        card,now:Date.now(),advance:false,liveEpoch:this.engine.market.quoteEpoch||''});
+      if(!evaluation.ok||!evaluation.signal?.qualified)
+        return fail('r17_card_or_market_signal_no_longer_qualified',quote);
+      const requested=Math.max(1,Math.floor(card.stakeCents/Math.max(1,Number(quote.yesAsk))));
+      let at=Date.now();
+      const plan=await this.engine.strategy.prepareEntryExecution(quote,requested).catch(()=>null);
+      bookMs+=Date.now()-at;
+      if(!readReady())return fail('r17_current_scope_or_actual_live_authority_changed',quote,plan);
+      if(!plan||Number(plan.count)<=0||Number(plan.count)>requested)
+        return fail('r17_authentic_executable_book_unavailable',quote,plan);
+      if(!plan.freshMarket||String(plan.freshMarket.status||'').toLowerCase()!=='active'
+        ||plan.freshMarket.result||plan.freshMarket.bookInvalid===true
+        ||Number(plan.freshMarket.yesAsk)>Number(quote.yesAsk)+1e-9
+        ||String(plan.freshMarket.ticker)!==claim.ticker)
+        return fail('r17_executable_book_market_or_price_invalid',quote,plan);
+      if(claim.role==='REGULAR'){
+        at=Date.now();const clock=await this.regularClockPreflight(quote);clockMs+=Date.now()-at;
+        if(!readReady())return fail('r17_current_scope_or_actual_live_authority_changed',quote,plan);
+        if(clock.decision.action!=='ALLOW')return fail('r17_'+clock.decision.reason,quote,plan);
+      }
+      const obs=quote.quoteObservation||{};
+      const advanced=quotedNow(quote)!==Number(claim.lastQuoteAtMs)
+        ||Number(quote.yesBid)!==Number(claim.lastBidCents)
+        ||Number(quote.yesAsk)!==Number(claim.lastAskCents)
+        ||Number(obs.revision)!==Number(claim.lastQuoteRevision)
+        ||Number(obs.receivedAtMs)!==Number(claim.lastQuoteReceivedAtMs)
+        ||String(obs.epoch)!==String(claim.lastQuoteEpoch);
+      if(advanced){
+        if(!(Number(obs.revision)>0)||!(Number(obs.receivedAtMs)>0)||!obs.epoch)
+          return fail('r17_observation_timestamp_drift',quote,plan);
+        const changed={...claim,lastQuoteAtMs:quotedNow(quote),
+          lastQuoteReceivedAtMs:Number(obs.receivedAtMs),lastQuoteRevision:Number(obs.revision),
+          lastQuoteEpoch:String(obs.epoch),lastBidCents:Number(quote.yesBid),lastAskCents:Number(quote.yesAsk)};
+        if(typeof this.store.refreshClaimedObservation==='function'){
+          at=Date.now();
+          try{claim=await this.store.refreshClaimedObservation(changed,claim.revision);}
+          catch{return fail('r17_observation_timestamp_drift',quote,plan);}
+          claimMs+=Date.now()-at;
+        }else claim=changed;
+        if(!readReady())return fail('r17_current_scope_or_actual_live_authority_changed',quote,plan);
+      }
+      const eid=r17ScopedId('ENTRY',scope,claim.parentEntryId,claim.saint,seat);
+      const clientOrderId=scope.mode==='LIVE'?this.engine.kalshi.buildClientOrderId(scope.ownerId,eid,'entry'):null;
+      if(attempt&&Date.now()>retryDeadlineMs)
+        return fail('r17_preparation_retry_deadline_exceeded',quote,plan);
+      const candidate=createGoldenSaintCapitalEntry({watch:claim,card,settings:this.settings(),
+        quote,execution:plan,seat,clientOrderId});
+      if(candidate.ok){
+        if(attempt)this.noteDecision('execution_retry','r40_preparation_quote_requalified',claim,quote,details(quote,plan));
+        return {ok:true,claim,quote,plan,candidate};
+      }
+      if(attempt===0&&candidate.subreason==='signal_quote_age_exceeded'){
+        const fresh=this.engine.market.getQuote?.(claim.ticker),freshObs=fresh?.quoteObservation||{};
+        const next=stampLiveEpoch(fresh?{...fresh}:null,String(this.engine.market.quoteEpoch||''));
+        const newObservation=String(freshObs.epoch||'')===String(obs.epoch||'')
+          &&Number(freshObs.revision)>Number(obs.revision||0)
+          &&quotedNow(next)>=quotedNow(quote);
+        const eligible=newObservation&&Number(next?.yesAsk)<=originalLimit+1e-9
+          &&!goldenSaintQuoteRefusal(next,card,Date.now())
+          &&r17SignalUsingOriginalStarlight({watch:claim,quote:next,card,now:Date.now(),
+            advance:false,liveEpoch:this.engine.market.quoteEpoch||''}).signal?.qualified===true;
+        if(eligible&&readReady()&&Date.now()<=retryDeadlineMs){
+          this.stats.quotePreparationRetries++;
+          this.noteDecision('execution_retry','r40_preparation_quote_expired_before_reservation',
+            claim,quote,details(quote,plan,candidate.subreason));
+          continue;
+        }
+      }
+      return fail('r17_card_economics_'+candidate.reason,quote,plan,candidate.subreason||null);
+    }
+    return fail('r17_preparation_retry_exhausted');
+  }
   async executeWatch(watch,card,q,scope,generation=null){
     generation=generation??this.executionGeneration;
     if(!validScope(scope,this.scope())||this.settings().engineActive!==true
@@ -1140,66 +1261,25 @@ export class GoldenSaintRuntime {
     try{claim=await this.store.claim(watch,watch.revision,card);}catch(error){
       return deny('r17_watch_claim_failed:'+String(error?.message||error));}
     let created=0,firstRefusal=null;
-    const refused=reason=>{
+    const refused=(reason,quote=q,details=null)=>{
       firstRefusal??=reason;
-      this.noteDecision('execution_preflight',reason,watch,q);
+      this.noteDecision('execution_preflight',reason,watch,quote,details);
     };
     for(let seat=1;seat<=card.multiply;seat++){
       if(!validScope(scope,this.scope())||!readReady()){
         refused('r17_current_scope_or_actual_live_authority_changed');break;
       }
-      const latest=this.engine.market.getQuote?.(claim.ticker);
-      if(!latest||String(latest.eventTicker||latest.ticker)!==claim.eventTicker){refused('r17_current_market_identity_unavailable');break;}
-      const liveQuote=stampLiveEpoch({...latest},String(this.engine.market.quoteEpoch||''));
-      const evaluation=r17SignalUsingOriginalStarlight({watch:claim,quote:liveQuote,
-        card,now:Date.now(),advance:false,liveEpoch:this.engine.market.quoteEpoch||''});
-      if(!evaluation.ok||!evaluation.signal?.qualified){refused('r17_card_or_market_signal_no_longer_qualified');break;}
-      const limit=Number(liveQuote.yesAsk);
-      const requested=Math.max(1,Math.floor(card.stakeCents/Math.max(1,limit)));
-      // MarketHub obtains an authenticated executable REST book separately from
-      // the fast price signal. No cache-only depth is admissible.
-      const plan=await this.engine.strategy.prepareEntryExecution(liveQuote,requested).catch(()=>null);
-      if(!plan||Number(plan.count)<=0||Number(plan.count)>requested){refused('r17_authentic_executable_book_unavailable');break;}
-      // Keep the strategy's exact observed quote timestamp and price. The
-      // independent, fresher REST book may advance its timestamp, which is
-      // NOT evidence of a changed qualified strategy signal. It must still
-      // prove an ACTIVE market, sufficient depth and an ask no worse than the
-      // qualified limit. Never silently raise that limit.
-      if(!plan.freshMarket||String(plan.freshMarket.status||'').toLowerCase()!=='active'
-        ||plan.freshMarket.result||plan.freshMarket.bookInvalid===true
-        ||Number(plan.freshMarket.yesAsk)>limit+1e-9
-        ||String(plan.freshMarket.ticker)!==claim.ticker){refused('r17_executable_book_market_or_price_invalid');break;}
-      // Regular capital only. Aquarius/Pisces retain verified-loss doctrine.
-      if(claim.role==='REGULAR'){
-        const clock=await this.regularClockPreflight(liveQuote);
-        if(clock.decision.action!=='ALLOW'){refused('r17_'+clock.decision.reason);break;}
+      const prepared=await this.prepareClaimedSeat(claim,card,{scope,seat,readReady});
+      claim=prepared.claim||claim;
+      if(!prepared.ok){
+        refused(prepared.reason,prepared.quote||q,prepared.details);
+        if(prepared.reason.startsWith('r17_card_economics_'))await this.audit('candidate_denied',{
+          reason:prepared.reason.slice('r17_card_economics_'.length),
+          subreason:prepared.details?.subreason||null,saint:claim.saint,seat,
+          preflight:prepared.details});
+        break;
       }
-      const quote={...liveQuote,ticker:claim.ticker,eventTicker:claim.eventTicker};
-      // A newer authenticated quote is not drift if it just requalified and
-      // the executable book is still admissible. Bind the claim to that quote
-      // and persist it so SQL admission sees the same observation.
-      const obs=quote.quoteObservation||{};
-      const advanced=quotedNow(quote)!==Number(claim.lastQuoteAtMs)
-        ||Number(quote.yesBid)!==Number(claim.lastBidCents)
-        ||Number(quote.yesAsk)!==Number(claim.lastAskCents);
-      if(advanced){
-        if(!(Number(obs.revision)>0)||!(Number(obs.receivedAtMs)>0)||!obs.epoch){
-          refused('r17_observation_timestamp_drift');break;
-        }
-        claim={...claim,
-          lastQuoteAtMs:quotedNow(quote),lastQuoteReceivedAtMs:Number(obs.receivedAtMs),
-          lastQuoteRevision:Number(obs.revision),lastQuoteEpoch:String(obs.epoch),
-          lastBidCents:Number(quote.yesBid),lastAskCents:Number(quote.yesAsk)};
-        if(typeof this.store.refreshClaimedObservation==='function'){
-          try{claim=await this.store.refreshClaimedObservation(claim,claim.revision);}
-          catch(error){refused('r17_observation_timestamp_drift');break;}
-        }
-      }
-      const eid=r17ScopedId('ENTRY',scope,claim.parentEntryId,claim.saint,seat);
-      const clientOrderId=live?this.engine.kalshi.buildClientOrderId(scope.ownerId,eid,'entry'):null;
-      const candidate=createGoldenSaintCapitalEntry({watch:claim,card,settings:this.settings(),
-        quote,execution:plan,seat,clientOrderId});
-      if(!candidate.ok){refused('r17_card_economics_'+candidate.reason);await this.audit('candidate_denied',{reason:candidate.reason,saint:claim.saint,seat});break;}
+      const {quote,plan,candidate}=prepared;
       const entry=candidate.entry;
       let exchangeIndex=null;
       if(live){

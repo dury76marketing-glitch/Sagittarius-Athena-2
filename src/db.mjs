@@ -29,6 +29,7 @@ import {PR_SIM_VERSION,PR_LIVE_VERSION,pegasusRyuSeiKenCapitalSettingsFingerprin
 import {CRYSTAL_WALL_RECOVERY_SQL,verifiedGreatHornLoss,crystalWallRecoveryWatchFromLoss,crystalWallRecoveryObservationStep,crystalWallRecoveryAdmissionDecision,crystalWallRecoveryOperatorBandAllowed,crystalWallRecoverySpreadAllowed,CW_CONCEPT} from './crystalWallRecovery.mjs';
 import {CW_SIM_VERSION,CW_LIVE_VERSION,crystalWallRecoverySettingsFingerprint} from './crystalWallSimCapital.mjs';
 import {ACTUAL_OPEN_SQL,UNVALUED_LIVE_PENDING_SQL,UNRESOLVED_FUNDED_SQL,unresolvedFundedSql,financialHistoryState,EXECUTION_REPORT_MIGRATION_SQL,EXECUTION_ATTACKS,EXECUTION_REPORT_VERSION} from './executionReporting.mjs';
+import {RESEARCH_GENERATION_SCHEMA_SQL,RESEARCH_INPUT_FAMILIES,PROFIT_EPISODE_COMPACT_PROJECTION,postExitResearchPatch,POST_EXIT_RESEARCH_UPDATE_SQL} from './researchPersistence.mjs';
 import pg from 'pg';
 import { ShadowStore, SHADOW_SCHEMA_SQL } from './shadowStore.mjs';
 import { SHADOW_PROTOCOL, SHADOW_RUNTIME_LOCK, executionSettingsHashMatches, validateShadowEntryWitness, CAPITAL_SQL, SHADOW_SQL, STARLIGHT_SQL } from './shadowProtocol.mjs';
@@ -648,6 +649,7 @@ export class Database {
       );
       create index if not exists sag_lightning_plasma_reservations_v1_expiry on sag_lightning_plasma_reservations_v1(system_name,expires_at_ms);
     `);
+    await this.initResearchInputGenerations();
     // R6: preserve fractional-cent tracker telemetry without altering any
     // LIVE execution, price-qualification or financial-valuation column.
     await this.migrateTrackerQuotePrecision();
@@ -662,6 +664,31 @@ export class Database {
     this.shadowSchemaReady=true;
     this.startupStage='ready';
     }catch(error){this.shadowSchemaReady=false;error.startupStage=error.startupStage||this.startupStage;throw error;}
+  }
+
+  async initResearchInputGenerations(){
+    this.startupStage='research_input_generations_r40';
+    const client=await this.pool.connect();
+    try{
+      await client.query('BEGIN');
+      await client.query("select pg_advisory_xact_lock(hashtextextended(current_schema()||':SAG-RESEARCH-INPUT-GENERATIONS-R40',0))");
+      await client.query(RESEARCH_GENERATION_SCHEMA_SQL);
+      await client.query('COMMIT');
+    }catch(error){await client.query('ROLLBACK').catch(()=>{});throw error;}
+    finally{client.release();}
+  }
+
+  async researchInputGeneration(systemName,family){
+    if(!RESEARCH_INPUT_FAMILIES.includes(family))throw new TypeError('research_input_family_invalid');
+    const r=await this.pool.query(`select e.policy_version,e.generation::text as epoch,
+      coalesce(g.generation,0)::text as generation
+      from sag_research_input_epochs_v1 e left join sag_research_input_generations_v1 g
+        on g.family=e.family and g.system_name=$1 where e.family=$2`,[String(systemName),family]);
+    const row=r.rows[0];
+    if(!row)throw new Error('research_input_generation_unavailable');
+    // Keep bigint counters as strings. Number conversion eventually aliases
+    // different generations and would incorrectly suppress a required rebuild.
+    return `${row.policy_version}:${row.epoch}:${row.generation}`;
   }
 
   async migrateTrackerQuotePrecision(){
@@ -6399,6 +6426,35 @@ export class Database {
 
   async recentClosed(systemName,limit=500){const r=await this.pool.query("select * from sag_entries where system_name=$1 and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and archived=false and status='closed' order by closed_at_ms desc nulls last limit $2",[systemName,limit]);return r.rows.map(rowEntry);}
   async recentClosedForResearch(systemName,sinceMs,limit=500){const lim=Math.max(1,Math.min(2000,Math.floor(Number(limit)||500)));const r=await this.pool.query("select * from sag_entries where system_name=$1 and (coalesce(execution_class,'CAPITAL') <> 'SHADOW_SAINT' and coalesce(entry_config->>'executionClass','CAPITAL') <> 'SHADOW_SAINT') and status='closed' and closed_at_ms is not null and closed_at_ms >= $2 order by closed_at_ms desc limit $3",[systemName,Number(sinceMs)||0,lim]);return r.rows.map(rowEntry);}
+  async recentClosedForUnfinishedResearch(systemName,sinceMs,limit=500){
+    const lim=Math.max(1,Math.min(2000,Math.floor(Number(limit)||500)));
+    // Exclude only positively complete research in ALL three existing stores.
+    // Unknown/legacy states, archived research and broker economic uncertainty
+    // remain eligible. No entry/mode/reset scope or research-window change.
+    const r=await this.pool.query(`select e.* from sag_entries e
+      where e.system_name=$1
+        and coalesce(e.execution_class,'CAPITAL')<>'SHADOW_SAINT'
+        and coalesce(e.entry_config->>'executionClass','CAPITAL')<>'SHADOW_SAINT'
+        and e.status='closed' and e.closed_at_ms is not null and e.closed_at_ms >= $2
+        and (((e.close_reason='broker_zero_inventory_closed'
+              or coalesce(e.post_exit_state->'brokerZeroInventoryClose','null'::jsonb)<>'null'::jsonb)
+            and e.post_exit_state#>'{brokerZeroInventoryClose,economicClosure}' is distinct from 'true'::jsonb)
+          or (coalesce(e.post_exit_state->'brokerOwnershipQuarantine','null'::jsonb)<>'null'::jsonb
+            and e.post_exit_state#>'{brokerOwnershipQuarantine,economicClosure}' is distinct from 'true'::jsonb)
+          or not (e.research_tracking_complete=true
+            and coalesce(e.post_exit_state->'researchComplete'='true'::jsonb,false)
+            and exists(select 1 from sag_profit_episodes_v1 p where p.id=e.id and p.system_name=e.system_name and p.tracking_complete=true)))
+      order by e.closed_at_ms desc limit $3`,[String(systemName),Number(sinceMs)||0,lim]);
+    this.memoryReadStats||={};this.memoryReadStats.unfinishedResearchRows=r.rows.length;
+    return r.rows.map(rowEntry);
+  }
+
+  async updatePostExitResearch(id,patch){
+    const safe=postExitResearchPatch(patch);
+    const r=await this.pool.query(POST_EXIT_RESEARCH_UPDATE_SQL,[String(id),safe.state,safe.at,safe.currentPriceCents,safe.expectedEconomics]);
+    const result=r.rows[0]||{persisted:false,reason:'entry_not_found'};
+    return {persisted:result.persisted===true,...(result.persisted?{}:{reason:String(result.reason)})};
+  }
   async archiveSimulation(systemName){const r=await this.pool.query("update sag_entries set archived=true,updated_at_ms=$2 where system_name=$1 and archived=false and (mode is null or upper(mode)='SIMULATION')",[systemName,Date.now()]);return r.rowCount||0;}
 
   async getTracker(systemName,ticker){const r=await this.pool.query('select * from sag_trackers where system_name=$1 and ticker=$2',[systemName,ticker]);return r.rows[0]||null;}
@@ -6502,7 +6558,7 @@ export class Database {
   async pruneGameClockStates(systemName,beforeMs){await this.pool.query('delete from sag_game_clock_authority where system_name=$1 and last_updated_ms<$2',[systemName,Number(beforeMs)||0]);}
 
   async createRecoveryObservation(o){await this.pool.query(`insert into sag_recovery_observations_v2(id,system_name,original_entry_id,ticker,concept_name,sport,entry_price_cents,exit_price_cents,drop_cents,game_minutes_at_entry,exit_at_ms,prices,trough_cents,rebound_cents,recovered,recovery_at_ms,time_to_recover_ms,tracking_complete,settled,final_result,updated_at_ms) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict(id) do nothing`,[o.id,o.systemName,o.originalEntryId,o.ticker,o.conceptName,o.sport,Math.round(n(o.entryPriceCents)),Math.round(n(o.exitPriceCents)),Math.round(n(o.dropCents)),o.gameMinutesAtEntry||0,o.exitAtMs,JSON.stringify(o.prices||[]),Math.round(n(o.troughCents)),Math.round(n(o.reboundCents)),Boolean(o.recovered),o.recoveryAtMs||null,o.timeToRecoverMs||0,Boolean(o.trackingComplete),Boolean(o.settled),o.finalResult||null,o.updatedAtMs||Date.now()]);}
-  async recoveryObservations(systemName,{complete=null,limit=5000}={}){const cond=complete===null?'':'and tracking_complete=$3';const args=complete===null?[systemName,limit]:[systemName,limit,complete];const r=await this.pool.query(`select * from sag_recovery_observations_v2 where system_name=$1 ${cond} order by updated_at_ms desc limit $2`,args);return r.rows;}
+  async recoveryObservations(systemName,{complete=null,limit=5000}={}){const cond=complete===null?'':'and tracking_complete=$3';const args=complete===null?[systemName,limit]:[systemName,limit,complete];const r=await this.pool.query(`select * from sag_recovery_observations_v2 where system_name=$1 ${cond} order by updated_at_ms desc,id limit $2`,args);return r.rows;}
   async recoveryObservationByOriginalEntryId(systemName,originalEntryId){const r=await this.pool.query('select id,original_entry_id,tracking_complete,updated_at_ms from sag_recovery_observations_v2 where system_name=$1 and original_entry_id=$2 order by updated_at_ms desc limit 1',[systemName,originalEntryId]);return r.rows[0]||null;}
   async recoveryTrackingCount(systemName){const r=await this.pool.query('select count(*)::int as count from sag_recovery_observations_v2 where system_name=$1 and tracking_complete=false',[systemName]);return Number(r.rows[0]?.count||0);}
   async updateRecoveryObservation(id,patch){const col={prices:'prices',troughCents:'trough_cents',reboundCents:'rebound_cents',recovered:'recovered',recoveryAtMs:'recovery_at_ms',timeToRecoverMs:'time_to_recover_ms',trackingComplete:'tracking_complete',settled:'settled',finalResult:'final_result',updatedAtMs:'updated_at_ms'};const sets=[],vals=[];for(const[k,v]of Object.entries(patch))if(col[k]){vals.push(k==='prices'?JSON.stringify(v):v);sets.push(`${col[k]}=$${vals.length}`);}if(!sets.length)return;vals.push(id);await this.pool.query(`update sag_recovery_observations_v2 set ${sets.join(',')} where id=$${vals.length}`,vals);}
@@ -6534,7 +6590,7 @@ export class Database {
     if(ticker){args.push(String(ticker));where.push(`ticker=$${args.length}`);}
     if(coverageKind){args.push(String(coverageKind));where.push(`coverage_kind=$${args.length}`);}
     args.push(Math.max(1,Math.min(20000,Math.floor(Number(limit)||5000))));
-    const r=await this.pool.query(`select * from sag_stop_guard_recovery_v1 where ${where.join(' and ')} order by updated_at_ms desc limit $${args.length}`,args);
+    const r=await this.pool.query(`select * from sag_stop_guard_recovery_v1 where ${where.join(' and ')} order by updated_at_ms desc,id limit $${args.length}`,args);
     return r.rows;
   }
   async updateStopGuardRecoveryEpisode(id,patch){
@@ -6640,21 +6696,40 @@ export class Database {
   }
 
   async upsertProfitEpisode(e){
-    await this.pool.query(`insert into sag_profit_episodes_v1(id,system_name,ticker,event_ticker,concept_name,source_feeder,sport,entry_price_cents,original_count,opened_at_ms,closed_at_ms,tracking_complete,state,updated_at_ms)
+    const r=await this.pool.query(`insert into sag_profit_episodes_v1(id,system_name,ticker,event_ticker,concept_name,source_feeder,sport,entry_price_cents,original_count,opened_at_ms,closed_at_ms,tracking_complete,state,updated_at_ms)
       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       on conflict(id) do update set event_ticker=excluded.event_ticker,concept_name=excluded.concept_name,source_feeder=excluded.source_feeder,sport=excluded.sport,
       entry_price_cents=excluded.entry_price_cents,original_count=excluded.original_count,opened_at_ms=excluded.opened_at_ms,closed_at_ms=excluded.closed_at_ms,
-      tracking_complete=excluded.tracking_complete,state=excluded.state,updated_at_ms=excluded.updated_at_ms
-      where excluded.updated_at_ms>=sag_profit_episodes_v1.updated_at_ms`,[
+      tracking_complete=excluded.tracking_complete,
+      state=case when excluded.state->>'storageRevision'='PLI1-COMPACT-R40' then
+        excluded.state
+        ||case when sag_profit_episodes_v1.state ? 'observations' then jsonb_build_object('observations',sag_profit_episodes_v1.state->'observations') else '{}'::jsonb end
+        ||case when sag_profit_episodes_v1.state ? 'shadow' then jsonb_build_object('shadow',sag_profit_episodes_v1.state->'shadow') else '{}'::jsonb end
+        ||case when sag_profit_episodes_v1.state ? 'observations' or sag_profit_episodes_v1.state ? 'shadow' then
+          jsonb_build_object('researchCoverage',coalesce(excluded.state->'researchCoverage','{}'::jsonb)
+            ||jsonb_build_object('legacyDetailPreservedInDatabase',true,'legacyDetailThroughMs',
+              coalesce(sag_profit_episodes_v1.state#>'{researchCoverage,legacyDetailThroughMs}',sag_profit_episodes_v1.state->'lastObservedAtMs')))
+          else '{}'::jsonb end
+        else excluded.state end,
+      updated_at_ms=excluded.updated_at_ms
+      where excluded.updated_at_ms>=sag_profit_episodes_v1.updated_at_ms
+        and excluded.system_name=sag_profit_episodes_v1.system_name
+        and excluded.ticker=sag_profit_episodes_v1.ticker
+        and (not sag_profit_episodes_v1.tracking_complete or excluded.tracking_complete)
+        and (not sag_profit_episodes_v1.tracking_complete or $15::boolean)
+      returning id`,[
       e.id,e.systemName,e.ticker,e.eventTicker||null,e.conceptName,e.sourceFeeder||null,e.sport||'Unknown',Math.round(Number(e.entryPriceCents||0)),Number(e.originalCount||0),
       Number(e.openedAtMs||0),e.closedAtMs==null?null:Number(e.closedAtMs),Boolean(e.trackingComplete),e.state||{},Number(e.updatedAtMs||Date.now()),
+      e.allowCompletedCorrection!==false,
     ]);
+    return {persisted:r.rowCount>0,...(r.rowCount?{}:{reason:'profit_episode_stale_terminal_or_identity_mismatch'})};
   }
-  async profitEpisode(id){const r=await this.pool.query('select * from sag_profit_episodes_v1 where id=$1',[id]);return r.rows[0]||null;}
-  async profitEpisodes(systemName,{complete=null,limit=5000}={}){
+  async profitEpisode(id,{compact=false}={}){const projection=compact===true?PROFIT_EPISODE_COMPACT_PROJECTION:'*';const r=await this.pool.query(`select ${projection} from sag_profit_episodes_v1 where id=$1`,[id]);return r.rows[0]||null;}
+  async profitEpisodes(systemName,{complete=null,limit=5000,compact=false}={}){
     const lim=Math.max(1,Math.min(10000,Math.floor(Number(limit)||5000)));
-    if(complete===null){const r=await this.pool.query('select * from sag_profit_episodes_v1 where system_name=$1 order by updated_at_ms desc limit $2',[systemName,lim]);return r.rows;}
-    const r=await this.pool.query('select * from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=$2 order by updated_at_ms desc limit $3',[systemName,Boolean(complete),lim]);return r.rows;
+    const projection=compact===true?PROFIT_EPISODE_COMPACT_PROJECTION:'*';
+    if(complete===null){const r=await this.pool.query(`select ${projection} from sag_profit_episodes_v1 where system_name=$1 order by updated_at_ms desc limit $2`,[systemName,lim]);return r.rows;}
+    const r=await this.pool.query(`select ${projection} from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=$2 order by updated_at_ms desc limit $3`,[systemName,Boolean(complete),lim]);return r.rows;
   }
   async profitProfileEpisodes(systemName,{limit=10000}={}){
     const lim=Math.max(1,Math.min(10000,Math.floor(Number(limit)||10000)));
@@ -6664,7 +6739,7 @@ export class Database {
        'postExitMinExecutableNetCents',state->'postExitMinExecutableNetCents',
        'terminalNetCents',state->'terminalNetCents','actualRealizedNetCents',state->'actualRealizedNetCents',
        'oneTickPullbackCount',state->'oneTickPullbackCount','oneTickRecoveryCount',state->'oneTickRecoveryCount') as state
-      from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=true order by updated_at_ms desc limit $2`,[systemName,lim]);
+      from sag_profit_episodes_v1 where system_name=$1 and tracking_complete=true order by updated_at_ms desc,id limit $2`,[systemName,lim]);
     this.memoryReadStats||={};this.memoryReadStats.profitProfileRows=r.rows.length;
     return r.rows;
   }

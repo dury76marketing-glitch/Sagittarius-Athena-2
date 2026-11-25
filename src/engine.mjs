@@ -6749,7 +6749,8 @@ export class SagittariusEngine {
     runtime.useScope(this.settings);
     if(!state||generation!==runtime.generation)return null;
     const published=this.publishGameClockState(eventTicker,state,[candidate,current]);
-    return {gameClockState:published,gameStartTimeMs:candidate.gameStartTimeMs,liveStatus:candidate.liveStatus};
+    return {gameClockState:published,gameStartTimeMs:candidate.gameStartTimeMs,liveStatus:candidate.liveStatus,
+      nextMilestoneDiscoveryAtMs:this.gameClock.nextMilestoneDiscoveryAtMs?.(eventTicker,{quotes:siblings,now:Date.now()})||0};
   }
 
   async evaluateEntryChain(markets, trackerMap, marketMap) {
@@ -8636,6 +8637,13 @@ export class SagittariusEngine {
     // An unresolved transaction is not declared canceled. Its durable order
     // intent/seat remains authoritative for restart reconciliation.
     if(this.operationalQueues().some(q=>!q.isIdle()))console.error(JSON.stringify({event:'shutdown_pending_work',action:'reconcile_durable_intents_on_restart'}));
+    // Active protection/research producers may publish one last observation
+    // while the operational queues drain. Fence the deadline scheduler only
+    // here, then force a final bounded drain before PostgreSQL closes.
+    this.learning?.closeProfitObservationScheduling?.();
+    await this.profitGuard?.flushProfitLearningQueues?.(2000).catch(()=>false);
+    await this.learning?.flushProfitProfileRebuild?.(2000).catch(()=>false);
+    await this.profitGuard?.flushPostExitPersistence?.(2000).catch(()=>false);
     await Promise.race([this.db.close(),sleep(3000)]);
   }
 }

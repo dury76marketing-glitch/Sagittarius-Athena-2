@@ -1857,9 +1857,9 @@ export class StrategyEngine {
     // trigger a REST<->WS recovery loop. The candidate IOC limit remains q.yesAsk.
     let freshMarket=null,refreshed=null;
     if(typeof this.market.verifyTickerSnapshot==='function'){
-      refreshed=await this.market.verifyTickerSnapshot(q.ticker,{maxAgeMs:5000}).catch(()=>null);
+      refreshed=await this.market.verifyTickerSnapshot(q.ticker,{maxAgeMs:5000,requireComplete:true}).catch(()=>null);
     }else if(typeof this.market.refreshTickerVerified==='function'){
-      refreshed=await this.market.refreshTickerVerified(q.ticker,{maxAgeMs:5000}).catch(()=>null);
+      refreshed=await this.market.refreshTickerVerified(q.ticker,{maxAgeMs:5000,requireComplete:true}).catch(()=>null);
     }else{
       freshMarket=await this.market.refreshTicker(q.ticker,{maxAgeMs:5000}).catch(()=>null);
     }

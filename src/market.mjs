@@ -9,6 +9,15 @@ import {R17_FEED_POLICY,stableR17WatchWindow} from './goldenSaintFeedPolicy.mjs'
 import {researchSeriesForMarket} from './gameClock.mjs';
 
 export const MARKET_TRUTH_REVISION = 'R67-MHF5-VERIFIED-SNAPSHOT-ISOLATION-2026-09-06';
+// R40: only capital-entry consumers opt into incomplete-evidence recovery.
+// A brief miss retries promptly; a persistent outage backs off to the existing
+// five-second entry freshness budget. State lives in the already bounded cache.
+export const ENTRY_SNAPSHOT_RECOVERY = Object.freeze({
+  version:'R40-ENTRY-INCOMPLETE-SNAPSHOT-1',initialRetryMs:500,maximumRetryMs:5000,
+});
+const completeEntrySnapshot=value=>value?.marketFresh===true&&value?.bookFresh===true
+  &&value?.quote?.bookInvalid!==true&&value?.book?.yesBids?.length>0
+  &&value?.book?.noBids?.length>0;
 export const MARKET_RUNTIME_MAINTENANCE = Object.freeze({
   version:'MRM1',
   cadenceMs:5_000,
@@ -1112,7 +1121,7 @@ export class MarketHub {
   // proof may be newer than the websocket cache, but it must never replace a
   // sequence-aligned WS book merely because an entry candidate is being
   // revalidated. Callers receive the fresh REST quote/book directly.
-  async verifyTickerSnapshot(ticker,{maxAgeMs}={}) {
+  async verifyTickerSnapshot(ticker,{maxAgeMs,requireComplete=false}={}) {
     const now=Date.now(),requestEpoch=this.connectionEpoch;
     const limited=maxAgeMs!=null&&Number.isFinite(Number(maxAgeMs))&&Number(maxAgeMs)>=0;
     const limit=limited?Number(maxAgeMs):null;
@@ -1139,8 +1148,11 @@ export class MarketHub {
     const evidenceWithinLimit=!limited||(
       (!cached?.value?.marketFresh||freshAt(cached.value.marketObservedAtMs,now))
       &&(!cached?.value?.bookFresh||freshAt(cached.value.bookObservedAtMs,now)));
+    const incomplete=!completeEntrySnapshot(cached?.value);
+    const retryIncomplete=requireComplete===true&&incomplete
+      &&now>=Number(cached?.retryAtMs||Number(cached?.atMs||0)+ENTRY_SNAPSHOT_RECOVERY.initialRetryMs);
     if(cached&&cached.epoch===requestEpoch&&!lifecycleChanged&&cacheAge>=0&&cacheAge<ttl
-      &&(!limited||cacheAge<=limit)&&evidenceWithinLimit)return project(cached.value);
+      &&(!limited||cacheAge<=limit)&&evidenceWithinLimit&&!retryIncomplete)return project(cached.value);
     // Share the original verification only inside its connection epoch. A
     // reconnect fences both completed cache entries and in-flight responses.
     const flightKey=`${requestEpoch}:${ticker}`;
@@ -1150,6 +1162,20 @@ export class MarketHub {
     this.verificationInFlight.set(flightKey,pending);
     try{return project(await pending);}
     finally{if(this.verificationInFlight.get(flightKey)===pending)this.verificationInFlight.delete(flightKey);}
+  }
+
+  cacheVerifiedSnapshot(ticker,requestEpoch,value){
+    if(requestEpoch!==this.connectionEpoch)return;
+    if(!(this.snapshotCache instanceof Map))this.snapshotCache=new Map();
+    const prior=this.snapshotCache.get(ticker),atMs=Date.now();
+    const complete=completeEntrySnapshot(value);
+    const incompleteAttempts=complete?0:Math.min(5,
+      (prior?.epoch===requestEpoch?Number(prior.incompleteAttempts||0):0)+1);
+    const retryMs=complete?0:Math.min(ENTRY_SNAPSHOT_RECOVERY.maximumRetryMs,
+      ENTRY_SNAPSHOT_RECOVERY.initialRetryMs*2**(incompleteAttempts-1));
+    this.snapshotCache.set(ticker,{atMs,epoch:requestEpoch,value,incompleteAttempts,
+      retryAtMs:complete?0:atMs+retryMs});
+    if(this.snapshotCache.size>400)this.snapshotCache.delete(this.snapshotCache.keys().next().value);
   }
 
   async sharedRestOrderbook(ticker) {
@@ -1192,20 +1218,12 @@ export class MarketHub {
       const value={quote:latest,book:coherent?latestBook:null,marketFresh:!latest.bookInvalid,bookFresh:Boolean(coherent),marketObservedAtMs:quoteObservedAt(latest),bookObservedAtMs:coherent?latestBook.updatedAtMs:0,canonicalBookMutated:false,requestRevision,requestEpoch,verificationSource:'newer_canonical'};
       // An old connection's slow result cannot seed the new epoch cache.
       // The public verification wrapper also withdraws its freshness flags.
-      if(requestEpoch===this.connectionEpoch){
-        if(!(this.snapshotCache instanceof Map))this.snapshotCache=new Map();
-        this.snapshotCache.set(ticker,{atMs:Date.now(),epoch:requestEpoch,value});
-        if(this.snapshotCache.size>400){const first=this.snapshotCache.keys().next().value;this.snapshotCache.delete(first);}
-      }
+      this.cacheVerifiedSnapshot(ticker,requestEpoch,value);
       return value;
     }
     const quote=this.quoteFromVerifiedBook(ticker,marketQuote,book,Math.max(marketObservedAtMs,bookObservedAtMs,Date.now()));
     const value={quote,book,marketFresh:Boolean(marketQuote),bookFresh:Boolean(book),marketObservedAtMs,bookObservedAtMs,canonicalBookMutated:false,requestRevision,requestEpoch};
-    if(requestEpoch===this.connectionEpoch){
-      if(!(this.snapshotCache instanceof Map))this.snapshotCache=new Map();
-      this.snapshotCache.set(ticker,{atMs:Date.now(),epoch:requestEpoch,value});
-      if(this.snapshotCache.size>400){const first=this.snapshotCache.keys().next().value;this.snapshotCache.delete(first);}
-    }
+    this.cacheVerifiedSnapshot(ticker,requestEpoch,value);
     return value;
   }
 

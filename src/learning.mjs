@@ -1,5 +1,6 @@
 import {hasKnownZeroLiveEntryFee} from './executionEconomics.mjs';
 import {LatestStateWriter,deadline,profitLearningEntry} from './runtimeMemory.mjs';
+import {compactProfitLearningState,resumeDetailedProfitLearningState,PROFIT_LEARNING_STORAGE_REVISION} from './profitLearningStorage.mjs';
 import { observationOrder } from './authority.mjs';
 import { randomUUID } from 'node:crypto';
 import { RECOVERY_MARKET_DROP_CENTS, ULTIMATE_STOP_GUARD, STOP_LOSS_WATCHDOG, STOP_GUARD_RECOVERY_LEARNING, PROFIT_LEARNING_INTELLIGENCE, PROTECTED_RUNNER_INTELLIGENCE, goldenDragonStructureQualifiedAtQuote } from './doctrine.mjs';
@@ -249,9 +250,9 @@ export function recommendProfitRunnerGivebackCents({totalObservations=0,oneTickP
   return Math.max(lo,Math.min(hi,Math.round(giveback)));
 }
 
-function initialProfitLearningState(entry, sport='Unknown', now=Date.now()){
+function initialProfitLearningState(entry, sport='Unknown', now=Date.now(),researchDetails=true){
   const originalCount=Math.max(0,n(entry?.count));
-  return {
+  const state={
     version:PROFIT_LEARNING_INTELLIGENCE.version,
     phase:'TRACKING',
     createdAtMs:now,lastObservedAtMs:null,lastPersistedAtMs:0,
@@ -262,14 +263,14 @@ function initialProfitLearningState(entry, sport='Unknown', now=Date.now()){
     postExitMinExecutableBidCents:null,postExitMinExecutableNetCents:null,postExitMinAtMs:null,
     actualRealizedNetCents:null,actualExitVwapCents:null,actualExitAtMs:null,closeReason:null,
     terminalNetCents:null,finalResult:null,trackingComplete:false,
-    observations:[],
-    shadow:{
-      PMH1:{version:'PMH1',harvestedFraction:0,harvestedNetCents:0,stages:{}},
-      DBR1:{version:'DBR1',harvestedFraction:0,harvestedNetCents:0,stages:{}},
-    },
     cohort:{conceptName:String(entry?.conceptName||'Unknown'),sourceFeeder:entry?.sourceFeeder||null,sport:String(sport||'Unknown'),entryBand:profitLearningEntryBand(entry?.entryPriceCents)},
     originalCount,
   };
+  if(!researchDetails)return compactProfitLearningState(state,{copy:false});
+  return {...state,observations:[],shadow:{
+    PMH1:{version:'PMH1',harvestedFraction:0,harvestedNetCents:0,stages:{}},
+    DBR1:{version:'DBR1',harvestedFraction:0,harvestedNetCents:0,stages:{}},
+  }};
 }
 
 function updateShadowProfitPolicies(state, entry, observation){
@@ -297,12 +298,15 @@ function updateShadowProfitPolicies(state, entry, observation){
   return {...state,shadow};
 }
 
-function advanceProfitLearningStateCore(priorState, entry, observation, now, copyPrior){
+function advanceProfitLearningStateCore(priorState, entry, observation, now, copyPrior,researchDetails=true){
   // Do not expose the owned-state fast path outside the buffer's synchronous
   // observation reducer; public callers retain the original copy contract.
   const state=priorState&&priorState.version===PROFIT_LEARNING_INTELLIGENCE.version
-    ?(copyPrior?structuredClone(priorState):priorState)
-    :initialProfitLearningState(entry,observation.sport||'Unknown',now);
+    ?(!researchDetails&&priorState.storageRevision!==PROFIT_LEARNING_STORAGE_REVISION
+      ?compactProfitLearningState(priorState,{copy:copyPrior})
+      :(researchDetails?resumeDetailedProfitLearningState(priorState,now,{copy:copyPrior})
+        :(copyPrior?structuredClone(priorState):priorState)))
+    :initialProfitLearningState(entry,observation.sport||'Unknown',now,researchDetails);
   const observedAtMs=Math.max(1,n(observation.observedAtMs,now));
   state.lastObservedAtMs=observedAtMs;
   if(!observation.fullExecutable||!Number.isFinite(Number(observation.executableBidCents))||!Number.isFinite(Number(observation.executableNetCents)))return state;
@@ -320,6 +324,7 @@ function advanceProfitLearningStateCore(priorState, entry, observation, now, cop
   if(state.maxExecutableNetCents==null||net>n(state.maxExecutableNetCents)+1e-9){state.maxExecutableNetCents=net;state.maxExecutableAtMs=observedAtMs;}
   if(state.maxExecutableBidCents==null||bid>n(state.maxExecutableBidCents)+1e-9)state.maxExecutableBidCents=bid;
   state.lastExecutableBidCents=bid;state.lastExecutableNetCents=net;
+  if(!researchDetails)return state;
   const obs=Array.isArray(state.observations)?state.observations:[];
   const last=obs.at(-1);
   if(!last||n(last.bidCents)!==bid||Math.abs(n(last.netCents)-net)>1e-6||observedAtMs-n(last.t)>=PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs){
@@ -330,6 +335,10 @@ function advanceProfitLearningStateCore(priorState, entry, observation, now, cop
 
 export function advanceProfitLearningState(priorState, entry, observation={}, now=Date.now()){
   return advanceProfitLearningStateCore(priorState, entry, observation, now, true);
+}
+
+export function advanceCompactProfitLearningState(priorState,entry,observation={},now=Date.now()){
+  return advanceProfitLearningStateCore(priorState,entry,observation,now,true,false);
 }
 
 export function profitEpisodeMetrics(state={}){
@@ -691,9 +700,12 @@ export function advanceCrashState(priorState, q = {}, settings = {}, now = Date.
 }
 
 export class LearningEngine {
-  constructor(db, systemName) {
+  constructor(db, systemName,{profitLearningDetails=false}={}) {
     this.db = db;
     this.systemName = systemName;
+    // Explicit opt-in supports bounded offline diagnostics; production callers
+    // retain all operational learning without collecting hypothetical policies.
+    this.profitLearningDetails=profitLearningDetails===true;
     this.marketDropKeys = new Set();
     this.durationRecorded = new Set();
     this.crashStates = new Map();
@@ -724,9 +736,21 @@ export class LearningEngine {
     this.profitObservationForce=new Set();
     this.profitObservationEntries=new Map();
     this.profitObservationErrors=new Map();
+    this.profitObservationDue=new Map();this.profitObservationRetryAtMs=new Map();
+    this.profitObservationTimer=null;this.profitObservationTimerAtMs=0;
+    this.profitObservationSchedulingClosed=false;
+    this.profitPersistenceActive=new Map();this.profitLifecyclePending=new Map();
+    this.profitLifecycleRevision=new Map();this.profitLifecycleNeedsRefresh=new Set();
+    this.profitObservationStats={observations:0,eligibilitySkipped:0,writerEligibilitySkipped:0,
+      snapshots:0,persisted:0,forced:0,deadlineWakes:0,failed:0,maxDueKeys:0};
     this.profitObservationWriter=new LatestStateWriter({concurrency:2,onError:(error,id)=>{
+      if(this.completedProfitIds.has(id))return;
       this.profitObservationDirty.add(id);this.profitObservationErrors.set(id,String(error?.message||error).slice(0,200));
-    }});
+      this.profitObservationRetryAtMs.set(id,Date.now()+PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs);
+      this.profitObservationStats.failed++;
+    },onSettled:id=>this.scheduleProfitObservation(id)});
+    this.researchInputGenerations=new Map();this.researchAggregationPending=new Map();
+    this.researchAggregationStats={checks:0,skipped:0,runs:0,generationErrors:0,coalesced:0,forcedRuns:0};
     this.profitRebuildPromise=null;this.profitRebuildDirty=false;
     this.profitRebuildStats={requested:0,runs:0,coalesced:0,active:0,maxActive:0,lastRows:0,lastMs:0};
     this.profitStates = new Map();
@@ -770,16 +794,9 @@ export class LearningEngine {
       this.pruneCrashRuntime();
     }
     if (typeof this.db.profitEpisodes === 'function') {
-      const rows = await this.db.profitEpisodes(this.systemName,{complete:false,limit:5000}).catch(()=>[]);
+      const rows = await this.db.profitEpisodes(this.systemName,{complete:false,limit:5000,compact:!this.profitLearningDetails}).catch(()=>[]);
       for(const row of rows||[]){
-        const state=row?.state&&typeof row.state==='object'?structuredClone(row.state):null;
-        if(!row?.id||!state||state.version!==PROFIT_LEARNING_INTELLIGENCE.version)continue;
-        this.profitStates.set(String(row.id),state);
-        this.profitMeta.set(String(row.id),{
-          id:String(row.id),systemName:this.systemName,ticker:String(row.ticker||''),eventTicker:String(row.event_ticker||row.ticker||''),conceptName:String(row.concept_name||'Unknown'),
-          sourceFeeder:row.source_feeder||null,sport:String(row.sport||'Unknown'),entryPriceCents:n(row.entry_price_cents),originalCount:n(row.original_count),openedAtMs:n(row.opened_at_ms),closedAtMs:row.closed_at_ms==null?null:n(row.closed_at_ms),
-        });
-        this.profitLastPersistMs.set(String(row.id),n(row.updated_at_ms));
+        this.hydrateProfitLearningRow(row);
       }
     }
     if (typeof this.db.completedProfitEpisodeIds === 'function') {
@@ -817,8 +834,8 @@ export class LearningEngine {
 
   resourceSnapshot() {
     return {
-      profitObservationPersistence:{...this.profitObservationWriter.snapshot(),dirty:this.profitObservationDirty.size,errors:this.profitObservationErrors.size,retainedEntrySummaries:this.profitObservationEntries.size},
-      profitProfileRebuild:{...this.profitRebuildStats},
+      profitObservationPersistence:{...this.profitObservationWriter.snapshot(),...this.profitObservationStats,storageRevision:PROFIT_LEARNING_STORAGE_REVISION,researchDetails:this.profitLearningDetails,deadlineKeys:this.profitObservationDue.size,deadlineTimers:this.profitObservationTimer?1:0,lifecyclePending:this.profitLifecyclePending.size,lifecycleRefreshNeeded:this.profitLifecycleNeedsRefresh.size,activePersistence:this.profitPersistenceActive.size,dirty:this.profitObservationDirty.size,errors:this.profitObservationErrors.size,retainedEntrySummaries:this.profitObservationEntries.size},
+      profitProfileRebuild:{...this.profitRebuildStats},researchAggregation:{...this.researchAggregationStats},
       crashStates:this.crashStates.size,
       crashPersistClocks:this.crashLastPersistMs.size,
       crashPersistence:{
@@ -1347,7 +1364,55 @@ export class LearningEngine {
     return {tracked,completed,recovered};
   }
 
-  async aggregateStopGuardProfiles(){
+  runResearchAggregation(family,operation,{skippedValue=undefined,force=false}={}){
+    const key=String(family),pending=this.researchAggregationPending.get(key);
+    if(pending&&!pending.closed){
+      this.researchAggregationStats.coalesced++;
+      if(force)pending.forceRequested=true;
+      return pending.promise;
+    }
+    // One active promise and one coalesced force bit per family. Force arriving
+    // during the generation lookup promotes this pass; after the corpus read
+    // starts it owns a further pass, included in the same returned promise.
+    const slot={forceRequested:Boolean(force),promise:null,closed:false};
+    const run=Promise.resolve().then(async()=>{
+      try{
+      let result;
+      do{
+        let forced=slot.forceRequested;slot.forceRequested=false;
+        let generation=null;
+        if(typeof this.db.researchInputGeneration==='function'){
+          this.researchAggregationStats.checks++;
+          try{generation=await this.db.researchInputGeneration(this.systemName,key);}
+          catch{this.researchAggregationStats.generationErrors++;}
+        }
+        forced=forced||slot.forceRequested;slot.forceRequested=false;
+        const usable=typeof generation==='string'&&generation.length>0;
+        if(!forced&&usable&&this.researchInputGenerations.get(key)===generation){
+          this.researchAggregationStats.skipped++;result=skippedValue;
+        }else{
+          // An unsuccessful forced rebuild must not inherit an earlier token
+          // that would let the next ordinary retry incorrectly skip its work.
+          this.researchInputGenerations.delete(key);
+          if(forced)this.researchAggregationStats.forcedRuns++;
+          result=await operation();this.researchAggregationStats.runs++;
+          // Capture before reading the corpus. Never acknowledge a generation
+          // first observed after the rebuild; it may contain newer evidence.
+          if(usable)this.researchInputGenerations.set(key,generation);
+        }
+      }while(slot.forceRequested);
+      return result;
+      }finally{slot.closed=true;}
+    }).finally(()=>{if(this.researchAggregationPending.get(key)===slot)this.researchAggregationPending.delete(key);});
+    slot.promise=run;this.researchAggregationPending.set(key,slot);return run;
+  }
+
+  aggregateStopGuardProfiles(options={}){
+    return this.runResearchAggregation('stop_guard',()=>this._aggregateStopGuardProfiles(),
+      {...options,skippedValue:{profiles:0,observations:0,unchanged:true}});
+  }
+
+  async _aggregateStopGuardProfiles(){
     if(typeof this.db?.stopGuardRecoveryEpisodes!=='function'||typeof this.db?.replaceStopGuardProfiles!=='function')return {profiles:0,observations:0};
     const mode=STOP_GUARD_RECOVERY_LEARNING.decisionEvidenceMode;
     const rows=(await this.db.stopGuardRecoveryEpisodes(this.systemName,{complete:true,mode,coverageKind:'causal_from_trigger',limit:STOP_GUARD_RECOVERY_LEARNING.maximumEpisodes}))
@@ -1437,7 +1502,9 @@ export class LearningEngine {
     }
   }
 
-  async aggregatePatterns() {
+  aggregatePatterns(options={}){return this.runResearchAggregation('recovery',()=>this._aggregatePatterns(),options);}
+
+  async _aggregatePatterns() {
     const obs = await this.db.recoveryObservations(this.systemName, { complete:true, limit:5000 });
     const buckets = new Map();
     for (const o of obs) {
@@ -1552,103 +1619,267 @@ export class LearningEngine {
     this.profitMeta.set(id,meta);return meta;
   }
 
-  async persistProfitLearning(entry,state,{force=false,trackingComplete=null}={}){
-    if(typeof this.db.upsertProfitEpisode!=='function')return false;
-    const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return false;
-    const now=Date.now(),id=meta.id,last=n(this.profitLastPersistMs.get(id));
-    if(!force&&now-last<PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs)return false;
-    const complete=trackingComplete==null?Boolean(state.trackingComplete):Boolean(trackingComplete);
-    await this.db.upsertProfitEpisode({...meta,closedAtMs:entry.closedAtMs??meta.closedAtMs,trackingComplete:complete,state,updatedAtMs:now});
-    this.profitLastPersistMs.set(id,now);
-    return true;
+  hydrateProfitLearningRow(row){
+    if(!row?.id||!row.state||typeof row.state!=='object'
+      ||row.state.version!==PROFIT_LEARNING_INTELLIGENCE.version)return false;
+    const id=String(row.id),state=this.profitLearningDetails
+      ?resumeDetailedProfitLearningState(row.state,Date.now())
+      :compactProfitLearningState(row.state,{legacyDetailIsDurable:true});
+    this.profitStates.set(id,state);
+    this.profitMeta.set(id,{
+      id,systemName:this.systemName,ticker:String(row.ticker||''),eventTicker:String(row.event_ticker||row.ticker||''),conceptName:String(row.concept_name||'Unknown'),
+      sourceFeeder:row.source_feeder||null,sport:String(row.sport||'Unknown'),entryPriceCents:n(row.entry_price_cents),originalCount:n(row.original_count),openedAtMs:n(row.opened_at_ms),closedAtMs:row.closed_at_ms==null?null:n(row.closed_at_ms),
+    });
+    this.profitLastPersistMs.set(id,n(row.updated_at_ms));return true;
   }
 
-  // OOM1: reduce every observation synchronously with the ORIGINAL reducer.
-  // Slow PostgreSQL holds only one active write plus the latest state per ID,
-  // rather than an unbounded promise chain retaining complete entry objects.
+  releaseProfitLearningRuntime(id){
+    this.profitObservationEntries.delete(id);this.profitObservationRevision.delete(id);
+    this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);
+    this.profitObservationDue.delete(id);this.profitObservationRetryAtMs.delete(id);this.profitLifecycleNeedsRefresh.delete(id);
+    this.profitStates.delete(id);this.profitMeta.delete(id);this.profitLastPersistMs.delete(id);
+  }
+
+  async restoreProfitLifecycleOwnership(entry){
+    if(typeof this.db.profitEpisode!=='function')return false;
+    const id=String(entry?.id||'');
+    // A bounded startup/completion cache is not proof that a durable episode
+    // does not exist. A failed lookup must not turn old evidence into zeroes.
+    const row=await this.db.profitEpisode(id,{compact:!this.profitLearningDetails});
+    if(!row)return false;
+    if(String(row.id)!==id||String(row.system_name)!==this.systemName||String(row.ticker)!==String(entry.ticker))
+      throw new Error('profit_episode_restore_identity_mismatch');
+    if(row.tracking_complete===true||String(row.tracking_complete)==='true'){
+      rememberBounded(this.completedProfitIds,id,LEARNING_RUNTIME_LIMITS.completedProfitIds);
+      this.profitLifecycleRevision.set(id,n(this.profitLifecycleRevision.get(id))+1);
+      this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationDue.delete(id);
+      // Existing ordinary work cannot overwrite a complete DB row. Fence its
+      // callback and let ownership settle before releasing resident references.
+      await this.profitObservationWriter.idle(id);
+      await this.profitPersistenceActive.get(id)?.catch(()=>{});
+      this.releaseProfitLearningRuntime(id);this.requestProfitProfileRebuild();return true;
+    }
+    if(!this.profitStates.has(id)&&!this.hydrateProfitLearningRow(row))throw new Error('profit_episode_restore_state_invalid');
+    return false;
+  }
+
+  createProfitLearningState(entry,sport='Unknown',now=Date.now()){
+    return initialProfitLearningState(entry,sport,now,this.profitLearningDetails);
+  }
+
+  profitLearningStatus(entryId){
+    const id=String(entryId||''),state=this.profitStates.get(id);
+    if(state)return {version:state.version,phase:state.phase,trackingComplete:Boolean(state.trackingComplete),
+      lastObservedAtMs:state.lastObservedAtMs??null,storageRevision:state.storageRevision||null};
+    return this.completedProfitIds.has(id)?{version:PROFIT_LEARNING_INTELLIGENCE.version,
+      phase:'COMPLETE',trackingComplete:true,resident:false}:null;
+  }
+
+  async persistProfitLearning(entry,state,{force=false,trackingComplete=null,expectedLifecycleRevision=null,meta:knownMeta=null}={}){
+    if(typeof this.db.upsertProfitEpisode!=='function')return false;
+    const id=String(entry?.id||'');if(!id)return false;
+    // All writes for an episode, including lifecycle writes outside the
+    // observation lane, commit in call order. This map retains active work only.
+    const previous=this.profitPersistenceActive.get(id);
+    const write=async()=>{
+      const meta=knownMeta||await this.ensureProfitLearningMeta(entry);if(!meta)return false;
+      if(expectedLifecycleRevision!=null&&n(this.profitLifecycleRevision.get(id))!==expectedLifecycleRevision)return false;
+      const complete=trackingComplete==null?Boolean(state.trackingComplete):Boolean(trackingComplete);
+      if(this.completedProfitIds.has(id)&&!complete)return false;
+      const now=Date.now(),last=n(this.profitLastPersistMs.get(id));
+      if(!force&&this.profitLastPersistMs.has(id)&&now-last<PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs){
+        this.profitObservationStats.writerEligibilitySkipped++;return false;
+      }
+      const snapshot=structuredClone(state);this.profitObservationStats.snapshots++;
+      const result=await this.db.upsertProfitEpisode({...meta,closedAtMs:entry.closedAtMs??meta.closedAtMs,
+        trackingComplete:complete,state:snapshot,updatedAtMs:now,allowCompletedCorrection:false});
+      // PostgreSQL may reject stale or completed-episode updates. Such a
+      // rejection is not a durable acknowledgement, even if the query resolves.
+      if(result?.persisted===false)return false;
+      this.profitLastPersistMs.set(id,now);this.profitObservationStats.persisted++;
+      if(force)this.profitObservationStats.forced++;
+      return true;
+    };
+    const run=(previous?previous.catch(()=>{}).then(write):Promise.resolve().then(write));
+    this.profitPersistenceActive.set(id,run);
+    try{return await run;}
+    finally{if(this.profitPersistenceActive.get(id)===run)this.profitPersistenceActive.delete(id);}
+  }
+
+  // Every accepted observation still advances the exact operational reducer.
+  // Only research detail and ineligible persistence work are omitted.
   bufferProfitObservation(entry,observation={}){
     const id=String(entry?.id||'');if(!id)return false;
     const old=this.profitStates.get(id);
-    if(old?.trackingComplete || old?.phase==='POST_EXIT_TRACKING')return false;
+    if(this.completedProfitIds.has(id)||this.profitLifecyclePending.has(id)
+      ||old?.trackingComplete||old?.phase==='POST_EXIT_TRACKING')return false;
     const compact=profitLearningEntry(entry),sport=this.profitMeta.get(id)?.sport||old?.cohort?.sport||'Unknown';
-    const prior=old||initialProfitLearningState(compact,sport,Date.now());
-    // Capture the exact original force-write comparisons before mutating the
-    // private map-owned state. No persistence timing or call contract changes.
-    const prevPeak=n(prior.maxExecutableNetCents);
-    const prevPullbacks=n(prior.oneTickPullbackCount);
-    const prevRecoveries=n(prior.oneTickRecoveryCount);
-    const next=advanceProfitLearningStateCore(prior,compact,{...observation,sport},Date.now(),false);
+    const prior=old||this.createProfitLearningState(compact,sport,Date.now());
+    const prevPeak=n(prior.maxExecutableNetCents),prevPullbacks=n(prior.oneTickPullbackCount),prevRecoveries=n(prior.oneTickRecoveryCount);
+    const next=advanceProfitLearningStateCore(prior,compact,{...observation,sport},Date.now(),false,this.profitLearningDetails);
     this.profitStates.set(id,next);this.profitObservationEntries.set(id,compact);
     this.profitObservationRevision.set(id,(this.profitObservationRevision.get(id)||0)+1);
-    if(n(next.maxExecutableNetCents)!==prevPeak||n(next.oneTickPullbackCount)!==prevPullbacks||n(next.oneTickRecoveryCount)!==prevRecoveries)this.profitObservationForce.add(id);
+    if(n(next.maxExecutableNetCents)!==prevPeak||n(next.oneTickPullbackCount)!==prevPullbacks||n(next.oneTickRecoveryCount)!==prevRecoveries){
+      this.profitObservationForce.add(id);this.profitObservationRetryAtMs.delete(id);
+    }
+    this.profitObservationStats.observations++;
     this.profitObservationDirty.add(id);this.scheduleProfitObservation(id);return true;
   }
 
+  profitObservationEligibleAt(id,now=Date.now()){
+    const retry=n(this.profitObservationRetryAtMs.get(id));
+    const ordinary=this.profitObservationForce.has(id)||!this.profitLastPersistMs.has(id)
+      ?now:n(this.profitLastPersistMs.get(id))+PROFIT_LEARNING_INTELLIGENCE.persistenceIntervalMs;
+    return Math.max(ordinary,retry);
+  }
+
+  deferProfitObservation(id,atMs){
+    if(this.profitObservationSchedulingClosed)return;
+    this.profitObservationDue.set(id,atMs);
+    this.profitObservationStats.maxDueKeys=Math.max(this.profitObservationStats.maxDueKeys,this.profitObservationDue.size);
+    this.armProfitObservationDeadline(atMs);
+  }
+
+  armProfitObservationDeadline(atMs=null){
+    if(this.profitObservationSchedulingClosed)return;
+    let next=atMs==null?Infinity:atMs;
+    if(atMs==null)for(const due of this.profitObservationDue.values())if(due<next)next=due;
+    if(!Number.isFinite(next)){if(this.profitObservationTimer)clearTimeout(this.profitObservationTimer);
+      this.profitObservationTimer=null;this.profitObservationTimerAtMs=0;return;}
+    if(this.profitObservationTimer&&this.profitObservationTimerAtMs<=next)return;
+    if(this.profitObservationTimer)clearTimeout(this.profitObservationTimer);
+    this.profitObservationTimerAtMs=next;
+    this.profitObservationTimer=setTimeout(()=>{
+      this.profitObservationTimer=null;this.profitObservationTimerAtMs=0;
+      if(this.profitObservationSchedulingClosed)return;
+      this.profitObservationStats.deadlineWakes++;
+      const now=Date.now();
+      for(const [id,due] of this.profitObservationDue){
+        if(due>now)continue;this.profitObservationDue.delete(id);this.scheduleProfitObservation(id);
+      }
+      this.armProfitObservationDeadline();
+    },Math.max(1,Math.min(2_147_483_647,next-Date.now())));
+    this.profitObservationTimer.unref?.();
+  }
+
+  closeProfitObservationScheduling(){
+    this.profitObservationSchedulingClosed=true;
+    if(this.profitObservationTimer)clearTimeout(this.profitObservationTimer);
+    this.profitObservationTimer=null;this.profitObservationTimerAtMs=0;this.profitObservationDue.clear();
+  }
+
   scheduleProfitObservation(id){
-    if(!this.profitObservationDirty.has(id))return;
-    this.profitObservationWriter.enqueue(id,async()=>{
-      const entry=this.profitObservationEntries.get(id);if(!entry)return;
-      // Preserve authoritative sport/cohort metadata; only the geometry reducer
-      // runs before this optional historical lookup, and it does not use sport.
-      const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return;
-      const state=this.profitStates.get(id);if(!state||state.trackingComplete)return;
+    id=String(id);
+    if(!this.profitObservationDirty.has(id)){this.profitObservationDue.delete(id);return false;}
+    const entry=this.profitObservationEntries.get(id),state=this.profitStates.get(id);
+    if(!entry||!state||state.trackingComplete||state.phase==='POST_EXIT_TRACKING')return false;
+    if(this.profitObservationWriter.active.has(id)||this.profitObservationWriter.pending.has(id))return false;
+    const now=Date.now(),eligible=this.profitObservationEligibleAt(id,now);
+    if(eligible>now){this.profitObservationStats.eligibilitySkipped++;this.deferProfitObservation(id,eligible);return false;}
+    if(this.profitObservationSchedulingClosed&&!this.profitObservationForce.has(id))return false;
+    this.profitObservationDue.delete(id);
+    const lifecycleRevision=n(this.profitLifecycleRevision.get(id));
+    return this.profitObservationWriter.enqueue(id,async()=>{
+      if(!this.profitObservationDirty.has(id)||n(this.profitLifecycleRevision.get(id))!==lifecycleRevision)return;
+      const now=Date.now(),eligible=this.profitObservationEligibleAt(id,now);
+      if(eligible>now){this.profitObservationStats.writerEligibilitySkipped++;this.deferProfitObservation(id,eligible);return;}
+      const entry=this.profitObservationEntries.get(id);if(!entry)throw new Error('profit_observation_entry_missing');
+      const meta=await this.ensureProfitLearningMeta(entry);if(!meta)throw new Error('profit_observation_metadata_missing');
+      if(n(this.profitLifecycleRevision.get(id))!==lifecycleRevision)return;
+      const state=this.profitStates.get(id);if(!state||state.trackingComplete||state.phase==='POST_EXIT_TRACKING')return;
+      // Metadata retrieval can overlap another write. Check eligibility before
+      // snapshot allocation as well as inside the actual serial writer.
+      const afterMeta=Date.now(),next=this.profitObservationEligibleAt(id,afterMeta);
+      if(next>afterMeta){this.profitObservationStats.writerEligibilitySkipped++;this.deferProfitObservation(id,next);return;}
       state.cohort={...state.cohort,sport:meta.sport};
-      const revision=this.profitObservationRevision.get(id),snapshot=structuredClone(state);
-      const force=this.profitObservationForce.has(id);
-      const persisted=await this.persistProfitLearning(entry,snapshot,{force});
-      // A throttled no-op is not a durable acknowledgement. Keep the latest
-      // revision dirty until a real write succeeds; normal cadence is unchanged.
-      if(persisted&&this.profitObservationRevision.get(id)===revision){this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);}
+      const revision=this.profitObservationRevision.get(id),force=this.profitObservationForce.has(id);
+      const persisted=await this.persistProfitLearning(entry,state,{force,expectedLifecycleRevision:lifecycleRevision,meta});
+      if(persisted&&this.profitObservationRevision.get(id)===revision){
+        this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);
+        this.profitObservationRetryAtMs.delete(id);this.profitObservationDue.delete(id);
+      }else if(!persisted&&n(this.profitLifecycleRevision.get(id))===lifecycleRevision
+        &&this.profitObservationEligibleAt(id,Date.now())<=Date.now()){
+        throw new Error('profit_observation_persistence_unconfirmed');
+      }
     });
   }
 
   retryProfitObservations(){
     if(this.profitRebuildDirty&&!this.profitRebuildPromise)this.requestProfitProfileRebuild();
-    for(const id of this.profitObservationDirty)
-      if(!this.profitObservationWriter.active.has(id)&&!this.profitObservationWriter.pending.has(id))this.scheduleProfitObservation(id);
+    for(const id of this.profitObservationDirty)this.scheduleProfitObservation(id);
+    this.armProfitObservationDeadline();
   }
 
   async flushProfitObservation(id,timeoutMs=2000){
     id=String(id);
-    // Explicit lifecycle/shutdown drains must persist the latest observation,
-    // even when the normal low-priority persistence interval has not elapsed.
-    if(this.profitObservationDirty.has(id))this.profitObservationForce.add(id);
+    if(this.profitObservationDirty.has(id)){this.profitObservationForce.add(id);this.profitObservationRetryAtMs.delete(id);}
     this.scheduleProfitObservation(id);
     const done=await deadline(this.profitObservationWriter.idle(id).then(()=>true),timeoutMs,false);
     return done&&!this.profitObservationErrors.has(id)&&!this.profitObservationDirty.has(id);
   }
 
   async flushProfitObservations(timeoutMs=2000){
-    for(const id of this.profitObservationDirty){this.profitObservationForce.add(id);this.scheduleProfitObservation(id);}
+    for(const id of this.profitObservationDirty){this.profitObservationForce.add(id);this.profitObservationRetryAtMs.delete(id);this.scheduleProfitObservation(id);}
     const done=await this.profitObservationWriter.flush(timeoutMs);
     return done&&this.profitObservationErrors.size===0&&this.profitObservationDirty.size===0;
   }
 
   async observeProfitOpportunity(entry,observation={}){
     const id=String(entry?.id||'');if(!id)return null;
+    if(this.completedProfitIds.has(id)||this.profitLifecyclePending.has(id))return this.profitLearningState(id);
     const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return null;
-    const prior=this.profitStates.get(id)||initialProfitLearningState(entry,meta.sport,Date.now());
-    const next=advanceProfitLearningState(prior,entry,{...observation,sport:meta.sport},Date.now());
-    this.profitStates.set(id,next);
-    const meaningful=n(next.maxExecutableNetCents)!==n(prior.maxExecutableNetCents)||n(next.oneTickPullbackCount)!==n(prior.oneTickPullbackCount)||n(next.oneTickRecoveryCount)!==n(prior.oneTickRecoveryCount);
-    await this.persistProfitLearning(entry,next,{force:meaningful});
-    return structuredClone(next);
+    this.bufferProfitObservation(entry,{...observation,sport:meta.sport});
+    await this.profitObservationWriter.idle(id);
+    return this.profitLearningState(id);
   }
 
-  async markProfitExit(entry,{realizedNetCents=null,exitVwapCents=null,closedAtMs=null,closeReason=null}={}){
+  runProfitLifecycle(entry,operation){
+    const id=String(entry?.id||'');if(!id)return Promise.resolve(null);
+    const previous=this.profitLifecyclePending.get(id);
+    const run=(previous?previous.catch(()=>{}):Promise.resolve()).then(async()=>{
+      try{
+      if(this.completedProfitIds.has(id))return this.profitLearningState(id);
+      if(!this.profitStates.has(id)||!this.profitLastPersistMs.has(id)
+        ||this.profitLifecycleNeedsRefresh.has(id)||this.profitObservationErrors.has(id)){
+        if(await this.restoreProfitLifecycleOwnership(entry))return this.profitLearningState(id);
+        this.profitLifecycleNeedsRefresh.delete(id);
+      }
+      if(!await this.flushProfitObservation(id,0))throw new Error('profit_observation_persistence_unconfirmed');
+      this.profitLifecycleRevision.set(id,n(this.profitLifecycleRevision.get(id))+1);
+      return await operation();
+      }catch(error){
+        if(this.profitStates.has(id)||this.profitObservationDirty.has(id))this.profitLifecycleNeedsRefresh.add(id);
+        throw error;
+      }
+    });
+    this.profitLifecyclePending.set(id,run);
+    return run.finally(()=>{
+      if(this.profitLifecyclePending.get(id)===run)this.profitLifecyclePending.delete(id);
+      if(this.completedProfitIds.has(id))this.profitLifecycleRevision.delete(id);
+    });
+  }
+
+  markProfitExit(entry,options={}){return this.runProfitLifecycle(entry,()=>this._markProfitExit(entry,options));}
+
+  async _markProfitExit(entry,{realizedNetCents=null,exitVwapCents=null,closedAtMs=null,closeReason=null}={}){
     const id=String(entry?.id||'');if(!id)return null;
     const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return null;
-    const prior=this.profitStates.get(id)||initialProfitLearningState(entry,meta.sport,Date.now());
+    const prior=this.profitStates.get(id)||this.createProfitLearningState(entry,meta.sport,Date.now());
     const state={...prior,phase:'POST_EXIT_TRACKING',actualRealizedNetCents:realizedNetCents==null?n(entry.pnlCents):n(realizedNetCents),actualExitVwapCents:exitVwapCents==null?(entry.exitPriceCents==null?null:n(entry.exitPriceCents)):n(exitVwapCents),actualExitAtMs:n(closedAtMs,entry.closedAtMs||Date.now()),closeReason:String(closeReason||entry.closeReason||''),trackingComplete:false,lastObservedAtMs:Date.now()};
     this.profitStates.set(id,state);meta.closedAtMs=state.actualExitAtMs;this.profitMeta.set(id,meta);
-    await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true});
+    if(!await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true})){
+      if(await this.restoreProfitLifecycleOwnership(entry))return this.profitLearningState(id);
+      throw new Error('profit_exit_persistence_unconfirmed');
+    }
     return structuredClone(state);
   }
 
-  async observeProfitPostExit(entry,{executableBidCents=null,executableNetCents=null,observedAtMs=Date.now(),finalResult=null,terminalNetCents=null}={}){
+  observeProfitPostExit(entry,options={}){return this.runProfitLifecycle(entry,()=>this._observeProfitPostExit(entry,options));}
+
+  async _observeProfitPostExit(entry,{executableBidCents=null,executableNetCents=null,observedAtMs=Date.now(),finalResult=null,terminalNetCents=null}={}){
     const id=String(entry?.id||'');if(!id)return null;
     const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return null;
-    const prior=this.profitStates.get(id)||initialProfitLearningState(entry,meta.sport,Date.now());
+    const prior=this.profitStates.get(id)||this.createProfitLearningState(entry,meta.sport,Date.now());
     const state={...prior,phase:'POST_EXIT_TRACKING',lastObservedAtMs:observedAtMs};
     if(Number.isFinite(Number(executableNetCents))&&Number.isFinite(Number(executableBidCents))){
       if(state.postExitMaxExecutableNetCents==null||n(executableNetCents)>n(state.postExitMaxExecutableNetCents)+1e-9){state.postExitMaxExecutableNetCents=n(executableNetCents);state.postExitMaxExecutableBidCents=n(executableBidCents);state.postExitMaxAtMs=observedAtMs;}
@@ -1656,17 +1887,24 @@ export class LearningEngine {
     }
     if(finalResult!=null)state.finalResult=String(finalResult||'').toLowerCase()||null;
     if(terminalNetCents!=null&&Number.isFinite(Number(terminalNetCents)))state.terminalNetCents=n(terminalNetCents);
-    this.profitStates.set(id,state);await this.persistProfitLearning(entry,state,{force:Boolean(finalResult)});return structuredClone(state);
+    this.profitStates.set(id,state);const persisted=await this.persistProfitLearning(entry,state,{force:Boolean(finalResult)});
+    if(finalResult&&!persisted){
+      if(await this.restoreProfitLifecycleOwnership(entry))return this.profitLearningState(id);
+      throw new Error('profit_terminal_persistence_unconfirmed');
+    }
+    return structuredClone(state);
   }
 
-  async finalizeProfitLearning(entry,{finalResult=null,terminalNetCents=null,reason='research_window_complete'}={}){
+  finalizeProfitLearning(entry,options={}){return this.runProfitLifecycle(entry,()=>this._finalizeProfitLearning(entry,options));}
+
+  async _finalizeProfitLearning(entry,{finalResult=null,terminalNetCents=null,reason='research_window_complete'}={}){
     const id=String(entry?.id||'');if(!id)return null;
     const meta=await this.ensureProfitLearningMeta(entry);if(!meta)return null;
-    const prior=this.profitStates.get(id)||initialProfitLearningState(entry,meta.sport,Date.now());
+    const prior=this.profitStates.get(id)||this.createProfitLearningState(entry,meta.sport,Date.now());
     const state={...prior,phase:'COMPLETE',trackingComplete:true,completedAtMs:Date.now(),completionReason:reason,finalResult:finalResult==null?prior.finalResult:(String(finalResult||'').toLowerCase()||null),terminalNetCents:terminalNetCents==null?prior.terminalNetCents:n(terminalNetCents)};
     if(state.actualRealizedNetCents==null)state.actualRealizedNetCents=n(entry.pnlCents);
     if(state.actualExitAtMs==null)state.actualExitAtMs=n(entry.closedAtMs,Date.now());
-    if(Number.isFinite(Number(state.terminalNetCents))){
+    if(this.profitLearningDetails&&Number.isFinite(Number(state.terminalNetCents))){
       const terminal=n(state.terminalNetCents),shadow={...(state.shadow||{})};
       for(const [name,priorShadow] of Object.entries(shadow)){
         const harvestedFraction=Math.max(0,Math.min(1,n(priorShadow?.harvestedFraction)));
@@ -1677,10 +1915,12 @@ export class LearningEngine {
     }
     // Publish completion only after its durable write. Failed finalization
     // remains retryable, rather than leaving a falsely COMPLETE resident state.
-    await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true,trackingComplete:true});
-    this.profitObservationEntries.delete(id);this.profitObservationRevision.delete(id);this.profitObservationDirty.delete(id);this.profitObservationForce.delete(id);this.profitObservationErrors.delete(id);
+    if(!await this.persistProfitLearning({...entry,closedAtMs:state.actualExitAtMs},state,{force:true,trackingComplete:true})){
+      if(await this.restoreProfitLifecycleOwnership(entry))return this.profitLearningState(id);
+      throw new Error('profit_finalization_persistence_unconfirmed');
+    }
     rememberBounded(this.completedProfitIds,id,LEARNING_RUNTIME_LIMITS.completedProfitIds);
-    this.profitStates.delete(id);this.profitMeta.delete(id);this.profitLastPersistMs.delete(id);
+    this.releaseProfitLearningRuntime(id);
     // Aggregate from durable episodes. A burst of closes must NOT attach one
     // waiter/entry snapshot per close to an indefinitely busy global rebuild.
     this.requestProfitProfileRebuild();
@@ -1716,7 +1956,9 @@ export class LearningEngine {
     this.profitRebuildPromise=run;return run;
   }
 
-  async _rebuildProfitProfiles(){
+  _rebuildProfitProfiles(options={}){return this.runResearchAggregation('profit',()=>this._rebuildProfitProfilesFromRows(),{...options,skippedValue:[]});}
+
+  async _rebuildProfitProfilesFromRows(){
     if(typeof this.db.profitEpisodes!=='function'||typeof this.db.upsertProfitProfile!=='function')return [];
     const rows=typeof this.db.profitProfileEpisodes==='function'
       ?await this.db.profitProfileEpisodes(this.systemName,{limit:10000})

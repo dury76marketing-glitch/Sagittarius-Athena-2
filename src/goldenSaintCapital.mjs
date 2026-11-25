@@ -11,6 +11,17 @@ import {calculateAuroraSnapshotFromFeeModel,kalshiGeneralTakerFeeEstimateCents,
 
 const deny=(reason)=>({ok:false,reason});
 const integer=(v)=>Number.isSafeInteger(v)&&v>0;
+export function goldenSaintQuoteRefusal(quote,card,now=Date.now()){
+  const bid=Number(quote?.yesBid),ask=Number(quote?.yesAsk);
+  const at=Number(quote?.quoteAtMs||quote?.updatedAtMs||0);
+  let subreason=null;
+  if(!Number.isFinite(bid)||!Number.isFinite(ask)||!(bid>0&&bid<=ask&&ask<100))subreason='invalid_bid_ask';
+  else if(ask-bid>card.maxSpreadCents+1e-9)subreason='actual_spread_exceeds_card';
+  else if(!Number.isFinite(at)||at<=0)subreason='invalid_signal_timestamp';
+  else if(at>now+2000)subreason='future_signal_timestamp';
+  else if(now-at>5000)subreason='signal_quote_age_exceeded';
+  return subreason?{ok:false,reason:'r17_fresh_quote_spread_invalid',subreason}:null;
+}
 export function createGoldenSaintCapitalEntry({watch,card,settings,quote,execution,seat,clientOrderId=null,now=Date.now()}={}){
   const scope=watch?.scope;
   if(!scope||!watch||!saintRole(watch.saint)||watch.version!==R17_VERSION||!validateGoldenSaintCard(card).ok
@@ -29,9 +40,8 @@ export function createGoldenSaintCapitalEntry({watch,card,settings,quote,executi
     ||quote.bookInvalid===true||executionMarketFamilyExclusion(quote.ticker,settings,{concept:r17InternalConcept(watch.saint)}).blocked)
     return deny('r17_market_lifecycle_or_family_invalid');
   const bid=Number(quote.yesBid),ask=Number(quote.yesAsk),at=Number(quote.quoteAtMs||quote.updatedAtMs||0);
-  if(!Number.isFinite(bid)||!Number.isFinite(ask)||!(bid>0&&bid<=ask&&ask<100)
-    ||ask-bid>card.maxSpreadCents+1e-9||!Number.isFinite(at)||at<=0||at>now+2000||now-at>5000)
-    return deny('r17_fresh_quote_spread_invalid');
+  const quoteRefusal=goldenSaintQuoteRefusal(quote,card,now);
+  if(quoteRefusal)return quoteRefusal;
   // Re-evaluate the exact persisted card-specific rebound/ticks/original-entry
   // condition at the entry constructor, not only at the caller's watch loop.
   // This was missing in R17: an unqualified Leo Rebound=7 watch could be

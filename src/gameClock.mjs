@@ -938,6 +938,37 @@ export class GameClockAuthority {
     return promise;
   }
 
+  // Scheduling evidence only: never a start proof or entry permission. Match
+  // the resolver's exact event/series key and decline reuse on every uncertain
+  // path, including a scan-only miss that can escalate immediately for entry.
+  nextMilestoneDiscoveryAtMs(eventTicker,{quotes=[],now=this.now()}={}){
+    const event=String(eventTicker||'');
+    if(!event||typeof this.kalshi?.getMilestonesForEvent!=='function')return 0;
+    if(quotes.some(q=>String(q?.eventTicker||q?.ticker||'')!==event))return 0;
+    const seriesValues=[...new Set(quotes.map(researchSeriesForMarket).filter(Boolean))];
+    const series=seriesValues.length===1?seriesValues[0]:'';
+    const key=`${event}|${series}`,record=this.milestoneCache.get(key),value=record?.value;
+    const at=Number(record?.atMs),checkAt=Number(now),age=checkAt-at;
+    if(!Number.isFinite(checkAt)||!Number.isFinite(at)||at<=0||age<0
+      ||age>=GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs
+      ||this.milestonePromises.has(key)||value?.milestone
+      ||value?.reason!=='no_atomic_event_milestone'
+      ||value?.directReason!=='no_atomic_event_milestone'
+      ||value?.discoverySource!=='related_event_ticker'
+      ||value?.error||value?.directError||value?.seriesError)return 0;
+    if(series&&typeof this.kalshi?.getMilestonesForSeries==='function'){
+      const seriesRecord=this.seriesMilestoneCache.get(series);
+      const seriesAge=checkAt-Number(seriesRecord?.observedAtMs);
+      if(!seriesRecord||seriesRecord.error||!Number.isFinite(seriesAge)||seriesAge<0
+        ||seriesAge>GAME_CLOCK_AUTHORITY.seriesMilestoneCacheMs
+        ||this.seriesMilestonePromises.has(series))return 0;
+      // Newly cached positive or ambiguous series evidence needs normal
+      // resolution rather than inheriting an older event-negative deadline.
+      if(selectEventMilestone(seriesRecord.rows||[],event).reason!=='no_atomic_event_milestone')return 0;
+    }
+    return at+GAME_CLOCK_AUTHORITY.milestoneForceRefreshMinIntervalMs;
+  }
+
   async milestoneForEvent(eventTicker, { seriesTicker = '', forceFresh = false, directOnSeriesMiss = false, clockPriority=null } = {}) {
     const event = String(eventTicker || '');
     const series = String(seriesTicker || '');

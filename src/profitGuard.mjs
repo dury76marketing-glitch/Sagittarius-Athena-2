@@ -486,6 +486,7 @@ export class ProfitGuard {
     this.postExitPersistenceTotalQueued = 0;
     this.postExitPersistenceTotalCoalesced = 0;
     this.postExitPersistenceTotalCompleted = 0;
+    this.postExitPersistenceTotalRefused = 0;
     this.postExitPersistenceTotalFailed = 0;
     this.postExitPersistenceTotalDropped = 0;
     this.postExitPersistenceMaxObservedPending = 0;
@@ -549,9 +550,20 @@ export class ProfitGuard {
     this.postExitPersistencePending.delete(id);
     this.postExitPersistenceActive=true;
     this.postExitPersistenceActiveId=id;
-    const write=()=>this.db.updateEntry(id,patch);
+    // Research may update its own projection, never replace concurrently
+    // reconciled broker ownership/receipt evidence in post_exit_state.
+    const write=()=>typeof this.db.updatePostExitResearch==='function'
+      ?this.db.updatePostExitResearch(id,patch):this.db.updateEntry(id,patch);
     const work=typeof this.db?.runLowPriorityPersistence==='function'?()=>this.db.runLowPriorityPersistence(write):write;
-    Promise.resolve().then(work).then(()=>{
+    Promise.resolve().then(work).then((result)=>{
+      if(result?.persisted===false){
+        this.postExitPersistenceTotalRefused+=1;
+        // A broker correction changes the basis of counterfactual research.
+        // Revisit the fresh durable row on the next research sweep; repeatedly
+        // retrying a stale snapshot cannot make it valid.
+        if(['economics_changed','research_superseded'].includes(result.reason))this.postExitRuntimeState.delete(id);
+        return;
+      }
       this.postExitPersistenceTotalCompleted+=1;
     }).catch((error)=>{
       this.postExitPersistenceTotalFailed+=1;
@@ -598,7 +610,7 @@ export class ProfitGuard {
       profitLearningQueues:this.profitLearningQueues.size,
       profitLearningTimestamps:this.profitLearningQueuedAtMs.size,
       postExitResearchStates:this.postExitRuntimeState.size,
-      postExitPersistence:{version:POST_EXIT_RESEARCH.version,maxPending:POST_EXIT_RESEARCH.maximumPendingEntries,active:this.postExitPersistenceActive?1:0,activeEntryId:this.postExitPersistenceActiveId,pending:this.postExitPersistencePending.size,totalQueued:this.postExitPersistenceTotalQueued,totalCoalesced:this.postExitPersistenceTotalCoalesced,totalCompleted:this.postExitPersistenceTotalCompleted,totalFailed:this.postExitPersistenceTotalFailed,totalDropped:this.postExitPersistenceTotalDropped,maxObservedPending:this.postExitPersistenceMaxObservedPending},
+      postExitPersistence:{version:POST_EXIT_RESEARCH.version,maxPending:POST_EXIT_RESEARCH.maximumPendingEntries,active:this.postExitPersistenceActive?1:0,activeEntryId:this.postExitPersistenceActiveId,pending:this.postExitPersistencePending.size,totalQueued:this.postExitPersistenceTotalQueued,totalCoalesced:this.postExitPersistenceTotalCoalesced,totalCompleted:this.postExitPersistenceTotalCompleted,totalRefused:this.postExitPersistenceTotalRefused,totalFailed:this.postExitPersistenceTotalFailed,totalDropped:this.postExitPersistenceTotalDropped,maxObservedPending:this.postExitPersistenceMaxObservedPending},
     };
   }
 
@@ -2138,6 +2150,13 @@ export class ProfitGuard {
     return this.queueProfitLearningTask(compact,'observation',()=>this.learning.observeProfitOpportunity(compact,{...observation,observedAtMs}));
   }
 
+  profitLearningStatus(entryId) {
+    // Protection asks only whether this real book observation is new. Avoid
+    // cloning the episode's research state on every funded-position wake.
+    if(typeof this.learning?.profitLearningStatus==='function')return this.learning.profitLearningStatus(entryId);
+    return typeof this.learning?.profitLearningState==='function'?this.learning.profitLearningState(entryId):null;
+  }
+
   async flushProfitLearningEntry(entryId, timeoutMs = 1000) {
     const pending=this.profitLearningQueues.get(String(entryId||''));
     if(!pending)return typeof this.learning?.flushProfitObservation==='function'?this.learning.flushProfitObservation(entryId,timeoutMs):true;
@@ -2213,7 +2232,7 @@ export class ProfitGuard {
 
     const executableBidCents=n(exec.avgCents);
     const executableNetCents=this.aggregateExecutableNetCents(entry,count,executableBidCents,settings);
-    const pliState=typeof this.learning?.profitLearningState==='function'?this.learning.profitLearningState(entry.id):null;
+    const pliState=this.profitLearningStatus(entry.id);
     if(observedBookMs>Math.max(n(pliState?.lastObservedAtMs),n(this.profitLearningQueuedAtMs.get(entry.id)))){
       this.queueProfitLearningObservation(entry,{fullExecutable:true,executableBidCents,executableNetCents,observedAtMs:observedBookMs});
     }
@@ -2316,7 +2335,7 @@ export class ProfitGuard {
     const executableBidCents = n(exec.avgCents);
     const executableNetCents = this.aggregateExecutableNetCents(entry, count, executableBidCents, settings);
     const freshObservation = observedBookMs > n(state?.lastObservedBookMs);
-    const pliState = typeof this.learning?.profitLearningState === 'function' ? this.learning.profitLearningState(entry.id) : null;
+    const pliState = this.profitLearningStatus(entry.id);
     if (observedBookMs > Math.max(n(pliState?.lastObservedAtMs),n(this.profitLearningQueuedAtMs.get(entry.id)))) {
       this.queueProfitLearningObservation(entry, {
         fullExecutable:true, executableBidCents, executableNetCents, observedAtMs:observedBookMs,
@@ -2502,7 +2521,7 @@ export class ProfitGuard {
     const executableBidCents = n(exec.avgCents);
     const executableNetCents = this.aggregateExecutableNetCents(entry, count, executableBidCents, settings);
     const freshObservation = observedBookMs > n(state?.lastObservedBookMs);
-    const pliState = typeof this.learning?.profitLearningState === 'function' ? this.learning.profitLearningState(entry.id) : null;
+    const pliState = this.profitLearningStatus(entry.id);
     if (observedBookMs > Math.max(n(pliState?.lastObservedAtMs), n(this.profitLearningQueuedAtMs.get(entry.id)))) {
       this.queueProfitLearningObservation(entry, {
         fullExecutable:true, executableBidCents, executableNetCents, observedAtMs:observedBookMs,
@@ -5768,9 +5787,11 @@ export class ProfitGuard {
     // simulation cohort. Continue the bounded research window across a Reset
     // Simulation archive boundary so resetting statistics never amputates the
     // economic path that was already being observed for a just-closed trade.
-    const closed = typeof this.db?.recentClosedForResearch==='function'
-      ? await this.db.recentClosedForResearch(s.systemName,researchCut-POST_EXIT_RESEARCH.completionGraceMs,POST_EXIT_RESEARCH.maximumRowsPerSweep)
-      : await this.db.recentClosed(s.systemName, POST_EXIT_RESEARCH.maximumRowsPerSweep);
+    const closed = typeof this.db?.recentClosedForUnfinishedResearch==='function'
+      ? await this.db.recentClosedForUnfinishedResearch(s.systemName,researchCut-POST_EXIT_RESEARCH.completionGraceMs,POST_EXIT_RESEARCH.maximumRowsPerSweep)
+      : typeof this.db?.recentClosedForResearch==='function'
+        ? await this.db.recentClosedForResearch(s.systemName,researchCut-POST_EXIT_RESEARCH.completionGraceMs,POST_EXIT_RESEARCH.maximumRowsPerSweep)
+        : await this.db.recentClosed(s.systemName, POST_EXIT_RESEARCH.maximumRowsPerSweep);
     this.pruneProfitLearningTimestamps(closed);
     const keepIds=new Set((closed||[]).map(e=>String(e?.id||'')).filter(Boolean));
     for(const id of [...this.postExitRuntimeState.keys()])if(!keepIds.has(String(id)))this.postExitRuntimeState.delete(id);
@@ -5797,6 +5818,9 @@ export class ProfitGuard {
 
     for (const e of closed) {
       if (!e.closedAtMs) continue;
+      const expectedEconomics={closedAtMs:n(e.closedAtMs),pnlCents:n(e.pnlCents),count:n(e.count),
+        entryPriceCents:n(e.entryPriceCents),entryFeeCents:n(e.entryFeeCents),exitFeeCents:n(e.exitFeeCents),
+        exitPriceCents:e.exitPriceCents==null?null:n(e.exitPriceCents)};
       const isHunter=!FEEDER_CONCEPTS.has(e.conceptName);
       const isHardStop = e.closeReason === 'hard_stop_loss';
       const profitLearningTrade = this.isProfitLearningTrade(e);
@@ -5804,9 +5828,7 @@ export class ProfitGuard {
         const learningDrained = await this.flushProfitLearningEntry(e.id, 250).catch(()=>false);
         if (!learningDrained) continue;
       }
-      const pliState = profitLearningTrade && typeof this.learning?.profitLearningState === 'function'
-        ? this.learning.profitLearningState(e.id)
-        : null;
+      const pliState = profitLearningTrade ? this.profitLearningStatus(e.id) : null;
       const pliComplete = Boolean(pliState?.trackingComplete);
       if(pliComplete)this.profitLearningQueuedAtMs.delete(String(e.id));
       const needsPliResearch = profitLearningTrade && !pliComplete && e.closedAtMs >= researchCut;
@@ -5833,7 +5855,7 @@ export class ProfitGuard {
         if(needsPostExitCompletion){
           const state={...priorPost,version:POST_EXIT_RESEARCH.version,policyRevision:POST_EXIT_RESEARCH.policyRevision,exitPriceCents:n(e.exitPriceCents),actualRealizedPnlCents:n(e.pnlCents),researchComplete:true,completionReason:'research_window_complete',completedAtMs:now,lastPersistedAtMs:now,economicBasis:'full_position_executable_after_exit'};
           this.postExitRuntimeState.set(String(e.id),state);
-          this.enqueuePostExitPersistence(e.id,{postExitState:state,updatedAtMs:now});
+          this.enqueuePostExitPersistence(e.id,{postExitState:state,updatedAtMs:now,expectedEconomics});
         }
         continue;
       }
@@ -5887,7 +5909,7 @@ export class ProfitGuard {
         const first=priorPost?.version!==POST_EXIT_RESEARCH.version;
         if(first||newExtreme||terminalChanged||(due&&(changedDisplay||changedExecutable))){
           state.lastPersistedAtMs=now;
-          this.enqueuePostExitPersistence(e.id,{currentPriceCents:displayPrice==null?e.currentPriceCents:displayPrice,postExitState:state,updatedAtMs:now});
+          this.enqueuePostExitPersistence(e.id,{currentPriceCents:displayPrice==null?e.currentPriceCents:displayPrice,postExitState:state,updatedAtMs:now,expectedEconomics});
         }
         this.postExitRuntimeState.set(String(e.id),state);
       }

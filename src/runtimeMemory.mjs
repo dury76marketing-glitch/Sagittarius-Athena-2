@@ -6,8 +6,8 @@ export const MEMORY_REPAIR_VERSION='OOM1-BOUNDED-OWNERSHIP-2026-10-23';
 // One active operation and at most one replacement per key. Callers reduce all
 // observations BEFORE enqueueing; this coalesces writes, never price evidence.
 export class LatestStateWriter {
-  constructor({concurrency=2,onError=null}={}){
-    this.concurrency=Math.max(1,Math.floor(concurrency));this.onError=onError;
+  constructor({concurrency=2,onError=null,onSettled=null}={}){
+    this.concurrency=Math.max(1,Math.floor(concurrency));this.onError=onError;this.onSettled=onSettled;
     this.pending=new Map();this.active=new Map();this.waiters=new Map();
     this.stats={enqueued:0,coalesced:0,completed:0,failed:0,highWaterKeys:0,maxActive:0};
   }
@@ -26,8 +26,11 @@ export class LatestStateWriter {
         this.stats.failed++;try{this.onError?.(error,key);}catch{}
       }).finally(()=>{
         this.active.delete(key);
-        if(!this.pending.has(key)){this.waiters.get(key)?.resolve();this.waiters.delete(key);}
+        // A latest-state owner may discover a newer dirty revision after the
+        // write settles. Requeue it before declaring this key durably idle.
+        try{this.onSettled?.(key);}catch{}
         this.pump();
+        if(!this.pending.has(key)&&!this.active.has(key)){this.waiters.get(key)?.resolve();this.waiters.delete(key);}
       });
       this.active.set(key,run);this.stats.maxActive=Math.max(this.stats.maxActive,this.active.size);
     }
